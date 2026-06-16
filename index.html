@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#C4922A">
+  <title>Clinix360</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="favicon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+</head>
+<body>
+
+<!-- ============================================================
+     SCREEN: HOME — Branch Selector
+     ============================================================ -->
+<div id="screen-home" class="screen active">
+  <div class="home-wrap">
+    <div class="logo-area">
+      <img src="dskin-logo.png" class="logo-img" alt="DSkin Logo">
+      <h1 class="app-title">Clinix360</h1>
+      <p class="app-sub">Select your branch to begin</p>
+    </div>
+    <div class="branch-grid" id="branch-grid">
+      <div class="branch-loading">
+        <div class="loading-wrap"><div class="spinner"></div><span class="loading-text">Loading branches…</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: PIN Entry
+     ============================================================ -->
+<div id="screen-pin" class="screen">
+  <div class="pin-screen-wrap">
+    <button class="back-btn" id="btn-pin-back">‹ Back</button>
+    <div class="pin-branch-badge" id="pin-branch-name">Branch</div>
+    <p class="pin-label">Enter 4-digit PIN</p>
+    <div class="pin-dots-wrap">
+      <div class="pin-dots" id="pin-dots">
+        <span class="pin-dot" id="d0"></span>
+        <span class="pin-dot" id="d1"></span>
+        <span class="pin-dot" id="d2"></span>
+        <span class="pin-dot" id="d3"></span>
+      </div>
+    </div>
+    <div class="pin-error" id="pin-error"></div>
+    <div class="numpad">
+      <button class="num-btn" data-val="1">1</button>
+      <button class="num-btn" data-val="2">2</button>
+      <button class="num-btn" data-val="3">3</button>
+      <button class="num-btn" data-val="4">4</button>
+      <button class="num-btn" data-val="5">5</button>
+      <button class="num-btn" data-val="6">6</button>
+      <button class="num-btn" data-val="7">7</button>
+      <button class="num-btn" data-val="8">8</button>
+      <button class="num-btn" data-val="9">9</button>
+      <button class="num-btn num-clear" id="btn-pin-clear">✕</button>
+      <button class="num-btn" data-val="0">0</button>
+      <button class="num-btn num-del" id="btn-pin-del">⌫</button>
+    </div>
+    <button class="forgot-pin-btn" id="btn-forgot-pin">Forgot PIN?</button>
+  </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: Dashboard
+     ============================================================ -->
+<div id="screen-dashboard" class="screen">
+ <div class="admin-layout">
+
+  <!-- ── Branch Sidebar ── -->
+  <aside class="admin-sidebar">
+    <div class="sidebar-brand">
+      <img src="dskin-logo.png" alt="Clinix360" class="sidebar-logo-img">
+      <div>
+        <div class="sidebar-brand-name">Clinix360</div>
+        <div class="sidebar-brand-sub" id="branch-sidebar-sub">Branch</div>
+      </div>
+    </div>
+    <nav class="sidebar-nav">
+      <button class="sidebar-item active" data-btab="cashup">
+        <span class="sidebar-icon">📋</span>
+        <span class="sidebar-label">Daily Cashup</span>
+      </button>
+      <button class="sidebar-item" data-btab="emails">
+        <span class="sidebar-icon">✉️</span>
+        <span class="sidebar-label">Emails</span>
+      </button>
+      <button class="sidebar-item" data-btab="leads">
+        <span class="sidebar-icon">📈</span>
+        <span class="sidebar-label">Leads</span>
+      </button>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="sidebar-logout" id="btn-branch-logout"><span>←</span> Logout</button>
+    </div>
+  </aside>
+
+  <!-- ── Branch Main content ── -->
+  <main class="admin-main">
+
+   <!-- TAB: Daily Cashup -->
+   <div class="branch-tab active" id="branch-tab-cashup">
+  <div class="dashboard-wrap">
+    <div class="date-nav" id="dash-date-nav">
+      <button class="date-nav-arrow" id="btn-date-prev" title="Previous day">‹</button>
+      <div class="date-nav-center" id="dash-date-badge">
+        <span id="dash-date-label">Loading…</span>
+        <input type="date" id="dash-date-picker" tabindex="-1">
+      </div>
+      <button class="date-nav-arrow" id="btn-date-next" title="Next day">›</button>
+    </div>
+
+    <!-- Yesterday closing warning (shown only when yesterday is incomplete) -->
+    <div class="yesterday-warning" id="yesterday-warning" style="display:none">
+      <div class="yesterday-warning-left">
+        <span class="yesterday-warning-icon">⚠️</span>
+        <div>
+          <div class="yesterday-warning-title" id="yesterday-warning-title">Yesterday's closing is pending</div>
+          <div class="yesterday-warning-sub">This may affect today's opening balance</div>
+        </div>
+      </div>
+      <button class="yesterday-warning-btn" id="btn-fix-yesterday">Complete Now</button>
+    </div>
+
+    <!-- Today cashup status card -->
+    <div class="cashup-status-card" id="cashup-status-card">
+      <div class="loading-wrap" style="padding:16px"><div class="spinner"></div></div>
+    </div>
+
+    <div class="dash-actions-row">
+      <button class="primary-btn full-width" id="btn-open-cashup">
+        📋 Enter Today's Cashup
+      </button>
+    </div>
+
+    <!-- Stats grid -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">This Week</div>
+        <div class="stat-value" id="stat-week-val">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Last Week</div>
+        <div class="stat-value" id="stat-lweek-val">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">This Month</div>
+        <div class="stat-value" id="stat-month-val">—</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Last Month</div>
+        <div class="stat-value" id="stat-lmonth-val">—</div>
+      </div>
+    </div>
+  </div>
+   </div><!-- /branch-tab-cashup -->
+
+   <!-- TAB: Emails -->
+   <div class="branch-tab" id="branch-tab-emails">
+     <div class="coming-soon">
+       <div class="coming-soon-icon">✉️</div>
+       <div class="coming-soon-title">Emails</div>
+       <div class="coming-soon-sub">Coming soon</div>
+     </div>
+   </div>
+
+   <!-- TAB: Leads -->
+   <div class="branch-tab" id="branch-tab-leads">
+     <div class="coming-soon">
+       <div class="coming-soon-icon">📈</div>
+       <div class="coming-soon-title">Leads</div>
+       <div class="coming-soon-sub">Coming soon</div>
+     </div>
+   </div>
+
+  </main>
+
+  <!-- ── Branch mobile bottom nav ── -->
+  <nav class="admin-bottom-nav">
+    <button class="bottom-nav-item active" data-btab="cashup"><span>📋</span><span>Cashup</span></button>
+    <button class="bottom-nav-item" data-btab="emails"><span>✉️</span><span>Emails</span></button>
+    <button class="bottom-nav-item" data-btab="leads"><span>📈</span><span>Leads</span></button>
+    <button class="bottom-nav-item" id="btn-branch-logout-mobile"><span>←</span><span>Logout</span></button>
+  </nav>
+
+ </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: Cashup Form
+     ============================================================ -->
+<div id="screen-cashup" class="screen">
+  <div class="screen-header">
+    <button class="back-btn" id="btn-cashup-back">‹</button>
+    <div class="screen-title" id="cashup-form-title">Daily Cashup</div>
+    <div style="width:40px"></div>
+  </div>
+
+  <!-- Prominent date hero -->
+  <div class="cashup-date-hero-wrap">
+    <div class="cashup-date-hero" id="cashup-form-date"></div>
+    <div class="cashup-live-time" id="cashup-live-time"></div>
+    <button id="btn-feedback" class="feedback-btn" onclick="openFeedbackModal()">💬 Leave Feedback</button>
+  </div>
+
+  <div id="cashup-view-banner" class="view-only-banner" style="display:none">
+    👁 View only — past dates cannot be edited
+  </div>
+  <div class="cashup-form-wrap" id="cashup-form-wrap">
+
+    <!-- Section: Sales Entries -->
+    <div class="section-card section-sales">
+      <div class="section-header">
+        <span class="section-icon">🧾</span>
+        <span class="section-title">Sales Entries</span>
+        <span class="section-total" id="entries-total">₹0</span>
+      </div>
+      <div class="entries-table-wrap">
+        <div class="entries-head">
+          <span>Product / Service</span>
+          <span>Name</span>
+          <span>Amount</span>
+          <span>Type</span>
+          <span>Staff</span>
+          <span></span>
+        </div>
+        <div id="entries-list"></div>
+      </div>
+      <button class="add-row-btn" id="btn-add-entry">+ Add Entry</button>
+    </div>
+
+    <!-- Section: Daily Summary -->
+    <div class="section-card section-summary">
+      <div class="section-header">
+        <span class="section-icon">📊</span>
+        <span class="section-title">Daily Summary</span>
+      </div>
+      <div class="summary-grid">
+        <div class="summary-row">
+          <label>Opening Balance <small style="color:#9ca3af;font-weight:400">(prev. closing)</small></label>
+          <div class="summary-value" id="s-opening-display">₹0.00</div>
+        </div>
+        <div class="summary-row summary-auto">
+          <label>Add Total Sale</label>
+          <div class="summary-value" id="s-total-sale">₹0.00</div>
+        </div>
+        <div class="summary-row summary-auto summary-highlight">
+          <label>Balance</label>
+          <div class="summary-value" id="s-balance-1">₹0.00</div>
+        </div>
+        <div class="summary-row">
+          <label>Less Scan <small style="color:#9ca3af;font-weight:400">(auto)</small></label>
+          <div class="summary-value" id="s-less-scan">₹0.00</div>
+        </div>
+        <div class="summary-row summary-auto summary-highlight">
+          <label>CASH Balance</label>
+          <div class="summary-value" id="s-cash-balance">₹0.00</div>
+        </div>
+        <div class="summary-row">
+          <label>Less Cash Handover</label>
+          <div class="summary-input-wrap">
+            <span class="currency-prefix">₹</span>
+            <input type="number" id="s-less-handover" class="summary-input" placeholder="0" step="0.01" min="0">
+          </div>
+        </div>
+        <div class="summary-row summary-auto summary-highlight">
+          <label>Balance</label>
+          <div class="summary-value" id="s-balance-2">₹0.00</div>
+        </div>
+        <div class="summary-row summary-auto">
+          <label>Add Extra Cash</label>
+          <div class="summary-value" id="s-add-extra">₹0.00</div>
+        </div>
+        <div class="summary-row summary-auto">
+          <label>Less Expenses</label>
+          <div class="summary-value" id="s-less-exp">₹0.00</div>
+        </div>
+        <div class="summary-row summary-auto summary-highlight summary-closing">
+          <label>Closing Balance</label>
+          <div class="summary-value" id="s-closing">₹0.00</div>
+        </div>
+        <div class="summary-row">
+          <label>Actual Closing <small style="color:#9ca3af;font-weight:400">(count till)</small></label>
+          <div class="summary-input-wrap">
+            <span class="currency-prefix">₹</span>
+            <input type="number" id="s-actual-closing" class="summary-input" placeholder="Count…" step="0.01" min="0">
+          </div>
+        </div>
+        <div class="summary-row summary-auto" id="variance-row" style="display:none">
+          <label>Variance</label>
+          <div class="summary-value" id="s-variance">—</div>
+        </div>
+        <div class="summary-row">
+          <label>Notes</label>
+          <textarea id="s-notes" class="summary-input" rows="2" placeholder="Optional notes…"
+            style="height:auto;width:180px;resize:vertical;font-family:inherit"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Section: Extra Cash Added -->
+    <div class="section-card section-extras">
+      <div class="section-header">
+        <span class="section-icon">➕</span>
+        <span class="section-title">Extra Cash Added to Till</span>
+        <span class="section-total" id="extras-total">₹0</span>
+      </div>
+      <div id="extras-list"></div>
+      <button class="add-row-btn" id="btn-add-extra-row">+ Add Entry</button>
+    </div>
+
+    <!-- Section: Expenses -->
+    <div class="section-card section-expenses">
+      <div class="section-header">
+        <span class="section-icon">🧾</span>
+        <span class="section-title">Expenses</span>
+        <span class="section-total" id="expenses-total">₹0</span>
+      </div>
+      <div id="expenses-list"></div>
+      <button class="add-row-btn" id="btn-add-expense">+ Add Expense</button>
+    </div>
+
+    <!-- Submit -->
+    <div class="submit-section">
+      <div class="submit-btn-row">
+        <button class="secondary-btn submit-draft-btn" id="btn-save-draft">💾 Save Draft</button>
+        <button class="primary-btn submit-final-btn" id="btn-submit-final">✓ Submit Final</button>
+      </div>
+      <p class="submit-note" id="submit-note">Save draft anytime · Submit Final requires till count</p>
+    </div>
+
+  </div>
+</div>
+
+<!-- ============================================================
+     SCREEN: Admin Panel (PIN-based)
+     ============================================================ -->
+<div id="screen-admin-panel" class="screen">
+  <div class="admin-layout">
+
+    <!-- ── Sidebar ── -->
+    <aside class="admin-sidebar">
+      <div class="sidebar-brand">
+        <img src="dskin-logo.png" alt="DSkin" class="sidebar-logo-img">
+        <div>
+          <div class="sidebar-brand-name">DSkin</div>
+          <div class="sidebar-brand-sub">Admin</div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button class="sidebar-item active" data-tab="overview">
+          <span class="sidebar-icon">🏠</span>
+          <span class="sidebar-label">Overview</span>
+        </button>
+        <button class="sidebar-item" data-tab="reports">
+          <span class="sidebar-icon">📊</span>
+          <span class="sidebar-label">Reports</span>
+        </button>
+        <button class="sidebar-item" data-tab="notifications">
+          <span class="sidebar-icon">🔔</span>
+          <span class="sidebar-label">Notifications</span>
+          <span class="sidebar-badge" id="sidebar-notif-badge" style="display:none">0</span>
+        </button>
+        <button class="sidebar-item" data-tab="settings">
+          <span class="sidebar-icon">⚙️</span>
+          <span class="sidebar-label">Settings</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="sidebar-logout" id="btn-admin-panel-back">
+          <span>←</span> Exit Admin
+        </button>
+      </div>
+    </aside>
+
+    <!-- ── Main content ── -->
+    <main class="admin-main">
+
+      <!-- TAB: Overview -->
+      <div class="admin-tab active" id="admin-tab-overview">
+        <div class="admin-tab-header">Overview</div>
+
+        <!-- Branches -->
+        <div class="section-card">
+          <div class="section-header">
+            <span class="section-icon">🏢</span>
+            <span class="section-title">Branches</span>
+            <button class="icon-text-btn" id="btn-add-branch-admin">+ Add</button>
+          </div>
+          <div id="admin-branches-list">
+            <div class="loading-wrap"><div class="spinner"></div></div>
+          </div>
+        </div>
+
+        <!-- KPI filter bar -->
+        <div class="section-card">
+          <div class="section-header">
+            <span class="section-icon">📊</span>
+            <span class="section-title">Performance</span>
+          </div>
+
+          <!-- Filters row -->
+          <div class="ov-filters-row">
+            <div class="ov-filter-group">
+              <label class="ov-filter-label">Branch</label>
+              <div class="ov-multiselect" id="ov-branch-multiselect">
+                <button type="button" class="ov-multiselect-trigger" id="ov-branch-trigger">
+                  <span id="ov-branch-label">All Branches</span>
+                  <svg width="12" height="8" viewBox="0 0 12 8" fill="none"><path d="M1 1l5 5 5-5" stroke="#9ca3af" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </button>
+                <div class="ov-multiselect-dropdown" id="ov-branch-dropdown" style="display:none">
+                  <label class="ov-ms-option ov-ms-all">
+                    <input type="checkbox" id="ov-check-all" checked>
+                    <span>All Branches</span>
+                  </label>
+                  <div id="ov-branch-options"></div>
+                </div>
+              </div>
+            </div>
+            <div class="ov-filter-group">
+              <label class="ov-filter-label">Period</label>
+              <select id="ov-period-select" class="ov-select">
+                <option value="week" selected>This Week</option>
+                <option value="month">This Month</option>
+                <option value="lweek">Last Week</option>
+                <option value="lmonth">Last Month</option>
+                <option value="custom">Custom Range</option>
+              </select>
+            </div>
+          </div>
+          <div id="ov-custom-range" style="display:none;padding:4px 18px 8px">
+            <div class="reports-date-row">
+              <div class="reports-date-field">
+                <label>From</label>
+                <input type="date" id="ov-date-from" class="text-input" style="margin:0">
+              </div>
+              <div class="reports-date-field">
+                <label>To</label>
+                <input type="date" id="ov-date-to" class="text-input" style="margin:0">
+              </div>
+            </div>
+          </div>
+          <div class="reports-range-display" id="ov-range-display" style="padding:0 18px 4px"></div>
+
+          <!-- KPI cards -->
+          <div class="admin-kpi-grid" id="admin-kpi-grid">
+            <div class="loading-wrap" style="padding:20px;grid-column:1/-1"><div class="spinner"></div></div>
+          </div>
+        </div>
+
+        <!-- Date override (kept hidden, still functional for branch views) -->
+        <input type="hidden" id="admin-date-input-panel">
+        <div id="panel-override-status" style="display:none"></div>
+      </div>
+
+      <!-- TAB: Reports -->
+      <div class="admin-tab" id="admin-tab-reports">
+        <div class="admin-tab-header">Reports</div>
+
+        <div class="section-card">
+          <div class="section-header">
+            <span class="section-icon">📅</span>
+            <span class="section-title">Date Range</span>
+          </div>
+          <div class="reports-presets">
+            <button class="report-preset-btn active" data-preset="today">Today</button>
+            <button class="report-preset-btn" data-preset="week">This Week</button>
+            <button class="report-preset-btn" data-preset="month">This Month</button>
+            <button class="report-preset-btn" data-preset="lastmonth">Last Month</button>
+            <button class="report-preset-btn" data-preset="custom">Custom</button>
+          </div>
+          <div class="reports-date-inputs" id="reports-custom-range" style="display:none">
+            <div class="reports-date-row">
+              <div class="reports-date-field">
+                <label>From</label>
+                <input type="date" id="report-date-from" class="text-input" style="margin:0">
+              </div>
+              <div class="reports-date-field">
+                <label>To</label>
+                <input type="date" id="report-date-to" class="text-input" style="margin:0">
+              </div>
+            </div>
+          </div>
+          <div class="reports-range-display" id="reports-range-display"></div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-header">
+            <span class="section-icon">🏢</span>
+            <span class="section-title">Branch</span>
+          </div>
+          <div class="reports-presets" id="reports-branch-filter">
+            <button class="report-preset-btn active" data-branch="all">All Branches</button>
+          </div>
+        </div>
+
+
+        <button class="primary-btn" id="btn-run-report" style="width:100%;padding:14px;font-size:15px">
+          Run Report
+        </button>
+
+        <div id="reports-output">
+          <div class="reports-empty-state">
+            <div style="font-size:40px;margin-bottom:12px">📊</div>
+            <div style="font-weight:600;color:#374151;margin-bottom:6px">Select a report type</div>
+            <div style="font-size:13px;color:#9ca3af">Choose your date range and run a report</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: Notifications -->
+      <div class="admin-tab" id="admin-tab-notifications">
+        <div class="admin-tab-header">
+          Notifications
+          <span class="alert-badge" id="admin-alert-badge" style="display:none;margin-left:8px">0</span>
+        </div>
+        <div class="section-card" style="padding:0">
+          <div id="admin-alerts-list">
+            <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: Settings -->
+      <div class="admin-tab" id="admin-tab-settings">
+        <div class="admin-tab-header">Settings</div>
+
+        <!-- Automations -->
+        <div class="section-card settings-card collapsed">
+          <div class="section-header settings-head" style="justify-content:space-between">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="section-icon">⚡</span>
+              <span class="section-title">Automations</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px">
+              <button class="primary-btn" id="btn-add-automation" style="padding:6px 14px;font-size:13px">+ Add</button>
+              <span class="settings-chevron">▾</span>
+            </div>
+          </div>
+          <div class="settings-body">
+            <div id="automations-list" style="padding:0 0 4px">
+              <div class="loading-wrap" style="padding:20px"><div class="spinner"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Payment Modes -->
+        <div class="section-card settings-card collapsed">
+          <div class="section-header settings-head">
+            <span class="section-icon">💳</span>
+            <span class="section-title">Payment Modes</span>
+            <span class="settings-chevron">▾</span>
+          </div>
+          <div class="settings-body" style="padding:8px 18px 18px">
+            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">Payment modes staff can choose for each sales entry. Add or remove modes — changes apply to all future entries across every branch.</p>
+            <div id="payment-modes-list"></div>
+            <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
+              <input type="text" id="new-payment-mode-input" class="text-input" placeholder="New mode (e.g. Razorpay)" style="margin:0;flex:1">
+              <button class="primary-btn" id="btn-add-payment-mode" style="white-space:nowrap">+ Add</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Admin PIN -->
+        <div class="section-card settings-card collapsed">
+          <div class="section-header settings-head">
+            <span class="section-icon">🔑</span>
+            <span class="section-title">Change Admin PIN</span>
+            <span class="settings-chevron">▾</span>
+          </div>
+          <div class="settings-body" style="padding:14px 18px 18px">
+            <p style="font-size:13px;color:#6b7280;margin:0 0 14px">Update the 4-digit PIN used to access the Admin Panel.</p>
+            <div style="display:flex;gap:10px;align-items:center">
+              <input type="text" id="new-admin-pin-input" class="text-input" placeholder="New 4-digit PIN"
+                maxlength="4" pattern="[0-9]{4}" inputmode="numeric" style="margin:0;flex:1">
+              <button class="primary-btn" id="btn-save-admin-pin" style="white-space:nowrap">Save</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </main>
+
+    <!-- ── Mobile bottom nav ── -->
+    <nav class="admin-bottom-nav">
+      <button class="bottom-nav-item active" data-tab="overview">
+        <span>🏠</span><span>Overview</span>
+      </button>
+      <button class="bottom-nav-item" data-tab="reports">
+        <span>📊</span><span>Reports</span>
+      </button>
+      <button class="bottom-nav-item" data-tab="notifications">
+        <span>🔔</span><span>Notifs</span>
+        <span class="sidebar-badge" id="bottom-notif-badge" style="display:none">0</span>
+      </button>
+      <button class="bottom-nav-item" data-tab="settings">
+        <span>⚙️</span><span>Settings</span>
+      </button>
+      <button class="bottom-nav-item" id="btn-admin-panel-back-mobile">
+        <span>←</span><span>Exit</span>
+      </button>
+    </nav>
+
+  </div>
+</div>
+
+<!-- ============================================================
+     MODAL: Add / Edit Branch
+     ============================================================ -->
+<div id="modal-branch" class="modal-overlay" style="display:none">
+  <div class="modal-card">
+    <h3 id="modal-branch-title">Add Branch</h3>
+    <div class="form-group">
+      <label>Branch Name</label>
+      <input type="text" id="modal-branch-name" class="text-input" placeholder="e.g. South Delhi">
+    </div>
+    <div class="form-group">
+      <label>State</label>
+      <select id="modal-branch-state" class="text-input">
+        <option value="">— Select state —</option>
+        <optgroup label="States">
+          <option>Andhra Pradesh</option><option>Arunachal Pradesh</option>
+          <option>Assam</option><option>Bihar</option><option>Chhattisgarh</option>
+          <option>Goa</option><option>Gujarat</option><option>Haryana</option>
+          <option>Himachal Pradesh</option><option>Jharkhand</option>
+          <option>Karnataka</option><option>Kerala</option>
+          <option>Madhya Pradesh</option><option>Maharashtra</option>
+          <option>Manipur</option><option>Meghalaya</option><option>Mizoram</option>
+          <option>Nagaland</option><option>Odisha</option><option>Punjab</option>
+          <option>Rajasthan</option><option>Sikkim</option><option>Tamil Nadu</option>
+          <option>Telangana</option><option>Tripura</option>
+          <option>Uttar Pradesh</option><option>Uttarakhand</option>
+          <option>West Bengal</option>
+        </optgroup>
+        <optgroup label="Union Territories">
+          <option>Andaman and Nicobar Islands</option><option>Chandigarh</option>
+          <option>Dadra and Nagar Haveli and Daman and Diu</option>
+          <option>Delhi (NCT)</option><option>Jammu and Kashmir</option>
+          <option>Ladakh</option><option>Lakshadweep</option><option>Puducherry</option>
+        </optgroup>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>4-digit PIN</label>
+      <input type="text" id="modal-branch-pin" class="text-input" placeholder="0000" maxlength="4" pattern="[0-9]{4}" inputmode="numeric">
+    </div>
+    <input type="hidden" id="modal-branch-id">
+    <div class="modal-btns">
+      <button class="secondary-btn" id="btn-modal-cancel">Cancel</button>
+      <button class="primary-btn" id="btn-modal-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     MODAL: Delete Branch Confirmation
+     ============================================================ -->
+<div id="modal-delete-branch" class="modal-overlay" style="display:none">
+  <div class="modal-card">
+    <h3>Delete Branch</h3>
+    <p id="modal-delete-branch-msg" style="color:#6b7280;margin:8px 0 24px;font-size:14px;line-height:1.5"></p>
+    <div class="modal-btns">
+      <button class="secondary-btn" id="btn-delete-cancel">Cancel</button>
+      <button class="danger-btn" id="btn-delete-confirm" style="padding:10px 20px;border-radius:8px;font-weight:600">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     MODAL: Forgot PIN
+     ============================================================ -->
+<div id="modal-forgot-pin" class="modal-overlay" style="display:none">
+  <div class="modal-card">
+    <h3>Forgot PIN?</h3>
+    <p style="font-size:14px;color:#6b7280;margin:0 0 16px">Enter admin email to retrieve the branch PIN</p>
+    <div class="form-group">
+      <label>Admin Email</label>
+      <input type="email" id="forgot-pin-email" class="text-input" placeholder="admin@email.com">
+    </div>
+    <div class="admin-msg" id="forgot-pin-msg"></div>
+    <div class="modal-btns">
+      <button class="secondary-btn" id="btn-forgot-cancel">Cancel</button>
+      <button class="primary-btn" id="btn-forgot-submit">Get PIN</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     MODAL: Feedback
+     ============================================================ -->
+<div id="modal-feedback" class="modal-overlay" style="display:none">
+  <div class="modal-card">
+    <h3>Leave Feedback</h3>
+    <p style="font-size:13px;color:#6b7280;margin:4px 0 16px">Branch and date are captured automatically.</p>
+    <div class="form-group">
+      <label>Your Name</label>
+      <input type="text" id="feedback-name" class="text-input" placeholder="Staff name">
+    </div>
+    <div class="form-group">
+      <label>Feedback</label>
+      <textarea id="feedback-text" class="text-input" placeholder="Write your feedback here…"
+        rows="4" style="resize:vertical;min-height:90px"></textarea>
+    </div>
+    <div class="modal-btns">
+      <button class="secondary-btn" id="btn-feedback-cancel">Cancel</button>
+      <button class="primary-btn" id="btn-feedback-submit">Submit</button>
+    </div>
+  </div>
+</div>
+
+<!-- Automation Modal -->
+<div id="modal-automation" class="modal-overlay" style="display:none">
+  <div class="modal-box" style="max-width:480px;width:94%">
+    <h3 id="modal-automation-title" style="margin:0 0 20px;font-size:16px;font-weight:700">Add Automation</h3>
+
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Name</label>
+      <input type="text" id="auto-name" class="text-input" placeholder="e.g. Weekly Sunday Report" style="margin:0">
+    </div>
+
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Action</label>
+      <div id="auto-action-display" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px 14px;font-size:14px;color:#374151">
+        ✉ Send Email Report
+      </div>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Trigger</label>
+      <select id="auto-trigger-type" class="text-input" style="margin:0 0 10px">
+        <option value="weekly">Every Week (Sunday)</option>
+        <option value="monthly">Every Month (Last Day)</option>
+        <option value="single_date">Single Date (One-time)</option>
+      </select>
+
+      <!-- Weekly options -->
+      <div id="auto-weekly-opts" style="display:flex;flex-direction:column;gap:8px">
+        <label class="auto-radio-label">
+          <input type="radio" name="auto-trigger-mode" value="scheduled" checked>
+          <div>
+            <div style="font-weight:600;font-size:13px">Sunday night</div>
+            <div style="font-size:12px;color:#6b7280">Auto-sends every Sunday at 11 pm</div>
+          </div>
+        </label>
+        <label class="auto-radio-label">
+          <input type="radio" name="auto-trigger-mode" value="on_submit">
+          <div>
+            <div style="font-weight:600;font-size:13px">When Sunday cashup is submitted</div>
+            <div style="font-size:12px;color:#6b7280">Fires as soon as any branch submits Sunday's cashup</div>
+          </div>
+        </label>
+      </div>
+
+      <!-- Monthly options -->
+      <div id="auto-monthly-opts" style="display:none;flex-direction:column;gap:8px">
+        <label class="auto-radio-label">
+          <input type="radio" name="auto-trigger-mode" value="scheduled">
+          <div>
+            <div style="font-weight:600;font-size:13px">Last day of month, night</div>
+            <div style="font-size:12px;color:#6b7280">Auto-sends on the last day of every month at 11 pm</div>
+          </div>
+        </label>
+        <label class="auto-radio-label">
+          <input type="radio" name="auto-trigger-mode" value="on_submit">
+          <div>
+            <div style="font-weight:600;font-size:13px">When last day's cashup is submitted</div>
+            <div style="font-size:12px;color:#6b7280">Fires as soon as any branch submits the last day of the month</div>
+          </div>
+        </label>
+      </div>
+
+      <!-- Single date -->
+      <div id="auto-single-opts" style="display:none">
+        <input type="date" id="auto-trigger-date" class="text-input" style="margin:0">
+      </div>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:8px">Branches</label>
+      <div id="auto-branch-list" style="display:flex;flex-direction:column;gap:8px">
+        <label class="auto-check-label auto-branch-all">
+          <input type="checkbox" value="all" checked onchange="handleAutoBranchAll(this)"> <strong>All Branches</strong>
+        </label>
+        <!-- populated by JS -->
+      </div>
+    </div>
+
+    <div style="margin-bottom:14px">
+      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:8px">Report includes</label>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="daily_summary" checked> Daily Summary (opening / closing per branch)</label>
+        <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="total_sale" checked> Total Sales</label>
+        <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="all_transactions"> All Transactions (full entry list)</label>
+        <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="staff_breakdown"> Sales by Staff</label>
+        <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="payment_breakdown"> Payment Breakdown (Cash vs Scan)</label>
+        <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="expenses"> Expenses</label>
+      </div>
+    </div>
+
+    <div style="margin-bottom:20px">
+      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Send to</label>
+      <input type="email" id="auto-email-to" class="text-input" value="hospitalitybee@gmail.com" style="margin:0">
+    </div>
+
+    <div style="display:flex;gap:10px;justify-content:flex-end">
+      <button class="secondary-btn" id="btn-automation-cancel">Cancel</button>
+      <button class="primary-btn" id="btn-automation-save">Save Automation</button>
+    </div>
+    <input type="hidden" id="auto-edit-id">
+  </div>
+</div>
+
+<!-- Toast notification -->
+<div id="toast" class="toast"></div>
+
+<!-- Autocomplete dropdown -->
+<div id="autocomplete-dropdown" class="autocomplete-dropdown" style="display:none"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
