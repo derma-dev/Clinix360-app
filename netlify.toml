@@ -1,6 +1,13 @@
 [functions]
   directory = "netlify/functions"
 
+# Meta webhook — must be before the catch-all SPA redirect
+[[redirects]]
+  from = "/webhook/meta"
+  to   = "/.netlify/functions/meta-webhook"
+  status = 200
+  force  = true
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

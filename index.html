@@ -172,11 +172,58 @@
 
    <!-- TAB: Leads -->
    <div class="branch-tab" id="branch-tab-leads">
-     <div class="coming-soon">
-       <div class="coming-soon-icon">📈</div>
-       <div class="coming-soon-title">Leads</div>
-       <div class="coming-soon-sub">Coming soon</div>
-     </div>
+     <div class="leads-hub">
+
+       <!-- ── Conversation Sidebar ── -->
+       <div class="leads-list-col" id="leads-list-col">
+         <div class="leads-list-header">
+           <h2 class="leads-list-title">Inbox</h2>
+         </div>
+         <div id="leads-list">
+           <div class="loading-wrap"><div class="spinner"></div></div>
+         </div>
+       </div><!-- /leads-list-col -->
+
+       <!-- ── Chat Panel ── -->
+       <div class="leads-detail-col" id="leads-detail-col">
+
+         <!-- Shown when no conversation is open -->
+         <div class="leads-detail-empty" id="leads-detail-empty">
+           <div class="inbox-welcome-icon">💬</div>
+           <div class="inbox-welcome-title">Clinix360 Inbox</div>
+           <div class="inbox-welcome-sub">Select a conversation to start messaging</div>
+         </div>
+
+         <!-- Active conversation -->
+         <div class="leads-detail-content" id="leads-detail-content" style="display:none">
+
+           <div class="leads-detail-header">
+             <button class="back-btn leads-back-btn" id="btn-lead-back">‹</button>
+             <div class="conv-header-avatar" id="lead-header-avatar"></div>
+             <div class="conv-header-info">
+               <div class="conv-header-name" id="lead-detail-name"></div>
+               <div class="conv-header-platform" id="lead-platform-label"></div>
+             </div>
+           </div>
+
+           <div class="leads-convo-log" id="leads-convo-log">
+             <div class="leads-convo-empty">No messages yet</div>
+           </div>
+
+           <div class="leads-convo-compose">
+             <input type="text" id="leads-convo-input" class="convo-input"
+               placeholder="Type a message…">
+             <button class="convo-send-btn" id="btn-convo-log" aria-label="Send">
+               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                 <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+               </svg>
+             </button>
+           </div>
+
+         </div><!-- /leads-detail-content -->
+       </div><!-- /leads-detail-col -->
+
+     </div><!-- /leads-hub -->
    </div>
 
   </main>
@@ -823,6 +870,7 @@
 
 <!-- Autocomplete dropdown -->
 <div id="autocomplete-dropdown" class="autocomplete-dropdown" style="display:none"></div>
+
 
 <script src="app.js"></script>
 </body>

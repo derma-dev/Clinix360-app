@@ -137,6 +137,44 @@ CREATE TABLE IF NOT EXISTS settings (
 --   payment_modes   -> JSON array, e.g. [{"code":"cash","label":"Cash"}, ...]
 --                      Editable from Admin Panel -> Settings -> Payment Modes.
 
+-- Lead Hub — one row per prospective customer, scoped to a branch.
+CREATE TABLE IF NOT EXISTS leads (
+  id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  branch_id  UUID REFERENCES branches(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL DEFAULT '',
+  phone      TEXT DEFAULT '',
+  source     TEXT DEFAULT '',  -- Walk-in | WhatsApp | Instagram | Facebook | Google | Referral | Other
+  service    TEXT DEFAULT '',
+  status     TEXT DEFAULT 'new',  -- 'new' | 'contacted' | 'converted' | 'lost'
+  notes      TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+-- Migration: add source column if upgrading from an older schema
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS source TEXT DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_leads_branch ON leads(branch_id, created_at DESC);
+
+-- Notes on a lead (many per lead).
+CREATE TABLE IF NOT EXISTS lead_notes (
+  id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  lead_id    UUID REFERENCES leads(id) ON DELETE CASCADE,
+  branch_id  UUID REFERENCES branches(id) ON DELETE CASCADE,
+  note       TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_lead_notes_lead ON lead_notes(lead_id, created_at DESC);
+
+-- Messages on a lead — ordered chronologically to form a timeline.
+CREATE TABLE IF NOT EXISTS lead_messages (
+  id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  lead_id    UUID REFERENCES leads(id) ON DELETE CASCADE,
+  branch_id  UUID REFERENCES branches(id) ON DELETE CASCADE,
+  direction  TEXT NOT NULL DEFAULT 'out',  -- 'in' (customer) | 'out' (staff)
+  body       TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_lead_messages_lead ON lead_messages(lead_id, created_at ASC);
+
 -- RLS disabled everywhere (PIN-based app security):
 ALTER TABLE branches            DISABLE ROW LEVEL SECURITY;
 ALTER TABLE cashup_entries      DISABLE ROW LEVEL SECURITY;
@@ -147,3 +185,6 @@ ALTER TABLE cashup_alerts       DISABLE ROW LEVEL SECURITY;
 ALTER TABLE cashup_feedback     DISABLE ROW LEVEL SECURITY;
 ALTER TABLE cashup_automations  DISABLE ROW LEVEL SECURITY;
 ALTER TABLE settings            DISABLE ROW LEVEL SECURITY;
+ALTER TABLE leads               DISABLE ROW LEVEL SECURITY;
+ALTER TABLE lead_notes          DISABLE ROW LEVEL SECURITY;
+ALTER TABLE lead_messages       DISABLE ROW LEVEL SECURITY;

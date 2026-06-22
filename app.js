@@ -155,6 +155,7 @@ function activateBranchTab(page) {
 function switchBranchTab(page) {
   activateBranchTab(page);
   setRoute('#/branch/' + page);
+  if (page === 'leads') loadLeadsTab();
 }
 
 // Admin tab switching (global so the router can restore a tab on refresh)
@@ -169,6 +170,239 @@ function switchAdminTab(tab) {
   if (tab === 'notifications') loadAdminAlerts();
   if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); }
   setRoute('#/admin/' + tab);
+}
+
+// ============================================================
+// LEAD HUB — Unified Inbox
+// ============================================================
+
+let _leads = [];
+let _activeLeadId = null;
+let _leadsTabBound = false;
+
+async function loadLeadsTab() {
+  const list = document.getElementById('leads-list');
+  if (list) list.innerHTML = '<div class="loading-wrap"><div class="spinner"></div></div>';
+
+  if (!_leadsTabBound) {
+    _leadsTabBound = true;
+    document.getElementById('btn-lead-back')?.addEventListener('click', closeLeadDetail);
+    document.getElementById('btn-convo-log')?.addEventListener('click', sendLeadMessage);
+    document.getElementById('leads-convo-input')?.addEventListener('keydown', e => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendLeadMessage(); }
+    });
+  }
+
+  console.log('[leads] currentBranch.id =', state.currentBranch?.id);
+
+  const { data: leads, error } = await db
+    .from('leads')
+    .select('id, customer_name, source, status, created_at, branch_id')
+    .eq('branch_id', state.currentBranch.id)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[leads query]', error.message);
+    if (list) list.innerHTML = `<p style="color:var(--danger);padding:16px;font-size:13px;text-align:center">${esc(error.message)}</p>`;
+    return;
+  }
+
+  console.log('Leads returned:', leads);
+  _leads = leads || [];
+
+  if (!_leads.length) {
+    renderConversationList(_leads, {});
+    return;
+  }
+
+  // Fetch last message + unread counts in a single query
+  const { data: msgs } = await db
+    .from('lead_messages')
+    .select('lead_id, message, direction, created_at, is_seen')
+    .in('lead_id', _leads.map(l => l.id))
+    .order('created_at', { ascending: false });
+
+  console.log('Messages returned:', msgs);
+
+  const lastMsg     = {};
+  const unreadCount = {};
+  (msgs || []).forEach(m => {
+    if (!lastMsg[m.lead_id]) lastMsg[m.lead_id] = m;
+    if (['in', 'incoming'].includes(m.direction) && !m.is_seen) {
+      unreadCount[m.lead_id] = (unreadCount[m.lead_id] || 0) + 1;
+    }
+  });
+
+  console.log('Conversation list (lastMsg map):', lastMsg);
+  renderConversationList(_leads, lastMsg, unreadCount);
+}
+
+function renderConversationList(leads, lastMsg, unreadCount = {}) {
+  const list = document.getElementById('leads-list');
+  if (!list) return;
+
+  if (!leads.length) {
+    list.innerHTML = `
+      <div class="leads-empty-state">
+        <div class="leads-empty-icon">💬</div>
+        <div class="leads-empty-title">No conversations yet</div>
+        <div class="leads-empty-sub">Messages from Instagram and Facebook will appear here</div>
+      </div>`;
+    return;
+  }
+
+  list.innerHTML = leads.map(lead => {
+    const msg    = lastMsg[lead.id];
+    const prev   = msg ? esc(msg.message.length > 50 ? msg.message.slice(0, 50) + '…' : msg.message) : '<em>No messages</em>';
+    const time   = msg ? formatConvoTime(msg.created_at) : '';
+    const count  = unreadCount[lead.id] || 0;
+    const src    = (lead.source || '').toLowerCase();
+    const label  = src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : (lead.source || '?').slice(0, 2).toUpperCase();
+
+    return `
+    <div class="lead-card ${count > 0 ? 'has-unread' : ''}" data-lead-id="${esc(lead.id)}" onclick="openLeadDetail('${esc(lead.id)}')">
+      <div class="conv-platform-icon ${esc(src)}">${label}</div>
+      <div class="lead-card-info">
+        <div class="lead-card-row1">
+          <span class="lead-card-name">${esc(lead.customer_name)}</span>
+          <span class="lead-card-time ${count > 0 ? 'unread-time' : ''}">${time}</span>
+        </div>
+        <div class="lead-card-row2">
+          <span class="lead-card-preview ${count > 0 ? 'unread-preview' : ''}">${prev}</span>
+          ${count > 0 ? '<span class="lead-unread-dot"></span>' : ''}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openLeadDetail(leadId) {
+  const lead = _leads.find(l => l.id === leadId);
+  if (!lead) return;
+
+  document.querySelectorAll('.lead-card').forEach(c => c.classList.remove('active'));
+  document.querySelector(`.lead-card[data-lead-id="${leadId}"]`)?.classList.add('active');
+
+  const src   = (lead.source || '').toLowerCase();
+  const label = src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : src === 'whatsapp' ? 'WA' : (lead.source || '?').slice(0, 2).toUpperCase();
+
+  document.getElementById('lead-detail-name').textContent  = lead.customer_name;
+
+  const avatar = document.getElementById('lead-header-avatar');
+  if (avatar) { avatar.textContent = label; avatar.className = 'conv-header-avatar ' + src; }
+
+  const platformLabel = document.getElementById('lead-platform-label');
+  if (platformLabel) platformLabel.textContent = lead.source || '';
+
+  _activeLeadId = leadId;
+  markConversationSeen(leadId);
+
+  document.getElementById('leads-convo-log').innerHTML = '';
+  document.getElementById('leads-detail-empty').style.display   = 'none';
+  document.getElementById('leads-detail-content').style.display = 'flex';
+  document.getElementById('leads-detail-col').classList.add('active');
+  loadLeadMessages(leadId);
+}
+
+function closeLeadDetail() {
+  _activeLeadId = null;
+  document.getElementById('leads-detail-empty').style.display   = 'flex';
+  document.getElementById('leads-detail-content').style.display = 'none';
+  document.getElementById('leads-detail-col').classList.remove('active');
+  document.querySelectorAll('.lead-card').forEach(c => c.classList.remove('active'));
+}
+
+async function markConversationSeen(leadId) {
+  const card = document.querySelector(`.lead-card[data-lead-id="${leadId}"]`);
+  if (card) {
+    card.classList.remove('has-unread');
+    card.querySelector('.lead-unread-dot')?.remove();
+    const t = card.querySelector('.lead-card-time');
+    const p = card.querySelector('.lead-card-preview');
+    if (t) t.classList.remove('unread-time');
+    if (p) p.classList.remove('unread-preview');
+  }
+
+  await db
+    .from('lead_messages')
+    .update({ is_seen: true, seen_at: new Date().toISOString() })
+    .eq('lead_id', leadId)
+    .in('direction', ['in', 'incoming'])
+    .eq('is_seen', false);
+}
+
+async function loadLeadMessages(leadId) {
+  const log = document.getElementById('leads-convo-log');
+  if (!log) return;
+
+  const { data, error } = await db
+    .from('lead_messages')
+    .select('id, direction, message, created_at')
+    .eq('lead_id', leadId)
+    .order('created_at', { ascending: true });
+
+  if (error) {
+    console.error('[lead_messages query]', error.message);
+    log.innerHTML = `<div class="leads-convo-empty">${esc(error.message)}</div>`;
+    return;
+  }
+
+  if (!data || !data.length) {
+    log.innerHTML = '<div class="leads-convo-empty">No messages yet</div>';
+    return;
+  }
+
+  const lead        = _leads.find(l => l.id === leadId);
+  const src         = (lead?.source || '').toLowerCase();
+  const avatarLabel = src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : src === 'whatsapp' ? 'WA' : (lead?.source || '?').slice(0, 2).toUpperCase();
+
+  let lastDate = null;
+  log.innerHTML = data.map(m => {
+    const isIncoming = ['in', 'incoming'].includes(m.direction);
+    const msgDate    = m.created_at.split('T')[0];
+    const separator  = msgDate !== lastDate
+      ? `<div class="convo-date-sep"><span>${formatDateSeparator(msgDate)}</span></div>`
+      : '';
+    lastDate = msgDate;
+    const timeStr = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+    return `${separator}
+    <div class="leads-convo-msg ${isIncoming ? 'incoming' : 'outgoing'} convo-msg-anim">
+      ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${esc(avatarLabel)}</div>` : ''}
+      <div class="convo-msg-body">
+        <div class="leads-convo-msg-text">${esc(m.message)}</div>
+        <div class="leads-convo-msg-meta">${timeStr}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendLeadMessage() {
+  if (!_activeLeadId) return;
+  const input = document.getElementById('leads-convo-input');
+  const body  = input.value.trim();
+  if (!body) return;
+
+  const btn    = document.getElementById('btn-convo-log');
+  btn.disabled = true;
+
+  const { error } = await db.from('lead_messages').insert({
+    lead_id:   _activeLeadId,
+    direction: 'outgoing',
+    message:   body,
+  });
+
+  btn.disabled = false;
+
+  if (error) {
+    console.error('Send message error:', error);
+    showToast(error.message || 'Could not send message.', 'error');
+    return;
+  }
+
+  input.value = '';
+  await loadLeadMessages(_activeLeadId);
 }
 
 // ============================================================
@@ -2966,6 +3200,27 @@ function formatDisplayDate(dateStr) {
   return new Intl.DateTimeFormat('en-IN', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
   }).format(date);
+}
+
+function formatDateSeparator(dateStr) {
+  const today   = new Date();
+  const msgDate = new Date(dateStr + 'T00:00:00');
+  const diff    = Math.floor((today - msgDate) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return msgDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function formatConvoTime(isoStr) {
+  const date    = new Date(isoStr);
+  const now     = new Date();
+  const diffMs  = now - date;
+  const diffDay = Math.floor(diffMs / 86400000);
+
+  if (diffDay === 0) return date.toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+  if (diffDay === 1) return 'Yesterday';
+  if (diffDay < 7)  return date.toLocaleDateString('en-IN', { weekday: 'short' });
+  return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
 }
 
 function formatShortDate(dateStr) {
