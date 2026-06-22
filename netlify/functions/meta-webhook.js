@@ -35,8 +35,8 @@ exports.handler = async (event) => {
       };
     }
 
-    // Meta requires a fast 200 — handle synchronously then return
-    handleWebhook(payload);
+    // Await processing — Supabase ops must complete before returning 200
+    await handleWebhook(payload);
 
     return {
       statusCode: 200,
