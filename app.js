@@ -387,22 +387,25 @@ async function sendLeadMessage() {
   const btn    = document.getElementById('btn-convo-log');
   btn.disabled = true;
 
-  const { error } = await db.from('lead_messages').insert({
-    lead_id:   _activeLeadId,
-    direction: 'outgoing',
-    message:   body,
-  });
+  // Send via the backend — it calls the Instagram Send API and only then
+  // persists the outgoing row, so the chat reflects what actually delivered.
+  try {
+    const res = await fetch('/.netlify/functions/meta-send', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ leadId: _activeLeadId, message: body }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not send message.');
 
-  btn.disabled = false;
-
-  if (error) {
-    console.error('Send message error:', error);
-    showToast(error.message || 'Could not send message.', 'error');
-    return;
+    input.value = '';
+    await loadLeadMessages(_activeLeadId);
+  } catch (err) {
+    console.error('Send message error:', err);
+    showToast(err.message || 'Could not send message.', 'error');
+  } finally {
+    btn.disabled = false;
   }
-
-  input.value = '';
-  await loadLeadMessages(_activeLeadId);
 }
 
 // ============================================================

@@ -71,6 +71,16 @@ function createSupabaseClient() {
       if (!res.ok) throw new Error(`lead_messages insert failed: ${res.status} ${await res.text()}`);
       return res.json();
     },
+
+    async getLeadById(id) {
+      const res = await fetch(
+        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,instagram_user_id,source&limit=1`,
+        { headers }
+      );
+      if (!res.ok) throw new Error(`lead fetch failed: ${res.status} ${await res.text()}`);
+      const rows = await res.json();
+      return rows[0] || null;
+    },
   };
 }
 
@@ -244,11 +254,33 @@ async function handleWebhook(payload) {
   return { received: true };
 }
 
-// ── Send message via Instagram (Graph API) ───────────────────
+// ── Send message via Instagram (Send API) ────────────────────
+// POST https://graph.instagram.com/v21.0/me/messages
+// Note: 24-hour window — you may only reply within 24h of the user's last message.
 async function sendInstagramMessage(recipientId, text) {
-  // TODO: implement in Phase 2 after ingestion is confirmed working
-  console.log('[meta-service] sendInstagramMessage — not yet implemented');
-  throw new Error('sendInstagramMessage not yet implemented');
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
+
+  const igId = process.env.META_IG_ID || 'me';
+  const res  = await fetch(`https://graph.instagram.com/v21.0/${igId}/messages`, {
+    method:  'POST',
+    headers: {
+      Authorization:  `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      recipient: { id: recipientId },
+      message:   { text },
+    }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`Instagram send failed: ${res.status} ${msg}`);
+  }
+  console.log(`[meta-service] Instagram message sent to ${recipientId} (message_id=${data.message_id || 'n/a'})`);
+  return data; // { recipient_id, message_id }
 }
 
 // ── Send message via Facebook Messenger (Graph API) ──────────
@@ -258,4 +290,4 @@ async function sendFacebookMessage(recipientId, text) {
   throw new Error('sendFacebookMessage not yet implemented');
 }
 
-module.exports = { verifyWebhook, handleWebhook, sendInstagramMessage, sendFacebookMessage };
+module.exports = { verifyWebhook, handleWebhook, sendInstagramMessage, sendFacebookMessage, createSupabaseClient };
