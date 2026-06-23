@@ -33,12 +33,22 @@ function createSupabaseClient() {
   return {
     async findLeadByInstagramId(instagramUserId) {
       const res = await fetch(
-        `${url}/rest/v1/leads?instagram_user_id=eq.${encodeURIComponent(instagramUserId)}&select=id&limit=1`,
+        `${url}/rest/v1/leads?instagram_user_id=eq.${encodeURIComponent(instagramUserId)}&select=id,customer_name&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`leads lookup failed: ${res.status} ${await res.text()}`);
       const rows = await res.json();
       return rows[0] || null;
+    },
+
+    async updateLead(id, data) {
+      const res = await fetch(`${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}`, {
+        method:  'PATCH',
+        headers,
+        body:    JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error(`leads update failed: ${res.status} ${await res.text()}`);
+      return res.json();
     },
 
     async createLead(data) {
@@ -64,6 +74,38 @@ function createSupabaseClient() {
   };
 }
 
+// ── Fetch a DM sender's Instagram profile ─────────────────────
+// Uses the User Profile API. Consent is auto-granted once the user DMs us.
+// Returns { name, username, profile_pic, id } or null on any failure.
+async function fetchInstagramProfile(igsid) {
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token) {
+    console.warn('[meta-service] META_ACCESS_TOKEN not set — cannot fetch IG profile');
+    return null;
+  }
+  try {
+    const res = await fetch(
+      `https://graph.instagram.com/v21.0/${encodeURIComponent(igsid)}` +
+      `?fields=name,username,profile_pic&access_token=${encodeURIComponent(token)}`
+    );
+    if (!res.ok) {
+      console.warn(`[meta-service] IG profile fetch failed: ${res.status} ${await res.text()}`);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn('[meta-service] IG profile fetch error:', err.message);
+    return null;
+  }
+}
+
+// Build a human-readable display name from a profile.
+function buildDisplayName(profile) {
+  if (!profile) return null;
+  if (profile.name && profile.username) return `${profile.name} (@${profile.username})`;
+  return profile.username || profile.name || null;
+}
+
 // ── Process one incoming Instagram message ────────────────────
 async function processIncomingMessage(senderId, messageText) {
   const branchId = process.env.META_BRANCH_ID;
@@ -76,16 +118,25 @@ async function processIncomingMessage(senderId, messageText) {
 
   if (lead) {
     console.log(`[meta-service] Lead found: id=${lead.id}`);
+    // Backfill the real name on older leads still showing the placeholder.
+    if (!lead.customer_name || lead.customer_name === 'Instagram User') {
+      const displayName = buildDisplayName(await fetchInstagramProfile(senderId));
+      if (displayName) {
+        await db.updateLead(lead.id, { customer_name: displayName });
+        console.log(`[meta-service] Lead name backfilled: "${displayName}"`);
+      }
+    }
   } else {
-    // Create new lead
+    // Fetch the sender's real profile for the new lead's name.
+    const displayName = buildDisplayName(await fetchInstagramProfile(senderId)) || 'Instagram User';
     lead = await db.createLead({
       branch_id:          branchId,
       source:             'instagram',
-      customer_name:      'Instagram User',
+      customer_name:      displayName,
       instagram_user_id:  senderId,
       status:             'new',
     });
-    console.log(`[meta-service] Lead created: id=${lead.id} for sender=${senderId}`);
+    console.log(`[meta-service] Lead created: id=${lead.id} name="${displayName}" for sender=${senderId}`);
   }
 
   // Insert incoming message
