@@ -101,20 +101,22 @@ async function processIncomingMessage(senderId, messageText) {
 // ── Webhook verification (GET) ────────────────────────────────
 // Meta calls GET /webhook/meta?hub.mode=subscribe&hub.verify_token=...&hub.challenge=...
 function verifyWebhook(query) {
-  let cfg;
-  try { cfg = getConfig(); } catch (e) {
-    console.error('[meta-service] verifyWebhook config error:', e.message);
-    return { valid: false };
-  }
-
+  // Verification only needs META_VERIFY_TOKEN — do NOT require the other Meta
+  // vars here, or a missing app secret/access token blocks the GET handshake.
+  const expected       = process.env.META_VERIFY_TOKEN;
   const mode           = query['hub.mode'];
   const hubVerifyToken = query['hub.verify_token'];
   const challenge      = query['hub.challenge'];
 
-  console.log('VERIFY_TOKEN_ENV=', process.env.META_VERIFY_TOKEN);
+  console.log('VERIFY_TOKEN_ENV=', expected ? '(set)' : '(MISSING)');
   console.log('TOKEN_FROM_URL=', hubVerifyToken);
 
-  if (mode === 'subscribe' && hubVerifyToken === cfg.verifyToken) {
+  if (!expected) {
+    console.error('[meta-service] META_VERIFY_TOKEN is not set in the environment');
+    return { valid: false };
+  }
+
+  if (mode === 'subscribe' && hubVerifyToken === expected) {
     console.log('[meta-service] Webhook verified');
     return { valid: true, challenge };
   }
