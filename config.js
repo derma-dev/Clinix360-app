@@ -14,7 +14,7 @@ const CONFIG = {
   ACCOUNTANT_EMAILS: [],
 
   // App URL (used for magic link redirect)
-  APP_URL: 'https://cashup.dskin.co',
+  APP_URL: 'https://eloquent-pothos-dc09dc.netlify.app',
 
   // Currency symbol
   CURRENCY: '₹',

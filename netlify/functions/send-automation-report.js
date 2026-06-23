@@ -221,7 +221,7 @@ exports.handler = async (event) => {
   const emailHtml = `
     <div style="font-family:Arial,sans-serif;max-width:460px;margin:0 auto;padding:32px 24px;color:#1f2937">
       <div style="text-align:center;margin-bottom:24px">
-        <img src="https://cashup.dskin.co/dskin-logo.png" alt="DSkin" width="56" style="display:inline-block;margin-bottom:10px">
+        <img src="https://eloquent-pothos-dc09dc.netlify.app/dskin-logo.png" alt="Clinix360" width="56" style="display:inline-block;margin-bottom:10px">
         <div style="font-size:17px;font-weight:700;color:#8B6508">DSkin Cashup</div>
       </div>
       <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:10px;padding:14px 20px;margin-bottom:20px;text-align:center">
@@ -245,7 +245,7 @@ exports.handler = async (event) => {
         </tr>
       </table>
       <p style="margin:20px 0 0;color:#9ca3af;font-size:12px;text-align:center">
-        <a href="https://cashup.dskin.co" style="color:#9ca3af">cashup.dskin.co</a>
+        <a href="https://eloquent-pothos-dc09dc.netlify.app" style="color:#9ca3af">clinix360</a>
       </p>
     </div>`;
 

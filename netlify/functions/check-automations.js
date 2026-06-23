@@ -9,7 +9,7 @@ const { schedule } = require('@netlify/functions');
 const handler = async () => {
   const SUPABASE_URL = process.env.SUPABASE_URL;
   const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
-  const SITE_URL = process.env.URL || 'https://cashup.dskin.co';
+  const SITE_URL = process.env.URL || 'https://eloquent-pothos-dc09dc.netlify.app';
 
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
     console.error('Missing env vars');

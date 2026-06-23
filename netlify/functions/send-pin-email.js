@@ -92,7 +92,7 @@ exports.handler = async (event) => {
       html: `
         <div style="font-family:Arial,sans-serif;max-width:420px;margin:0 auto;padding:32px 24px;color:#1f2937">
           <div style="text-align:center;margin-bottom:24px">
-            <img src="https://clinix360.ai/dskin-logo.png" alt="Clinix360" width="64" style="display:inline-block;margin-bottom:10px">
+            <img src="https://eloquent-pothos-dc09dc.netlify.app/dskin-logo.png" alt="Clinix360" width="64" style="display:inline-block;margin-bottom:10px">
             <div style="font-size:18px;font-weight:700;color:#8B6914;letter-spacing:0.02em">Clinix360</div>
           </div>
           <p style="margin:0 0 16px">${requestedLine}</p>
