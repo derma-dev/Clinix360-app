@@ -126,7 +126,9 @@ function verifyWebhook(query) {
 }
 
 // ── Incoming webhook payload handler (POST) ───────────────────
-// Iterates entry[].changes[], processes each Instagram message event.
+// Real Instagram DMs (Instagram Login API) arrive as entry[].messaging[].
+// Meta's "Test" button in the webhook UI sends entry[].changes[].field=messages.
+// Handle BOTH shapes so test events and live traffic both ingest.
 async function handleWebhook(payload) {
   console.log('[meta-webhook] Webhook received — object:', payload.object);
   console.log('[meta-webhook] Full payload:', JSON.stringify(payload, null, 2));
@@ -136,26 +138,55 @@ async function handleWebhook(payload) {
     return { received: true };
   }
 
+  // Collect message events from both payload shapes into a flat list.
+  const events = [];
+
   for (const entry of (payload.entry || [])) {
+    // Shape A — real DMs: entry[].messaging[]
+    for (const msg of (entry.messaging || [])) {
+      events.push({
+        senderId:    msg.sender?.id,
+        messageText: msg.message?.text,
+        isEcho:      msg.message?.is_echo === true,
+        source:      'messaging',
+      });
+    }
+
+    // Shape B — Meta test button: entry[].changes[].field=messages
     for (const change of (entry.changes || [])) {
       if (change.field !== 'messages') continue;
+      const value = change.value || {};
+      events.push({
+        senderId:    value.sender?.id,
+        messageText: value.message?.text,
+        isEcho:      value.message?.is_echo === true,
+        source:      'changes',
+      });
+    }
+  }
 
-      const value       = change.value || {};
-      const senderId    = value.sender?.id;
-      const messageText = value.message?.text;
+  if (!events.length) {
+    console.log('[meta-service] No message events found in payload (no messaging[] or changes[] entries)');
+  }
 
-      if (!senderId || !messageText) {
-        console.log('[meta-service] Skipping change — missing sender.id or message.text', JSON.stringify(value));
-        continue;
-      }
+  for (const ev of events) {
+    // Skip echoes — these are copies of OUR outbound messages, not inbound DMs.
+    if (ev.isEcho) {
+      console.log('[meta-service] Skipping echo (our own outbound message)');
+      continue;
+    }
 
-      console.log(`[meta-service] Processing message from sender=${senderId}: "${messageText}"`);
+    if (!ev.senderId || !ev.messageText) {
+      console.log(`[meta-service] Skipping ${ev.source} event — missing sender.id or message.text`);
+      continue;
+    }
 
-      try {
-        await processIncomingMessage(senderId, messageText);
-      } catch (err) {
-        console.error(`[meta-service] Error processing message from sender=${senderId}:`, err.message);
-      }
+    console.log(`[meta-service] Processing message (${ev.source}) from sender=${ev.senderId}: "${ev.messageText}"`);
+
+    try {
+      await processIncomingMessage(ev.senderId, ev.messageText);
+    } catch (err) {
+      console.error(`[meta-service] Error processing message from sender=${ev.senderId}:`, err.message);
     }
   }
 
