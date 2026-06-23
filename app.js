@@ -384,28 +384,62 @@ async function sendLeadMessage() {
   const body  = input.value.trim();
   if (!body) return;
 
-  const btn    = document.getElementById('btn-convo-log');
-  btn.disabled = true;
+  const leadId = _activeLeadId;
 
-  // Send via the backend — it calls the Instagram Send API and only then
-  // persists the outgoing row, so the chat reflects what actually delivered.
+  // Optimistic UI: show the bubble + clear the input immediately, then send
+  // in the background. Reconcile the bubble's state when the request settles.
+  input.value  = '';
+  const bubble = appendOutgoingBubble(body);
+
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ leadId: _activeLeadId, message: body }),
+      body:    JSON.stringify({ leadId, message: body }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Could not send message.');
 
-    input.value = '';
-    await loadLeadMessages(_activeLeadId);
+    markBubbleSent(bubble);
   } catch (err) {
     console.error('Send message error:', err);
+    markBubbleFailed(bubble);
     showToast(err.message || 'Could not send message.', 'error');
-  } finally {
-    btn.disabled = false;
   }
+}
+
+// Append an outgoing bubble in a pending ("Sending…") state. Returns the node.
+function appendOutgoingBubble(text) {
+  const log = document.getElementById('leads-convo-log');
+  if (!log) return null;
+  log.querySelector('.leads-convo-empty')?.remove();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'leads-convo-msg outgoing convo-msg-anim sending';
+  wrap.innerHTML = `
+    <div class="convo-msg-body">
+      <div class="leads-convo-msg-text"></div>
+      <div class="leads-convo-msg-meta">Sending…</div>
+    </div>`;
+  wrap.querySelector('.leads-convo-msg-text').textContent = text; // textContent = XSS-safe
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return wrap;
+}
+
+function markBubbleSent(bubble) {
+  if (!bubble) return;
+  bubble.classList.remove('sending');
+  const meta = bubble.querySelector('.leads-convo-msg-meta');
+  if (meta) meta.textContent = new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+function markBubbleFailed(bubble) {
+  if (!bubble) return;
+  bubble.classList.remove('sending');
+  bubble.classList.add('send-failed');
+  const meta = bubble.querySelector('.leads-convo-msg-meta');
+  if (meta) meta.textContent = 'Failed — not sent';
 }
 
 // ============================================================

@@ -2089,6 +2089,14 @@ html, body {
 }
 .leads-convo-msg.outgoing .leads-convo-msg-meta { text-align: right; }
 
+/* Optimistic send states */
+.leads-convo-msg.sending .leads-convo-msg-text { opacity: 0.6; }
+.leads-convo-msg.sending .leads-convo-msg-meta { font-style: italic; }
+.leads-convo-msg.send-failed .leads-convo-msg-text {
+  background: #e53935;
+}
+.leads-convo-msg.send-failed .leads-convo-msg-meta { color: #e53935; font-weight: 600; }
+
 /* Date separator */
 .convo-date-sep {
   display: flex;
