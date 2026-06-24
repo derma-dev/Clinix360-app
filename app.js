@@ -376,6 +376,26 @@ async function loadLeadMessages(leadId) {
   }).join('');
 
   log.scrollTop = log.scrollHeight;
+
+  // Sync the inbox card preview with the real last message. The left list builds
+  // its preview once at tab load and isn't realtime, so a message that arrived
+  // after that load leaves the card showing a stale (or "No messages") preview.
+  // Opening the convo re-queries fresh here — use it to correct the card.
+  syncCardPreview(leadId, data[data.length - 1]);
+}
+
+// Update an inbox card's preview text + time from a message row (or clear it).
+function syncCardPreview(leadId, msg) {
+  const card = document.querySelector(`.lead-card[data-lead-id="${leadId}"]`);
+  if (!card) return;
+  const prevEl = card.querySelector('.lead-card-preview');
+  const timeEl = card.querySelector('.lead-card-time');
+  if (prevEl) {
+    prevEl.innerHTML = msg
+      ? esc(msg.message.length > 50 ? msg.message.slice(0, 50) + '…' : msg.message)
+      : '<em>No messages</em>';
+  }
+  if (timeEl && msg) timeEl.textContent = formatConvoTime(msg.created_at);
 }
 
 async function sendLeadMessage() {
@@ -401,6 +421,7 @@ async function sendLeadMessage() {
     if (!res.ok) throw new Error(data.error || 'Could not send message.');
 
     markBubbleSent(bubble);
+    syncCardPreview(leadId, { message: body, created_at: new Date().toISOString() });
   } catch (err) {
     console.error('Send message error:', err);
     markBubbleFailed(bubble);
