@@ -253,7 +253,7 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
 
   list.innerHTML = leads.map(lead => {
     const msg    = lastMsg[lead.id];
-    const prev   = msg ? esc(msg.message.length > 50 ? msg.message.slice(0, 50) + '…' : msg.message) : '<em>No messages</em>';
+    const prev   = buildPreviewHtml(msg);
     const time   = msg ? formatConvoTime(msg.created_at) : '';
     const count  = unreadCount[lead.id] || 0;
     const src    = (lead.source || '').toLowerCase();
@@ -384,17 +384,22 @@ async function loadLeadMessages(leadId) {
   syncCardPreview(leadId, data[data.length - 1]);
 }
 
+// Build inbox preview HTML for a message row. Outbound (mine) gets a "You:" tag;
+// inbound (customer) shows the bare text. Null msg → "No messages".
+function buildPreviewHtml(msg) {
+  if (!msg) return '<em>No messages</em>';
+  const text       = esc(msg.message.length > 50 ? msg.message.slice(0, 50) + '…' : msg.message);
+  const isOutgoing = ['out', 'outgoing'].includes(msg.direction);
+  return isOutgoing ? `<span class="preview-you">You:</span> ${text}` : text;
+}
+
 // Update an inbox card's preview text + time from a message row (or clear it).
 function syncCardPreview(leadId, msg) {
   const card = document.querySelector(`.lead-card[data-lead-id="${leadId}"]`);
   if (!card) return;
   const prevEl = card.querySelector('.lead-card-preview');
   const timeEl = card.querySelector('.lead-card-time');
-  if (prevEl) {
-    prevEl.innerHTML = msg
-      ? esc(msg.message.length > 50 ? msg.message.slice(0, 50) + '…' : msg.message)
-      : '<em>No messages</em>';
-  }
+  if (prevEl) prevEl.innerHTML = buildPreviewHtml(msg);
   if (timeEl && msg) timeEl.textContent = formatConvoTime(msg.created_at);
 }
 
@@ -421,7 +426,7 @@ async function sendLeadMessage() {
     if (!res.ok) throw new Error(data.error || 'Could not send message.');
 
     markBubbleSent(bubble);
-    syncCardPreview(leadId, { message: body, created_at: new Date().toISOString() });
+    syncCardPreview(leadId, { message: body, direction: 'outgoing', created_at: new Date().toISOString() });
   } catch (err) {
     console.error('Send message error:', err);
     markBubbleFailed(bubble);

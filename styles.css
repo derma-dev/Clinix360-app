@@ -1900,6 +1900,7 @@ html, body {
 .lead-card.has-unread .lead-card-name { font-weight: 700; }
 .unread-preview { font-weight: 600; color: #111b21; }
 .unread-time    { font-weight: 600; color: #1877f2; }
+.preview-you    { color: #111b21; font-weight: 600; }
 
 /* Sidebar empty state */
 .leads-empty-state {
