@@ -30,10 +30,17 @@ function createSupabaseClient() {
     Prefer:          'return=representation',
   };
 
+  // Column on `leads` that stores the platform-scoped sender id.
+  const idColumnFor = (platform) =>
+    platform === 'facebook' ? 'facebook_user_id' : 'instagram_user_id';
+
   return {
-    async findLeadByInstagramId(instagramUserId) {
+    idColumnFor,
+
+    async findLeadByPlatformId(platform, userId) {
+      const col = idColumnFor(platform);
       const res = await fetch(
-        `${url}/rest/v1/leads?instagram_user_id=eq.${encodeURIComponent(instagramUserId)}&select=id,customer_name&limit=1`,
+        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`leads lookup failed: ${res.status} ${await res.text()}`);
@@ -74,7 +81,7 @@ function createSupabaseClient() {
 
     async getLeadById(id) {
       const res = await fetch(
-        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,instagram_user_id,source&limit=1`,
+        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,instagram_user_id,facebook_user_id,source&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`lead fetch failed: ${res.status} ${await res.text()}`);
@@ -109,28 +116,63 @@ async function fetchInstagramProfile(igsid) {
   }
 }
 
+// ── Fetch a Messenger sender's Facebook profile ───────────────
+// Uses the Graph API with the PAGE access token. Consent is auto-granted
+// once the user messages the Page. Returns { name, ... } or null on failure.
+async function fetchFacebookProfile(psid) {
+  const token = process.env.META_PAGE_ACCESS_TOKEN;
+  if (!token) {
+    console.warn('[meta-service] META_PAGE_ACCESS_TOKEN not set — cannot fetch FB profile');
+    return null;
+  }
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/v21.0/${encodeURIComponent(psid)}` +
+      `?fields=name,first_name,last_name,profile_pic&access_token=${encodeURIComponent(token)}`
+    );
+    if (!res.ok) {
+      console.warn(`[meta-service] FB profile fetch failed: ${res.status} ${await res.text()}`);
+      return null;
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn('[meta-service] FB profile fetch error:', err.message);
+    return null;
+  }
+}
+
+// Dispatch to the right profile fetcher by platform.
+function fetchProfile(platform, senderId) {
+  return platform === 'facebook'
+    ? fetchFacebookProfile(senderId)
+    : fetchInstagramProfile(senderId);
+}
+
 // Build a human-readable display name from a profile.
+// IG profiles have a username (-> "Name (@user)"); FB profiles only have `name`.
 function buildDisplayName(profile) {
   if (!profile) return null;
   if (profile.name && profile.username) return `${profile.name} (@${profile.username})`;
   return profile.username || profile.name || null;
 }
 
-// ── Process one incoming Instagram message ────────────────────
-async function processIncomingMessage(senderId, messageText) {
+// ── Process one incoming message (Instagram OR Facebook) ──────
+async function processIncomingMessage(senderId, messageText, platform = 'instagram') {
   const branchId = process.env.META_BRANCH_ID;
   if (!branchId) throw new Error('Missing META_BRANCH_ID env var');
 
-  const db = createSupabaseClient();
+  const db          = createSupabaseClient();
+  const idColumn    = db.idColumnFor(platform);             // instagram_user_id | facebook_user_id
+  const placeholder = platform === 'facebook' ? 'Facebook User' : 'Instagram User';
 
-  // Find existing lead by instagram_user_id
-  let lead = await db.findLeadByInstagramId(senderId);
+  // Find existing lead by the platform-scoped sender id.
+  let lead = await db.findLeadByPlatformId(platform, senderId);
 
   if (lead) {
-    console.log(`[meta-service] Lead found: id=${lead.id}`);
+    console.log(`[meta-service] Lead found: id=${lead.id} (${platform})`);
     // Backfill the real name on older leads still showing the placeholder.
-    if (!lead.customer_name || lead.customer_name === 'Instagram User') {
-      const displayName = buildDisplayName(await fetchInstagramProfile(senderId));
+    if (!lead.customer_name || lead.customer_name === placeholder) {
+      const displayName = buildDisplayName(await fetchProfile(platform, senderId));
       if (displayName) {
         await db.updateLead(lead.id, { customer_name: displayName });
         console.log(`[meta-service] Lead name backfilled: "${displayName}"`);
@@ -138,15 +180,15 @@ async function processIncomingMessage(senderId, messageText) {
     }
   } else {
     // Fetch the sender's real profile for the new lead's name.
-    const displayName = buildDisplayName(await fetchInstagramProfile(senderId)) || 'Instagram User';
+    const displayName = buildDisplayName(await fetchProfile(platform, senderId)) || placeholder;
     lead = await db.createLead({
-      branch_id:          branchId,
-      source:             'instagram',
-      customer_name:      displayName,
-      instagram_user_id:  senderId,
-      status:             'new',
+      branch_id:     branchId,
+      source:        platform,
+      customer_name: displayName,
+      [idColumn]:    senderId,
+      status:        'new',
     });
-    console.log(`[meta-service] Lead created: id=${lead.id} name="${displayName}" for sender=${senderId}`);
+    console.log(`[meta-service] Lead created: id=${lead.id} name="${displayName}" for ${platform} sender=${senderId}`);
   }
 
   // Insert incoming message
@@ -187,15 +229,22 @@ function verifyWebhook(query) {
 }
 
 // ── Incoming webhook payload handler (POST) ───────────────────
-// Real Instagram DMs (Instagram Login API) arrive as entry[].messaging[].
-// Meta's "Test" button in the webhook UI sends entry[].changes[].field=messages.
-// Handle BOTH shapes so test events and live traffic both ingest.
+// Both Instagram and Facebook Messenger POST to the same callback URL.
+//   object='instagram' → Instagram DMs  (entry[].messaging[])
+//   object='page'      → Facebook Messenger  (entry[].messaging[])
+// Real DMs arrive as entry[].messaging[]; Meta's webhook "Test" button sends
+// entry[].changes[].field=messages. Handle BOTH shapes for BOTH platforms.
 async function handleWebhook(payload) {
   console.log('[meta-webhook] Webhook received — object:', payload.object);
   console.log('[meta-webhook] Full payload:', JSON.stringify(payload, null, 2));
 
-  if (payload.object !== 'instagram') {
-    console.log('[meta-service] Ignoring non-Instagram payload (object=' + payload.object + ')');
+  // Map the Meta `object` to our internal platform name.
+  const platform =
+    payload.object === 'instagram' ? 'instagram' :
+    payload.object === 'page'      ? 'facebook'  : null;
+
+  if (!platform) {
+    console.log('[meta-service] Ignoring unsupported payload (object=' + payload.object + ')');
     return { received: true };
   }
 
@@ -209,7 +258,7 @@ async function handleWebhook(payload) {
         senderId:    msg.sender?.id,
         messageText: msg.message?.text,
         isEcho:      msg.message?.is_echo === true,
-        source:      'messaging',
+        shape:       'messaging',
       });
     }
 
@@ -221,7 +270,7 @@ async function handleWebhook(payload) {
         senderId:    value.sender?.id,
         messageText: value.message?.text,
         isEcho:      value.message?.is_echo === true,
-        source:      'changes',
+        shape:       'changes',
       });
     }
   }
@@ -238,16 +287,16 @@ async function handleWebhook(payload) {
     }
 
     if (!ev.senderId || !ev.messageText) {
-      console.log(`[meta-service] Skipping ${ev.source} event — missing sender.id or message.text`);
+      console.log(`[meta-service] Skipping ${platform}/${ev.shape} event — missing sender.id or message.text`);
       continue;
     }
 
-    console.log(`[meta-service] Processing message (${ev.source}) from sender=${ev.senderId}: "${ev.messageText}"`);
+    console.log(`[meta-service] Processing ${platform} message (${ev.shape}) from sender=${ev.senderId}: "${ev.messageText}"`);
 
     try {
-      await processIncomingMessage(ev.senderId, ev.messageText);
+      await processIncomingMessage(ev.senderId, ev.messageText, platform);
     } catch (err) {
-      console.error(`[meta-service] Error processing message from sender=${ev.senderId}:`, err.message);
+      console.error(`[meta-service] Error processing ${platform} message from sender=${ev.senderId}:`, err.message);
     }
   }
 
@@ -284,10 +333,33 @@ async function sendInstagramMessage(recipientId, text) {
 }
 
 // ── Send message via Facebook Messenger (Graph API) ──────────
+// POST https://graph.facebook.com/v21.0/me/messages  (PAGE access token)
+// Note: 24-hour standard messaging window — you may only reply within 24h
+// of the user's last message unless using a message tag.
 async function sendFacebookMessage(recipientId, text) {
-  // TODO: implement in Phase 2 after ingestion is confirmed working
-  console.log('[meta-service] sendFacebookMessage — not yet implemented');
-  throw new Error('sendFacebookMessage not yet implemented');
+  const token = process.env.META_PAGE_ACCESS_TOKEN;
+  if (!token) throw new Error('Missing META_PAGE_ACCESS_TOKEN env var');
+
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/me/messages?access_token=${encodeURIComponent(token)}`,
+    {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messaging_type: 'RESPONSE',
+        recipient:      { id: recipientId },
+        message:        { text },
+      }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`Facebook send failed: ${res.status} ${msg}`);
+  }
+  console.log(`[meta-service] Facebook message sent to ${recipientId} (message_id=${data.message_id || 'n/a'})`);
+  return data; // { recipient_id, message_id }
 }
 
 module.exports = { verifyWebhook, handleWebhook, sendInstagramMessage, sendFacebookMessage, createSupabaseClient };

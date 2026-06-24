@@ -8,7 +8,7 @@
 // the client never passes the access token or recipient id.
 // ============================================================
 
-const { sendInstagramMessage, createSupabaseClient } = require('./utils/meta-service');
+const { sendInstagramMessage, sendFacebookMessage, createSupabaseClient } = require('./utils/meta-service');
 
 exports.handler = async (event) => {
   const headers = {
@@ -46,17 +46,23 @@ exports.handler = async (event) => {
     if (!lead) {
       return { statusCode: 404, headers, body: JSON.stringify({ error: 'Lead not found' }) };
     }
-    if (!lead.instagram_user_id) {
-      return { statusCode: 400, headers, body: JSON.stringify({ error: 'Lead has no Instagram recipient id' }) };
-    }
 
     const source = (lead.source || '').toLowerCase();
-    if (source !== 'instagram') {
+
+    // 1) Send via the right platform (throws on API failure — e.g. 24h window closed)
+    if (source === 'instagram') {
+      if (!lead.instagram_user_id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: 'Lead has no Instagram recipient id' }) };
+      }
+      await sendInstagramMessage(lead.instagram_user_id, message);
+    } else if (source === 'facebook') {
+      if (!lead.facebook_user_id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: 'Lead has no Facebook recipient id' }) };
+      }
+      await sendFacebookMessage(lead.facebook_user_id, message);
+    } else {
       return { statusCode: 400, headers, body: JSON.stringify({ error: `Outbound not supported for source "${lead.source}"` }) };
     }
-
-    // 1) Send via Instagram (throws on API failure — e.g. 24h window closed)
-    await sendInstagramMessage(lead.instagram_user_id, message);
 
     // 2) Persist the outgoing message (only after a successful send)
     const rows = await db.insertMessage({
