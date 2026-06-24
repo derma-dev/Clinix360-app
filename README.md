@@ -125,3 +125,4 @@ They get view-only access across all branches.
 6. Tap **Save Cashup**
 
 That's it. No login needed.
+
