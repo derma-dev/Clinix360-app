@@ -182,7 +182,11 @@ let _leadsTabBound = false;
 
 async function loadLeadsTab() {
   const list = document.getElementById('leads-list');
-  if (list) list.innerHTML = '<div class="loading-wrap"><div class="spinner"></div></div>';
+  if (list) list.innerHTML = '<div class="skel-stack" style="padding:14px">'
+    + '<div class="skel" style="height:56px"></div>'
+    + '<div class="skel" style="height:56px"></div>'
+    + '<div class="skel" style="height:56px"></div>'
+    + '<div class="skel" style="height:56px"></div></div>';
 
   if (!_leadsTabBound) {
     _leadsTabBound = true;
@@ -244,7 +248,7 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
   if (!leads.length) {
     list.innerHTML = `
       <div class="leads-empty-state">
-        <div class="leads-empty-icon">💬</div>
+        <div class="leads-empty-icon"><svg class="icon"><use href="#i-inbox"/></svg></div>
         <div class="leads-empty-title">No conversations yet</div>
         <div class="leads-empty-sub">Messages from Instagram and Facebook will appear here</div>
       </div>`;
@@ -718,7 +722,7 @@ async function loadAdminAlerts() {
     updateBadges(0);
     list.innerHTML = `
       <div style="text-align:center;padding:40px 20px;color:#9ca3af">
-        <div style="font-size:32px;margin-bottom:10px">🔔</div>
+        <div style="margin-bottom:10px;color:var(--primary)"><svg class="icon" style="width:34px;height:34px"><use href="#i-bell"/></svg></div>
         <div style="font-weight:600;color:#374151;margin-bottom:4px">No notifications</div>
         <div style="font-size:13px">You're all caught up</div>
       </div>`;
@@ -859,9 +863,9 @@ async function loadAdminBranches() {
         <div class="admin-branch-pin">${b.state ? esc(b.state) + ' · ' : ''}PIN: ${esc(b.pin)}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
-        <button class="icon-text-btn branch-gear-btn" title="Edit branch" onclick="editBranch('${b.id}','${esc(b.name)}','${esc(b.pin)}','${esc(b.state||'')}')">⚙️</button>
+        <button class="icon-text-btn branch-gear-btn" title="Edit branch" onclick="editBranch('${b.id}','${esc(b.name)}','${esc(b.pin)}','${esc(b.state||'')}')"><svg class="icon"><use href="#i-settings"/></svg></button>
         <button class="link-btn" onclick="viewBranchAsAdmin('${b.id}')" style="color:#C4922A">View →</button>
-        <button class="danger-btn" onclick="deleteBranch('${b.id}','${esc(b.name)}')">🗑</button>
+        <button class="danger-btn" onclick="deleteBranch('${b.id}','${esc(b.name)}')"><svg class="icon"><use href="#i-trash"/></svg></button>
       </div>
     </div>
   `).join('');
@@ -986,7 +990,7 @@ function initOverviewDropdowns() {
 async function refreshAdminKPIs() {
   const grid = document.getElementById('admin-kpi-grid');
   if (!grid) return;
-  grid.innerHTML = `<div class="loading-wrap" style="padding:20px;grid-column:1/-1"><div class="spinner"></div></div>`;
+  grid.innerHTML = `<div class="skel-card"></div><div class="skel-card"></div><div class="skel-card"></div><div class="skel-card"></div>`;
 
   const today = getISTDate();
   const ranges = getDateRanges(today);
@@ -1094,8 +1098,8 @@ async function loadAutomations() {
         <div class="automation-meta" style="color:#9ca3af">${lastSent}</div>
       </div>
       <div class="automation-actions">
-        <button class="auto-icon-btn" title="Edit" onclick="showAutomationModal('${a.id}')">✏️</button>
-        <button class="auto-icon-btn delete" title="Delete" onclick="deleteAutomation('${a.id}', '${a.name.replace(/'/g, "\\'")}')">🗑</button>
+        <button class="auto-icon-btn" title="Edit" onclick="showAutomationModal('${a.id}')"><svg class="icon"><use href="#i-edit"/></svg></button>
+        <button class="auto-icon-btn delete" title="Delete" onclick="deleteAutomation('${a.id}', '${a.name.replace(/'/g, "\\'")}')"><svg class="icon"><use href="#i-trash"/></svg></button>
       </div>
     </div>`;
   }).join('');
@@ -1151,7 +1155,7 @@ function showAutomationModal(id = null) {
     _populateAutoBranchList(['all']);
     updateAutoTriggerUI('weekly');
     const actionDisplay = document.getElementById('auto-action-display');
-    if (actionDisplay) actionDisplay.textContent = '✉ Send Email Report';
+    if (actionDisplay) actionDisplay.textContent = 'Send Email Report';
     modal.style.display = 'flex';
     return;
   }
@@ -1179,7 +1183,7 @@ function showAutomationModal(id = null) {
     // Update action type display badge
     const actionDisplay = document.getElementById('auto-action-display');
     if (actionDisplay) {
-      actionDisplay.textContent = data.action_type === 'webhook' ? '↗ Send Webhook' : '✉ Send Email Report';
+      actionDisplay.textContent = data.action_type === 'webhook' ? 'Send Webhook' : 'Send Email Report';
     }
     modal.style.display = 'flex';
   });
@@ -1440,7 +1444,7 @@ async function sendForgotPIN() {
   }
 
   if (email !== CONFIG.ADMIN_EMAIL.toLowerCase()) {
-    msg.textContent = '⛔ Not authorized.';
+    msg.textContent = 'Not authorized.';
     msg.className = 'admin-msg error';
     return;
   }
@@ -1462,15 +1466,15 @@ async function sendForgotPIN() {
     });
 
     if (res.ok) {
-      msg.textContent = '✅ PIN sent to your email.';
+      msg.textContent = 'PIN sent to your email.';
       msg.className = 'admin-msg success';
     } else {
       const err = await res.json().catch(() => ({}));
-      msg.textContent = err.error === 'Not authorized' ? '⛔ Not authorized.' : '⚠️ Could not send email. Try again.';
+      msg.textContent = err.error === 'Not authorized' ? 'Not authorized.' : 'Could not send email. Try again.';
       msg.className = 'admin-msg error';
     }
   } catch {
-    msg.textContent = '⚠️ Network error. Try again.';
+    msg.textContent = 'Network error. Try again.';
     msg.className = 'admin-msg error';
   } finally {
     btn.disabled = false;
@@ -1496,7 +1500,7 @@ async function openDashboard() {
   const today = getISTDate();
   const dateLabel = document.getElementById('dash-date-label');
   const nextBtn = document.getElementById('btn-date-next');
-  if (dateLabel) dateLabel.textContent = (date === today ? 'Today — ' : '📅 ') + formatDisplayDate(date);
+  if (dateLabel) dateLabel.textContent = (date === today ? 'Today — ' : '') + formatDisplayDate(date);
   if (nextBtn) nextBtn.disabled = date >= today;
 
   // Show loading placeholder while status loads (prevents "Not Started" flash)
@@ -1614,7 +1618,7 @@ async function loadTodayStatus(branchId, date) {
         <button class="secondary-btn" id="btn-edit-cashup" style="font-size:13px;padding:8px 14px">Continue</button>
       `;
     }
-    openBtn.textContent = isFinalSubmit ? '📋 View / Edit Cashup' : '📋 Continue Cashup';
+    openBtn.textContent = isFinalSubmit ? 'View / Edit Cashup' : 'Continue Cashup';
     document.getElementById('btn-edit-cashup')?.addEventListener('click', () => openCashupForm(date));
   } else {
     statusCard.innerHTML = `
@@ -1626,7 +1630,7 @@ async function loadTodayStatus(branchId, date) {
         </div>
       </div>
     `;
-    openBtn.textContent = date !== getISTDate() ? '📋 Enter Cashup for This Date' : '📋 Enter Today\'s Cashup';
+    openBtn.textContent = date !== getISTDate() ? 'Enter Cashup for This Date' : 'Enter Today\'s Cashup';
   }
 }
 
@@ -1687,7 +1691,7 @@ async function navigateDashboardDate(date) {
   const label = document.getElementById('dash-date-label');
   const prevBtn = document.getElementById('btn-date-prev');
   const nextBtn = document.getElementById('btn-date-next');
-  if (label) label.textContent = (date === today ? 'Today — ' : '📅 ') + formatDisplayDate(date);
+  if (label) label.textContent = (date === today ? 'Today — ' : '') + formatDisplayDate(date);
   if (nextBtn) nextBtn.disabled = date >= today;
   if (prevBtn) {
     const minDate = state.isAdmin ? null : getISTDateOffset(-7);
@@ -2101,7 +2105,7 @@ async function saveCashup(isFinal = false) {
     const actualVal = document.getElementById('s-actual-closing').value;
     if (actualVal === '' || actualVal === null) {
       showToast('Enter Actual Closing (till count) before submitting final', 'error');
-      if (activeBtn) { activeBtn.disabled = false; activeBtn.textContent = '✓ Submit Final'; }
+      if (activeBtn) { activeBtn.disabled = false; activeBtn.textContent = 'Submit Final'; }
       document.getElementById('s-actual-closing').focus();
       return;
     }
@@ -2116,8 +2120,8 @@ async function saveCashup(isFinal = false) {
     showToast('You can only edit today\'s or yesterday\'s cashup', 'error');
     const draftBtnG = document.getElementById('btn-save-draft');
     const finalBtnG = document.getElementById('btn-submit-final');
-    if (draftBtnG) { draftBtnG.disabled = false; draftBtnG.textContent = '💾 Save Draft'; }
-    if (finalBtnG) { finalBtnG.disabled = false; finalBtnG.textContent = '✓ Submit Final'; }
+    if (draftBtnG) { draftBtnG.disabled = false; draftBtnG.textContent = 'Save Draft'; }
+    if (finalBtnG) { finalBtnG.disabled = false; finalBtnG.textContent = 'Submit Final'; }
     return;
   }
 
@@ -2140,7 +2144,7 @@ async function saveCashup(isFinal = false) {
     });
     if (firstBad) {
       showToast('Every entry with an amount needs a Product/Service — fill the highlighted rows.', 'error');
-      if (activeBtn) { activeBtn.disabled = false; activeBtn.textContent = '✓ Submit Final'; }
+      if (activeBtn) { activeBtn.disabled = false; activeBtn.textContent = 'Submit Final'; }
       firstBad.scrollIntoView({ behavior: 'smooth', block: 'center' });
       firstBad.focus();
       return;
@@ -2273,8 +2277,8 @@ async function saveCashup(isFinal = false) {
   } finally {
     const draftBtnF = document.getElementById('btn-save-draft');
     const finalBtnF = document.getElementById('btn-submit-final');
-    if (draftBtnF) { draftBtnF.disabled = false; draftBtnF.textContent = '💾 Save Draft'; }
-    if (finalBtnF) { finalBtnF.disabled = false; finalBtnF.textContent = '✓ Submit Final'; }
+    if (draftBtnF) { draftBtnF.disabled = false; draftBtnF.textContent = 'Save Draft'; }
+    if (finalBtnF) { finalBtnF.disabled = false; finalBtnF.textContent = 'Submit Final'; }
   }
 }
 
@@ -2561,7 +2565,7 @@ async function runReport() {
     let html = `
       <div class="rpt-header">
         <div class="rpt-header-info">
-          <div class="rpt-header-title">📊 Cashup Report — ${esc(branchLabel)}</div>
+          <div class="rpt-header-title">Cashup Report — ${esc(branchLabel)}</div>
           <div class="rpt-header-sub">${from === to ? fmtDateFull(from) : fmtDateFull(from) + ' → ' + fmtDateFull(to)} &nbsp;·&nbsp; Generated ${esc(now)}</div>
         </div>
       </div>`;
@@ -2664,7 +2668,7 @@ function buildTransactionsSection(entries, showBranch, branchMap, showStaff, pay
         <div class="rpt-section-title">All Transactions</div>
         <div class="rpt-section-kpi">${formatCurrency(total)}</div>
       </div>
-      <button class="rpt-tx-export-btn" onclick="exportTransactionsToDoc()">⬇ Export .doc</button>
+      <button class="rpt-tx-export-btn" onclick="exportTransactionsToDoc()"><svg class="icon"><use href="#i-download"/></svg> Export .doc</button>
     </div>
     ${tableContent}
   </div>`;
@@ -2865,7 +2869,7 @@ function buildExpensesSection(expenses, showBranch, branchMap) {
         <div class="rpt-section-title">Expenses</div>
         ${expenses.length ? `<div class="rpt-section-kpi">${formatCurrency(total)}</div>` : ''}
       </div>
-      ${expenses.length ? `<button class="rpt-tx-export-btn" onclick="exportExpensesToDoc()">⬇ Export .doc</button>` : ''}
+      ${expenses.length ? `<button class="rpt-tx-export-btn" onclick="exportExpensesToDoc()"><svg class="icon"><use href="#i-download"/></svg> Export .doc</button>` : ''}
     </div>
     ${tableContent}
   </div>`;

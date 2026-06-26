@@ -7,12 +7,39 @@
   <title>Clinix360</title>
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="apple-touch-icon" href="favicon.png">
+  <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="fonts/geist.css">
   <link rel="stylesheet" href="styles.css">
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
   <script src="config.js"></script>
 </head>
 <body>
+
+<!-- Icon sprite (Phosphor, regular) — referenced via <svg class="icon"><use href="#i-…"/></svg> -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="i-cashup" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="96" y1="152" x2="160" y2="152" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="120" x2="160" y2="120" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M160,40h40a8,8,0,0,1,8,8V216a8,8,0,0,1-8,8H56a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8H96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M88,72V64a40,40,0,0,1,80,0v8Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-emails" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M32,56H224a0,0,0,0,1,0,0V192a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V56A0,0,0,0,1,32,56Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="224 56 128 144 32 56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-leads" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="224 208 32 208 32 48" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="200 72 128 144 96 112 32 176" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="200 112 200 72 160 72" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-overview" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M104,216V152h48v64h64V120a8,8,0,0,0-2.34-5.66l-80-80a8,8,0,0,0-11.32,0l-80,80A8,8,0,0,0,40,120v96Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-reports" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="48 208 48 136 96 136" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="224" y1="208" x2="32" y2="208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="96 208 96 88 152 88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="152 208 152 40 208 40 208 208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-bell" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M96,192a32,32,0,0,0,64,0" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M56,104a72,72,0,0,1,144,0c0,35.82,8.3,64.6,14.9,76A8,8,0,0,1,208,192H48a8,8,0,0,1-6.88-12C47.71,168.6,56,139.81,56,104Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-settings" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><circle cx="128" cy="128" r="40" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M130.05,206.11c-1.34,0-2.69,0-4,0L94,224a104.61,104.61,0,0,1-34.11-19.2l-.12-36c-.71-1.12-1.38-2.25-2-3.41L25.9,147.24a99.15,99.15,0,0,1,0-38.46l31.84-18.1c.65-1.15,1.32-2.29,2-3.41l.16-36A104.58,104.58,0,0,1,94,32l32,17.89c1.34,0,2.69,0,4,0L162,32a104.61,104.61,0,0,1,34.11,19.2l.12,36c.71,1.12,1.38,2.25,2,3.41l31.85,18.14a99.15,99.15,0,0,1,0,38.46l-31.84,18.1c-.65,1.15-1.32,2.29-2,3.41l-.16,36A104.58,104.58,0,0,1,162,224Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-receipt" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="80" y1="104" x2="176" y2="104" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="136" x2="176" y2="136" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M32,208V56a8,8,0,0,1,8-8H216a8,8,0,0,1,8,8V208l-32-16-32,16-32-16L96,208,64,192Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-plus" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><circle cx="128" cy="128" r="96" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="16"/><line x1="88" y1="128" x2="168" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="128" y1="88" x2="128" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-card" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><rect x="24" y="56" width="208" height="144" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="168" y1="168" x2="200" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="120" y1="168" x2="136" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="24" y1="96" x2="232" y2="96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-key" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M93.17,122.83A71.68,71.68,0,0,1,88,95.91c0-38.58,31.08-70.64,69.64-71.87A72,72,0,0,1,232,98.36C230.73,136.92,198.67,168,160.09,168a71.68,71.68,0,0,1-26.92-5.17h0L120,176H96v24H72v24H40a8,8,0,0,1-8-8V187.31a8,8,0,0,1,2.34-5.65l58.83-58.83Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="180" cy="76" r="12"/></symbol>
+<symbol id="i-chat" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><circle cx="128" cy="128" r="12"/><circle cx="84" cy="128" r="12"/><circle cx="172" cy="128" r="12"/><path d="M79.93,211.11a96,96,0,1,0-35-35h0L32.42,213.46a8,8,0,0,0,10.12,10.12l37.39-12.47Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-inbox" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M32.5,138A72,72,0,1,1,62,167.5l-27.76,8.16a8,8,0,0,1-9.93-9.93Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M163.94,80.11A72,72,0,0,1,223.5,186l8.16,27.76a8,8,0,0,1-9.93,9.93L194,215.5A72.05,72.05,0,0,1,92.06,175.89" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-warning" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M142.41,40.22l87.46,151.87C236,202.79,228.08,216,215.46,216H40.54C27.92,216,20,202.79,26.13,192.09L113.59,40.22C119.89,29.26,136.11,29.26,142.41,40.22Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="128" y1="144" x2="128" y2="104" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="128" cy="180" r="12"/></symbol>
+<symbol id="i-branches" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M136,216V32a8,8,0,0,0-12.44-6.65l-80,53.33A8,8,0,0,0,40,85.35V216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M136,88h72a8,8,0,0,1,8,8V216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="16" y1="216" x2="240" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="112" x2="104" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="72" y1="112" x2="72" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="72" y1="168" x2="72" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="168" x2="104" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-calendar" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><rect x="40" y="40" width="176" height="176" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="176" y1="24" x2="176" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="24" x2="80" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="40" y1="88" x2="216" y2="88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-bolt" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polygon points="160 16 144 96 208 120 96 240 112 160 48 136 160 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-edit" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M92.69,216H48a8,8,0,0,1-8-8V163.31a8,8,0,0,1,2.34-5.65L165.66,34.34a8,8,0,0,1,11.31,0L221.66,79a8,8,0,0,1,0,11.31L98.34,213.66A8,8,0,0,1,92.69,216Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="136" y1="64" x2="192" y2="120" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-trash" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="216" y1="56" x2="40" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="104" x2="104" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="152" y1="104" x2="152" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M200,56V208a8,8,0,0,1-8,8H64a8,8,0,0,1-8-8V56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M168,56V40a16,16,0,0,0-16-16H104A16,16,0,0,0,88,40V56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-logout" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="112 40 48 40 48 216 112 216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="112" y1="128" x2="224" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="184 88 224 128 184 168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-download" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="128" y1="40" x2="128" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="56 144 128 216 200 144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+</svg>
 
 <!-- ============================================================
      SCREEN: HOME — Branch Selector
@@ -25,9 +52,9 @@
       <p class="app-sub">Select your branch to begin</p>
     </div>
     <div class="branch-grid" id="branch-grid">
-      <div class="branch-loading">
-        <div class="loading-wrap"><div class="spinner"></div><span class="loading-text">Loading branches…</span></div>
-      </div>
+      <div class="skel-branch-card"></div>
+      <div class="skel-branch-card"></div>
+      <div class="skel-branch-card"></div>
     </div>
   </div>
 </div>
@@ -84,15 +111,15 @@
     </div>
     <nav class="sidebar-nav">
       <button class="sidebar-item active" data-btab="cashup">
-        <span class="sidebar-icon">📋</span>
+        <span class="sidebar-icon"><svg class="icon"><use href="#i-cashup"/></svg></span>
         <span class="sidebar-label">Daily Cashup</span>
       </button>
       <button class="sidebar-item" data-btab="emails">
-        <span class="sidebar-icon">✉️</span>
+        <span class="sidebar-icon"><svg class="icon"><use href="#i-emails"/></svg></span>
         <span class="sidebar-label">Emails</span>
       </button>
       <button class="sidebar-item" data-btab="leads">
-        <span class="sidebar-icon">📈</span>
+        <span class="sidebar-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
         <span class="sidebar-label">Leads</span>
       </button>
     </nav>
@@ -119,7 +146,7 @@
     <!-- Yesterday closing warning (shown only when yesterday is incomplete) -->
     <div class="yesterday-warning" id="yesterday-warning" style="display:none">
       <div class="yesterday-warning-left">
-        <span class="yesterday-warning-icon">⚠️</span>
+        <span class="yesterday-warning-icon"><svg class="icon"><use href="#i-warning"/></svg></span>
         <div>
           <div class="yesterday-warning-title" id="yesterday-warning-title">Yesterday's closing is pending</div>
           <div class="yesterday-warning-sub">This may affect today's opening balance</div>
@@ -130,12 +157,15 @@
 
     <!-- Today cashup status card -->
     <div class="cashup-status-card" id="cashup-status-card">
-      <div class="loading-wrap" style="padding:16px"><div class="spinner"></div></div>
+      <div class="skel-stack" style="flex:1">
+        <div class="skel skel-line" style="width:38%"></div>
+        <div class="skel skel-line" style="width:62%"></div>
+      </div>
     </div>
 
     <div class="dash-actions-row">
       <button class="primary-btn full-width" id="btn-open-cashup">
-        📋 Enter Today's Cashup
+        Enter Today's Cashup
       </button>
     </div>
 
@@ -164,7 +194,7 @@
    <!-- TAB: Emails -->
    <div class="branch-tab" id="branch-tab-emails">
      <div class="coming-soon">
-       <div class="coming-soon-icon">✉️</div>
+       <div class="coming-soon-icon"><svg class="icon"><use href="#i-emails"/></svg></div>
        <div class="coming-soon-title">Emails</div>
        <div class="coming-soon-sub">Coming soon</div>
      </div>
@@ -189,7 +219,7 @@
 
          <!-- Shown when no conversation is open -->
          <div class="leads-detail-empty" id="leads-detail-empty">
-           <div class="inbox-welcome-icon">💬</div>
+           <div class="inbox-welcome-icon"><svg class="icon"><use href="#i-inbox"/></svg></div>
            <div class="inbox-welcome-title">Clinix360 Inbox</div>
            <div class="inbox-welcome-sub">Select a conversation to start messaging</div>
          </div>
@@ -230,10 +260,10 @@
 
   <!-- ── Branch mobile bottom nav ── -->
   <nav class="admin-bottom-nav">
-    <button class="bottom-nav-item active" data-btab="cashup"><span>📋</span><span>Cashup</span></button>
-    <button class="bottom-nav-item" data-btab="emails"><span>✉️</span><span>Emails</span></button>
-    <button class="bottom-nav-item" data-btab="leads"><span>📈</span><span>Leads</span></button>
-    <button class="bottom-nav-item" id="btn-branch-logout-mobile"><span>←</span><span>Logout</span></button>
+    <button class="bottom-nav-item active" data-btab="cashup"><span><svg class="icon"><use href="#i-cashup"/></svg></span><span>Cashup</span></button>
+    <button class="bottom-nav-item" data-btab="emails"><span><svg class="icon"><use href="#i-emails"/></svg></span><span>Emails</span></button>
+    <button class="bottom-nav-item" data-btab="leads"><span><svg class="icon"><use href="#i-leads"/></svg></span><span>Leads</span></button>
+    <button class="bottom-nav-item" id="btn-branch-logout-mobile"><span><svg class="icon"><use href="#i-logout"/></svg></span><span>Logout</span></button>
   </nav>
 
  </div>
@@ -253,18 +283,18 @@
   <div class="cashup-date-hero-wrap">
     <div class="cashup-date-hero" id="cashup-form-date"></div>
     <div class="cashup-live-time" id="cashup-live-time"></div>
-    <button id="btn-feedback" class="feedback-btn" onclick="openFeedbackModal()">💬 Leave Feedback</button>
+    <button id="btn-feedback" class="feedback-btn" onclick="openFeedbackModal()"><svg class="icon"><use href="#i-chat"/></svg> Leave Feedback</button>
   </div>
 
   <div id="cashup-view-banner" class="view-only-banner" style="display:none">
-    👁 View only — past dates cannot be edited
+    View only — past dates cannot be edited
   </div>
   <div class="cashup-form-wrap" id="cashup-form-wrap">
 
     <!-- Section: Sales Entries -->
     <div class="section-card section-sales">
       <div class="section-header">
-        <span class="section-icon">🧾</span>
+        <span class="section-icon"><svg class="icon"><use href="#i-receipt"/></svg></span>
         <span class="section-title">Sales Entries</span>
         <span class="section-total" id="entries-total">₹0</span>
       </div>
@@ -285,7 +315,7 @@
     <!-- Section: Daily Summary -->
     <div class="section-card section-summary">
       <div class="section-header">
-        <span class="section-icon">📊</span>
+        <span class="section-icon"><svg class="icon"><use href="#i-reports"/></svg></span>
         <span class="section-title">Daily Summary</span>
       </div>
       <div class="summary-grid">
@@ -354,7 +384,7 @@
     <!-- Section: Extra Cash Added -->
     <div class="section-card section-extras">
       <div class="section-header">
-        <span class="section-icon">➕</span>
+        <span class="section-icon"><svg class="icon"><use href="#i-plus"/></svg></span>
         <span class="section-title">Extra Cash Added to Till</span>
         <span class="section-total" id="extras-total">₹0</span>
       </div>
@@ -365,7 +395,7 @@
     <!-- Section: Expenses -->
     <div class="section-card section-expenses">
       <div class="section-header">
-        <span class="section-icon">🧾</span>
+        <span class="section-icon"><svg class="icon"><use href="#i-receipt"/></svg></span>
         <span class="section-title">Expenses</span>
         <span class="section-total" id="expenses-total">₹0</span>
       </div>
@@ -376,8 +406,8 @@
     <!-- Submit -->
     <div class="submit-section">
       <div class="submit-btn-row">
-        <button class="secondary-btn submit-draft-btn" id="btn-save-draft">💾 Save Draft</button>
-        <button class="primary-btn submit-final-btn" id="btn-submit-final">✓ Submit Final</button>
+        <button class="secondary-btn submit-draft-btn" id="btn-save-draft">Save Draft</button>
+        <button class="primary-btn submit-final-btn" id="btn-submit-final">Submit Final</button>
       </div>
       <p class="submit-note" id="submit-note">Save draft anytime · Submit Final requires till count</p>
     </div>
@@ -403,20 +433,20 @@
 
       <nav class="sidebar-nav">
         <button class="sidebar-item active" data-tab="overview">
-          <span class="sidebar-icon">🏠</span>
+          <span class="sidebar-icon"><svg class="icon"><use href="#i-overview"/></svg></span>
           <span class="sidebar-label">Overview</span>
         </button>
         <button class="sidebar-item" data-tab="reports">
-          <span class="sidebar-icon">📊</span>
+          <span class="sidebar-icon"><svg class="icon"><use href="#i-reports"/></svg></span>
           <span class="sidebar-label">Reports</span>
         </button>
         <button class="sidebar-item" data-tab="notifications">
-          <span class="sidebar-icon">🔔</span>
+          <span class="sidebar-icon"><svg class="icon"><use href="#i-bell"/></svg></span>
           <span class="sidebar-label">Notifications</span>
           <span class="sidebar-badge" id="sidebar-notif-badge" style="display:none">0</span>
         </button>
         <button class="sidebar-item" data-tab="settings">
-          <span class="sidebar-icon">⚙️</span>
+          <span class="sidebar-icon"><svg class="icon"><use href="#i-settings"/></svg></span>
           <span class="sidebar-label">Settings</span>
         </button>
       </nav>
@@ -438,7 +468,7 @@
         <!-- Branches -->
         <div class="section-card">
           <div class="section-header">
-            <span class="section-icon">🏢</span>
+            <span class="section-icon"><svg class="icon"><use href="#i-branches"/></svg></span>
             <span class="section-title">Branches</span>
             <button class="icon-text-btn" id="btn-add-branch-admin">+ Add</button>
           </div>
@@ -450,7 +480,7 @@
         <!-- KPI filter bar -->
         <div class="section-card">
           <div class="section-header">
-            <span class="section-icon">📊</span>
+            <span class="section-icon"><svg class="icon"><use href="#i-reports"/></svg></span>
             <span class="section-title">Performance</span>
           </div>
 
@@ -499,7 +529,10 @@
 
           <!-- KPI cards -->
           <div class="admin-kpi-grid" id="admin-kpi-grid">
-            <div class="loading-wrap" style="padding:20px;grid-column:1/-1"><div class="spinner"></div></div>
+            <div class="skel-card"></div>
+            <div class="skel-card"></div>
+            <div class="skel-card"></div>
+            <div class="skel-card"></div>
           </div>
         </div>
 
@@ -514,7 +547,7 @@
 
         <div class="section-card">
           <div class="section-header">
-            <span class="section-icon">📅</span>
+            <span class="section-icon"><svg class="icon"><use href="#i-calendar"/></svg></span>
             <span class="section-title">Date Range</span>
           </div>
           <div class="reports-presets">
@@ -541,7 +574,7 @@
 
         <div class="section-card">
           <div class="section-header">
-            <span class="section-icon">🏢</span>
+            <span class="section-icon"><svg class="icon"><use href="#i-branches"/></svg></span>
             <span class="section-title">Branch</span>
           </div>
           <div class="reports-presets" id="reports-branch-filter">
@@ -556,7 +589,7 @@
 
         <div id="reports-output">
           <div class="reports-empty-state">
-            <div style="font-size:40px;margin-bottom:12px">📊</div>
+            <div class="reports-empty-icon" style="margin-bottom:12px;color:var(--primary)"><svg class="icon"><use href="#i-reports"/></svg></div>
             <div style="font-weight:600;color:#374151;margin-bottom:6px">Select a report type</div>
             <div style="font-size:13px;color:#9ca3af">Choose your date range and run a report</div>
           </div>
@@ -584,7 +617,7 @@
         <div class="section-card settings-card collapsed">
           <div class="section-header settings-head" style="justify-content:space-between">
             <div style="display:flex;align-items:center;gap:8px">
-              <span class="section-icon">⚡</span>
+              <span class="section-icon"><svg class="icon"><use href="#i-bolt"/></svg></span>
               <span class="section-title">Automations</span>
             </div>
             <div style="display:flex;align-items:center;gap:10px">
@@ -602,7 +635,7 @@
         <!-- Payment Modes -->
         <div class="section-card settings-card collapsed">
           <div class="section-header settings-head">
-            <span class="section-icon">💳</span>
+            <span class="section-icon"><svg class="icon"><use href="#i-card"/></svg></span>
             <span class="section-title">Payment Modes</span>
             <span class="settings-chevron">▾</span>
           </div>
@@ -619,7 +652,7 @@
         <!-- Admin PIN -->
         <div class="section-card settings-card collapsed">
           <div class="section-header settings-head">
-            <span class="section-icon">🔑</span>
+            <span class="section-icon"><svg class="icon"><use href="#i-key"/></svg></span>
             <span class="section-title">Change Admin PIN</span>
             <span class="settings-chevron">▾</span>
           </div>
@@ -639,20 +672,20 @@
     <!-- ── Mobile bottom nav ── -->
     <nav class="admin-bottom-nav">
       <button class="bottom-nav-item active" data-tab="overview">
-        <span>🏠</span><span>Overview</span>
+        <span><svg class="icon"><use href="#i-overview"/></svg></span><span>Overview</span>
       </button>
       <button class="bottom-nav-item" data-tab="reports">
-        <span>📊</span><span>Reports</span>
+        <span><svg class="icon"><use href="#i-reports"/></svg></span><span>Reports</span>
       </button>
       <button class="bottom-nav-item" data-tab="notifications">
-        <span>🔔</span><span>Notifs</span>
+        <span><svg class="icon"><use href="#i-bell"/></svg></span><span>Notifs</span>
         <span class="sidebar-badge" id="bottom-notif-badge" style="display:none">0</span>
       </button>
       <button class="bottom-nav-item" data-tab="settings">
-        <span>⚙️</span><span>Settings</span>
+        <span><svg class="icon"><use href="#i-settings"/></svg></span><span>Settings</span>
       </button>
       <button class="bottom-nav-item" id="btn-admin-panel-back-mobile">
-        <span>←</span><span>Exit</span>
+        <span><svg class="icon"><use href="#i-logout"/></svg></span><span>Exit</span>
       </button>
     </nav>
 
@@ -776,7 +809,7 @@
     <div style="margin-bottom:14px">
       <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Action</label>
       <div id="auto-action-display" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px 14px;font-size:14px;color:#374151">
-        ✉ Send Email Report
+        Send Email Report
       </div>
     </div>
 

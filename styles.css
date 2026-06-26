@@ -6,7 +6,7 @@
   --primary: #C4922A;
   --primary-dark: #8B6508;
   --primary-light: #fdf3e3;
-  --accent: #ec407a;
+  --accent: #8B6508; /* was pink #ec407a — unified to single warm accent (#4) */
   --success: #43a047;
   --warning: #fb8c00;
   --danger: #e53935;
@@ -15,11 +15,18 @@
   --border: #e5e7eb;
   --bg: #faf6f1;
   --card: #ffffff;
-  --shadow: 0 2px 12px rgba(0,0,0,0.08);
-  --shadow-lg: 0 8px 32px rgba(0,0,0,0.12);
+  --shadow: 0 2px 12px rgba(139,101,8,0.10);
+  --shadow-lg: 0 8px 32px rgba(139,101,8,0.14);
   --radius: 14px;
   --radius-sm: 8px;
-  --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font: 'Geist', 'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+/* Tabular figures — money/data align in columns (#2) */
+.stat-value, .summary-value, .section-total, .admin-kpi-value, .rpt-kpi-value,
+.cashup-live-time, .summary-input, input[type="number"], .num-btn {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -57,7 +64,7 @@ html, body {
    ============================================================ */
 
 .home-wrap {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -169,7 +176,7 @@ html, body {
    ============================================================ */
 
 .pin-screen-wrap {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -462,12 +469,11 @@ html, body {
 }
 
 .stat-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  font-size: 12px;
+  letter-spacing: 0;
   color: var(--text-muted);
   margin-bottom: 8px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .stat-value {
@@ -1777,7 +1783,7 @@ html, body {
 /* ── Lead Hub — Inbox ── */
 .leads-hub {
   display: flex;
-  height: calc(100vh - 56px);
+  height: calc(100dvh - 56px);
   overflow: hidden;
 }
 
@@ -2167,7 +2173,7 @@ html, body {
 @media (max-width: 640px) {
   .leads-hub {
     position: relative;
-    height: calc(100vh - 112px);
+    height: calc(100dvh - 112px);
     overflow: hidden;
   }
 
@@ -2762,3 +2768,58 @@ html, body {
   font-size: 13px; color: #374151; cursor: pointer;
 }
 .auto-check-label input[type="checkbox"] { accent-color: var(--primary); }
+
+/* ============================================================
+   ICONS (Phosphor sprite) — #3
+   ============================================================ */
+.icon {
+  width: 1.15em;
+  height: 1.15em;
+  display: inline-block;
+  vertical-align: -0.18em;
+  flex-shrink: 0;
+  color: currentColor;
+  pointer-events: none;
+}
+.sidebar-icon .icon { width: 20px; height: 20px; vertical-align: middle; }
+.bottom-nav-item .icon { width: 22px; height: 22px; }
+.section-icon .icon { width: 19px; height: 19px; vertical-align: -0.22em; }
+.branch-icon .icon { width: 22px; height: 22px; }
+.coming-soon-icon .icon,
+.inbox-welcome-icon .icon,
+.leads-empty-icon .icon,
+.reports-empty-icon .icon { width: 40px; height: 40px; }
+
+/* ============================================================
+   SKELETON LOADERS — #7
+   ============================================================ */
+@keyframes skel-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skel {
+  border-radius: 8px;
+  background: linear-gradient(90deg,
+    rgba(139,101,8,0.06) 25%,
+    rgba(139,101,8,0.13) 37%,
+    rgba(139,101,8,0.06) 63%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
+.skel-stack { display: flex; flex-direction: column; gap: 14px; }
+.skel-line { height: 12px; border-radius: 6px; }
+.skel-branch-card {
+  height: 84px; border-radius: var(--radius);
+  background: linear-gradient(90deg,
+    rgba(139,101,8,0.06) 25%, rgba(139,101,8,0.13) 37%, rgba(139,101,8,0.06) 63%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+}
+.skel-card {
+  height: 80px; border-radius: var(--radius);
+  background: linear-gradient(90deg,
+    rgba(139,101,8,0.06) 25%, rgba(139,101,8,0.13) 37%, rgba(139,101,8,0.06) 63%);
+  background-size: 200% 100%;
+  animation: skel-shimmer 1.4s ease-in-out infinite;
+}
