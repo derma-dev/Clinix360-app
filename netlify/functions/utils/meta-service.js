@@ -16,6 +16,29 @@ function getConfig() {
   return cfg;
 }
 
+// ── Platform tables ───────────────────────────────────────────
+// Column on `leads` that stores the platform-scoped sender id, and the name
+// shown until the real profile name is known.
+const ID_COLUMNS = {
+  instagram: 'instagram_user_id',
+  facebook:  'facebook_user_id',
+  whatsapp:  'whatsapp_user_id',
+};
+
+const PLACEHOLDER_NAMES = {
+  instagram: 'Instagram User',
+  facebook:  'Facebook User',
+  whatsapp:  'WhatsApp User',
+};
+
+// Throw on an unknown platform rather than silently defaulting — a wrong column
+// here writes a sender id into another platform's column and corrupts dedupe.
+function idColumnFor(platform) {
+  const col = ID_COLUMNS[platform];
+  if (!col) throw new Error(`[meta-service] Unknown platform: "${platform}"`);
+  return col;
+}
+
 // ── Supabase REST client ──────────────────────────────────────
 // Uses Node 18 built-in fetch — no extra dependency needed.
 function createSupabaseClient() {
@@ -29,10 +52,6 @@ function createSupabaseClient() {
     'Content-Type':  'application/json',
     Prefer:          'return=representation',
   };
-
-  // Column on `leads` that stores the platform-scoped sender id.
-  const idColumnFor = (platform) =>
-    platform === 'facebook' ? 'facebook_user_id' : 'instagram_user_id';
 
   return {
     idColumnFor,
@@ -81,7 +100,7 @@ function createSupabaseClient() {
 
     async getLeadById(id) {
       const res = await fetch(
-        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,instagram_user_id,facebook_user_id,source&limit=1`,
+        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,instagram_user_id,facebook_user_id,whatsapp_user_id,source&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`lead fetch failed: ${res.status} ${await res.text()}`);
@@ -142,7 +161,10 @@ async function fetchFacebookProfile(psid) {
 }
 
 // Dispatch to the right profile fetcher by platform.
+// WhatsApp has no profile API — the name rides in the webhook payload
+// (contacts[].profile.name), so it's passed in instead of fetched.
 function fetchProfile(platform, senderId) {
+  if (platform === 'whatsapp') return Promise.resolve(null);
   return platform === 'facebook'
     ? fetchFacebookProfile(senderId)
     : fetchInstagramProfile(senderId);
@@ -156,14 +178,16 @@ function buildDisplayName(profile) {
   return profile.username || profile.name || null;
 }
 
-// ── Process one incoming message (Instagram OR Facebook) ──────
-async function processIncomingMessage(senderId, messageText, platform = 'instagram') {
+// ── Process one incoming message (Instagram, Facebook OR WhatsApp) ──
+// `profileName` is set only for WhatsApp, which ships the sender's name in the
+// webhook payload instead of exposing a profile API.
+async function processIncomingMessage(senderId, messageText, platform = 'instagram', profileName = null) {
   const branchId = process.env.META_BRANCH_ID;
   if (!branchId) throw new Error('Missing META_BRANCH_ID env var');
 
   const db          = createSupabaseClient();
-  const idColumn    = db.idColumnFor(platform);             // instagram_user_id | facebook_user_id
-  const placeholder = platform === 'facebook' ? 'Facebook User' : 'Instagram User';
+  const idColumn    = db.idColumnFor(platform);             // instagram_user_id | facebook_user_id | whatsapp_user_id
+  const placeholder = PLACEHOLDER_NAMES[platform];
 
   // Find existing lead by the platform-scoped sender id.
   let lead = await db.findLeadByPlatformId(platform, senderId);
@@ -172,7 +196,7 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
     console.log(`[meta-service] Lead found: id=${lead.id} (${platform})`);
     // Backfill the real name on older leads still showing the placeholder.
     if (!lead.customer_name || lead.customer_name === placeholder) {
-      const displayName = buildDisplayName(await fetchProfile(platform, senderId));
+      const displayName = profileName || buildDisplayName(await fetchProfile(platform, senderId));
       if (displayName) {
         await db.updateLead(lead.id, { customer_name: displayName });
         console.log(`[meta-service] Lead name backfilled: "${displayName}"`);
@@ -180,7 +204,7 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
     }
   } else {
     // Fetch the sender's real profile for the new lead's name.
-    const displayName = buildDisplayName(await fetchProfile(platform, senderId)) || placeholder;
+    const displayName = profileName || buildDisplayName(await fetchProfile(platform, senderId)) || placeholder;
     lead = await db.createLead({
       branch_id:     branchId,
       source:        platform,
@@ -228,51 +252,88 @@ function verifyWebhook(query) {
   return { valid: false };
 }
 
-// ── Incoming webhook payload handler (POST) ───────────────────
-// Both Instagram and Facebook Messenger POST to the same callback URL.
-//   object='instagram' → Instagram DMs  (entry[].messaging[])
-//   object='page'      → Facebook Messenger  (entry[].messaging[])
-// Real DMs arrive as entry[].messaging[]; Meta's webhook "Test" button sends
-// entry[].changes[].field=messages. Handle BOTH shapes for BOTH platforms.
-async function handleWebhook(payload) {
-  console.log('[meta-webhook] Webhook received — object:', payload.object);
-  console.log('[meta-webhook] Full payload:', JSON.stringify(payload, null, 2));
+// ── Payload parsing (pure — see meta-service.test.js) ─────────
+// All three platforms POST to the same callback URL, keyed by `object`:
+//   object='instagram'                 → Instagram DMs        (entry[].messaging[])
+//   object='page'                      → Facebook Messenger   (entry[].messaging[])
+//   object='whatsapp_business_account' → WhatsApp Cloud API   (entry[].changes[])
+function platformFor(object) {
+  return object === 'instagram'                 ? 'instagram'
+       : object === 'page'                      ? 'facebook'
+       : object === 'whatsapp_business_account' ? 'whatsapp'
+       : null;
+}
 
-  // Map the Meta `object` to our internal platform name.
-  const platform =
-    payload.object === 'instagram' ? 'instagram' :
-    payload.object === 'page'      ? 'facebook'  : null;
+// Flatten a webhook payload into a list of message events.
+// Returns { platform: null, events: [] } for anything we don't handle.
+function extractEvents(payload) {
+  const platform = platformFor(payload.object);
+  if (!platform) return { platform: null, events: [] };
 
-  if (!platform) {
-    console.log('[meta-service] Ignoring unsupported payload (object=' + payload.object + ')');
-    return { received: true };
-  }
-
-  // Collect message events from both payload shapes into a flat list.
   const events = [];
 
   for (const entry of (payload.entry || [])) {
-    // Shape A — real DMs: entry[].messaging[]
+    // Shape A — real FB/IG DMs: entry[].messaging[]
     for (const msg of (entry.messaging || [])) {
       events.push({
         senderId:    msg.sender?.id,
         messageText: msg.message?.text,
+        profileName: null,
         isEcho:      msg.message?.is_echo === true,
         shape:       'messaging',
       });
     }
 
-    // Shape B — Meta test button: entry[].changes[].field=messages
+    // Shape B — entry[].changes[].field=messages.
+    // Used by BOTH Meta's FB/IG test button AND real WhatsApp traffic, but the
+    // `value` differs completely between them — hence the split below.
     for (const change of (entry.changes || [])) {
       if (change.field !== 'messages') continue;
       const value = change.value || {};
+
+      if (platform === 'whatsapp') {
+        // WA: value.messages[] + value.contacts[] (name inline, no profile API).
+        // Delivery receipts arrive as value.statuses[] with no messages[] —
+        // the loop below skips them for free.
+        const nameByWaId = new Map(
+          (value.contacts || []).map((c) => [c.wa_id, c.profile?.name])
+        );
+        for (const m of (value.messages || [])) {
+          events.push({
+            senderId:    m.from,
+            messageText: m.text?.body,   // non-text (image/audio/…) → undefined → skipped downstream
+            profileName: nameByWaId.get(m.from) || null,
+            isEcho:      false,          // we only subscribe `messages`, not `message_echoes`
+            shape:       'whatsapp',
+          });
+        }
+        continue;
+      }
+
+      // FB/IG test button: value.sender / value.message
       events.push({
         senderId:    value.sender?.id,
         messageText: value.message?.text,
+        profileName: null,
         isEcho:      value.message?.is_echo === true,
         shape:       'changes',
       });
     }
+  }
+
+  return { platform, events };
+}
+
+// ── Incoming webhook payload handler (POST) ───────────────────
+async function handleWebhook(payload) {
+  console.log('[meta-webhook] Webhook received — object:', payload.object);
+  console.log('[meta-webhook] Full payload:', JSON.stringify(payload, null, 2));
+
+  const { platform, events } = extractEvents(payload);
+
+  if (!platform) {
+    console.log('[meta-service] Ignoring unsupported payload (object=' + payload.object + ')');
+    return { received: true };
   }
 
   if (!events.length) {
@@ -294,7 +355,7 @@ async function handleWebhook(payload) {
     console.log(`[meta-service] Processing ${platform} message (${ev.shape}) from sender=${ev.senderId}: "${ev.messageText}"`);
 
     try {
-      await processIncomingMessage(ev.senderId, ev.messageText, platform);
+      await processIncomingMessage(ev.senderId, ev.messageText, platform, ev.profileName);
     } catch (err) {
       console.error(`[meta-service] Error processing ${platform} message from sender=${ev.senderId}:`, err.message);
     }
@@ -362,4 +423,54 @@ async function sendFacebookMessage(recipientId, text) {
   return data; // { recipient_id, message_id }
 }
 
-module.exports = { verifyWebhook, handleWebhook, sendInstagramMessage, sendFacebookMessage, createSupabaseClient };
+// ── Send message via WhatsApp (Cloud API) ────────────────────
+// POST https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages
+// Unlike FB/IG this takes the phone number id in the PATH (not `me`), and the
+// recipient is a wa_id (phone number in international format), not a PSID/IGSID.
+// Note: 24-hour service window — free-form replies only work within 24h of the
+// customer's last message. Outside it, WhatsApp requires a paid template and
+// this call fails (surfaced as a 502 by meta-send).
+async function sendWhatsAppMessage(recipientId, text) {
+  const token         = process.env.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  if (!token)         throw new Error('Missing WHATSAPP_ACCESS_TOKEN env var');
+  if (!phoneNumberId) throw new Error('Missing WHATSAPP_PHONE_NUMBER_ID env var');
+
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/${encodeURIComponent(phoneNumberId)}/messages`,
+    {
+      method:  'POST',
+      headers: {
+        Authorization:  `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        recipient_type:    'individual',
+        to:                recipientId,
+        type:              'text',
+        text:              { body: text },
+      }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`WhatsApp send failed: ${res.status} ${msg}`);
+  }
+  console.log(`[meta-service] WhatsApp message sent to ${recipientId} (message_id=${data.messages?.[0]?.id || 'n/a'})`);
+  return data; // { messaging_product, contacts:[...], messages:[{ id }] }
+}
+
+module.exports = {
+  verifyWebhook,
+  handleWebhook,
+  sendInstagramMessage,
+  sendFacebookMessage,
+  sendWhatsAppMessage,
+  createSupabaseClient,
+  // exported for tests
+  extractEvents,
+  idColumnFor,
+};

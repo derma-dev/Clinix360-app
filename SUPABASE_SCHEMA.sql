@@ -155,11 +155,14 @@ ALTER TABLE leads ADD COLUMN IF NOT EXISTS source TEXT DEFAULT '';
 -- Meta DM integration: platform-scoped sender ids used to dedupe inbound leads
 --   instagram_user_id -> Instagram-scoped id (IGSID) for IG DM leads
 --   facebook_user_id  -> Page-scoped id (PSID) for Facebook Messenger leads
+--   whatsapp_user_id  -> wa_id (phone number, international format) for WhatsApp leads
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram_user_id TEXT;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook_user_id  TEXT;
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS whatsapp_user_id  TEXT;
 CREATE INDEX IF NOT EXISTS idx_leads_branch ON leads(branch_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_leads_instagram_user ON leads(instagram_user_id);
 CREATE INDEX IF NOT EXISTS idx_leads_facebook_user  ON leads(facebook_user_id);
+CREATE INDEX IF NOT EXISTS idx_leads_whatsapp_user  ON leads(whatsapp_user_id);
 
 -- Notes on a lead (many per lead).
 CREATE TABLE IF NOT EXISTS lead_notes (

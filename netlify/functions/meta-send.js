@@ -8,7 +8,7 @@
 // the client never passes the access token or recipient id.
 // ============================================================
 
-const { sendInstagramMessage, sendFacebookMessage, createSupabaseClient } = require('./utils/meta-service');
+const { sendInstagramMessage, sendFacebookMessage, sendWhatsAppMessage, createSupabaseClient } = require('./utils/meta-service');
 
 exports.handler = async (event) => {
   const headers = {
@@ -60,6 +60,11 @@ exports.handler = async (event) => {
         return { statusCode: 400, headers, body: JSON.stringify({ error: 'Lead has no Facebook recipient id' }) };
       }
       await sendFacebookMessage(lead.facebook_user_id, message);
+    } else if (source === 'whatsapp') {
+      if (!lead.whatsapp_user_id) {
+        return { statusCode: 400, headers, body: JSON.stringify({ error: 'Lead has no WhatsApp recipient id' }) };
+      }
+      await sendWhatsAppMessage(lead.whatsapp_user_id, message);
     } else {
       return { statusCode: 400, headers, body: JSON.stringify({ error: `Outbound not supported for source "${lead.source}"` }) };
     }
