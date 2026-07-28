@@ -2823,3 +2823,106 @@ html, body {
   background-size: 200% 100%;
   animation: skel-shimmer 1.4s ease-in-out infinite;
 }
+
+/* ============================================================
+   ADMIN — Leads pipeline (KPIs + table + chat modal)
+   ============================================================ */
+.leads-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.leads-kpi-tile {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow);
+}
+.leads-kpi-value { font-size: 26px; font-weight: 800; color: var(--text); line-height: 1.1; }
+.leads-kpi-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+.leads-kpi-sources { display: flex; flex-direction: column; justify-content: center; gap: 8px; }
+.leads-src-chips { display: flex; flex-wrap: wrap; gap: 10px; }
+.leads-src-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 700; color: var(--text); }
+
+/* small round platform badge for tables/chips (base .conv-platform-icon is 46px) */
+.conv-platform-icon.sm, .leads-src-chip .conv-platform-icon, .leads-table .conv-platform-icon {
+  width: 26px; height: 26px; font-size: 10px;
+}
+
+.section-count { margin-left: 8px; font-size: 13px; font-weight: 700; color: var(--text-muted); }
+
+.leads-filters-row { flex-wrap: wrap; }
+.leads-search-group { flex: 1; min-width: 160px; }
+
+.leads-table-wrap { overflow-x: auto; }
+.leads-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.leads-table thead th {
+  text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 700;
+  color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em;
+  border-bottom: 1px solid var(--border); white-space: nowrap;
+}
+.leads-table tbody td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.leads-table tbody tr:last-child td { border-bottom: none; }
+.leads-table tbody tr:hover { background: var(--primary-light); }
+.leads-table .lt-name { font-weight: 600; color: var(--text); white-space: nowrap; }
+.leads-table .lt-branch { color: var(--text-muted); white-space: nowrap; }
+.leads-table .lt-time { color: var(--text-muted); white-space: nowrap; font-size: 13px; }
+
+.lead-status-select {
+  border: 1px solid var(--border); border-radius: 999px; padding: 5px 10px;
+  font-size: 12px; font-weight: 700; cursor: pointer; background: var(--card);
+  appearance: none; text-transform: capitalize;
+}
+.lead-status-select.st-new       { color: #b45309; background: #fff7ed; border-color: #fed7aa; }
+.lead-status-select.st-contacted { color: #1d4ed8; background: #eff6ff; border-color: #bfdbfe; }
+.lead-status-select.st-converted { color: #15803d; background: #f0fdf4; border-color: #bbf7d0; }
+.lead-status-select.st-lost      { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+
+.lead-chat-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--border);
+  background: var(--card); color: var(--primary); cursor: pointer; transition: all .15s;
+}
+.lead-chat-btn:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+.lead-chat-btn .icon { width: 17px; height: 17px; }
+
+/* Chat modal — reuses the branch inbox .leads-convo-* internals */
+.lead-chat-card {
+  padding: 0; overflow: hidden;
+  width: min(560px, 94vw); height: min(680px, 88vh);
+  display: flex; flex-direction: column;
+}
+.lead-chat-card .leads-convo-log { background: #eae6df; }
+.lead-chat-close {
+  margin-left: auto; border: none; background: transparent; cursor: pointer;
+  font-size: 26px; line-height: 1; color: var(--text-muted); padding: 0 4px;
+}
+.lead-chat-close:hover { color: var(--text); }
+
+/* ── Settings → Connected Accounts ── */
+.integ-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.integ-row:last-child { border-bottom: none; }
+.integ-row .conv-platform-icon { width: 38px; height: 38px; font-size: 12px; }
+.integ-info { flex: 1; min-width: 0; }
+.integ-name { font-size: 14px; font-weight: 700; color: var(--text); }
+.integ-status { font-size: 12.5px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+.integ-dot { width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; flex-shrink: 0; }
+.integ-status.connected    { color: var(--success); }
+.integ-status.connected .integ-dot { background: var(--success); }
+.integ-status.disconnected .integ-dot { background: #cbd5e1; }
+
+/* Connect / Disconnect button */
+.integ-btn {
+  flex-shrink: 0; padding: 7px 16px; border-radius: 999px;
+  font-size: 13px; font-weight: 700; cursor: pointer;
+  border: 1.5px solid transparent; transition: all .15s;
+}
+.integ-btn.connect { background: var(--success); color: #fff; }
+.integ-btn.connect:hover { filter: brightness(0.95); }
+.integ-btn.disconnect { background: transparent; color: var(--danger); border-color: var(--border); }
+.integ-btn.disconnect:hover { border-color: var(--danger); background: #fef2f2; }

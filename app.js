@@ -166,9 +166,10 @@ function switchAdminTab(tab) {
   const tabEl = document.getElementById('admin-tab-' + tab);
   if (tabEl) tabEl.classList.add('active');
   document.querySelectorAll('[data-tab="' + tab + '"]').forEach(b => b.classList.add('active'));
+  if (tab === 'leads') loadAdminLeads();
   if (tab === 'reports') initReportsTab();
   if (tab === 'notifications') loadAdminAlerts();
-  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); }
+  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); }
   setRoute('#/admin/' + tab);
 }
 
@@ -356,29 +357,8 @@ async function loadLeadMessages(leadId) {
     return;
   }
 
-  const lead        = _leads.find(l => l.id === leadId);
-  const src         = (lead?.source || '').toLowerCase();
-  const avatarLabel = src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : src === 'whatsapp' ? 'WA' : (lead?.source || '?').slice(0, 2).toUpperCase();
-
-  let lastDate = null;
-  log.innerHTML = data.map(m => {
-    const isIncoming = ['in', 'incoming'].includes(m.direction);
-    const msgDate    = m.created_at.split('T')[0];
-    const separator  = msgDate !== lastDate
-      ? `<div class="convo-date-sep"><span>${formatDateSeparator(msgDate)}</span></div>`
-      : '';
-    lastDate = msgDate;
-    const timeStr = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
-    return `${separator}
-    <div class="leads-convo-msg ${isIncoming ? 'incoming' : 'outgoing'} convo-msg-anim">
-      ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${esc(avatarLabel)}</div>` : ''}
-      <div class="convo-msg-body">
-        <div class="leads-convo-msg-text">${esc(m.message)}</div>
-        <div class="leads-convo-msg-meta">${timeStr}</div>
-      </div>
-    </div>`;
-  }).join('');
-
+  const lead = _leads.find(l => l.id === leadId);
+  log.innerHTML = renderThreadHtml(data, lead);
   log.scrollTop = log.scrollHeight;
 
   // Sync the inbox card preview with the real last message. The left list builds
@@ -439,8 +419,8 @@ async function sendLeadMessage() {
 }
 
 // Append an outgoing bubble in a pending ("Sending…") state. Returns the node.
-function appendOutgoingBubble(text) {
-  const log = document.getElementById('leads-convo-log');
+// `log` defaults to the branch inbox; the admin chat modal passes its own log.
+function appendOutgoingBubble(text, log = document.getElementById('leads-convo-log')) {
   if (!log) return null;
   log.querySelector('.leads-convo-empty')?.remove();
 
@@ -470,6 +450,347 @@ function markBubbleFailed(bubble) {
   bubble.classList.add('send-failed');
   const meta = bubble.querySelector('.leads-convo-msg-meta');
   if (meta) meta.textContent = 'Failed — not sent';
+}
+
+// Build the chat thread HTML for a message list (pure). Shared by the branch
+// inbox (loadLeadMessages) and the admin Leads chat modal (loadAdminChat).
+function renderThreadHtml(data, lead) {
+  const src         = (lead?.source || '').toLowerCase();
+  const avatarLabel = sourceLabel(src);
+  let lastDate = null;
+  return data.map(m => {
+    const isIncoming = ['in', 'incoming'].includes(m.direction);
+    const msgDate    = m.created_at.split('T')[0];
+    const separator  = msgDate !== lastDate
+      ? `<div class="convo-date-sep"><span>${formatDateSeparator(msgDate)}</span></div>`
+      : '';
+    lastDate = msgDate;
+    const timeStr = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+    return `${separator}
+    <div class="leads-convo-msg ${isIncoming ? 'incoming' : 'outgoing'} convo-msg-anim">
+      ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${esc(avatarLabel)}</div>` : ''}
+      <div class="convo-msg-body">
+        <div class="leads-convo-msg-text">${esc(m.message)}</div>
+        <div class="leads-convo-msg-meta">${timeStr}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ============================================================
+// ADMIN — Leads pipeline (cross-branch: KPIs + table + chat)
+// ============================================================
+
+let _adminLeadsAll   = [];
+let _adminLeadsBound = false;
+
+function sourceLabel(src) {
+  return src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : src === 'whatsapp' ? 'WA'
+       : (src || '?').slice(0, 2).toUpperCase();
+}
+function sourceLabelFull(src) {
+  return src === 'instagram' ? 'Instagram' : src === 'facebook' ? 'Facebook' : src === 'whatsapp' ? 'WhatsApp'
+       : src ? src.charAt(0).toUpperCase() + src.slice(1) : 'Other';
+}
+function branchName(id) {
+  return (state.branches || []).find(b => b.id === id)?.name || '—';
+}
+
+async function loadAdminLeads() {
+  const table = document.getElementById('leads-admin-table');
+  if (table) table.innerHTML = '<div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>';
+
+  if (!_adminLeadsBound) {
+    _adminLeadsBound = true;
+    ['leads-filter-branch', 'leads-filter-source', 'leads-filter-status'].forEach(id =>
+      document.getElementById(id)?.addEventListener('change', applyLeadsFilters));
+    document.getElementById('leads-filter-search')?.addEventListener('input', applyLeadsFilters);
+  }
+
+  // Only columns proven present in the live DB (mirrors the branch inbox query).
+  const { data, error } = await db
+    .from('leads')
+    .select('id, customer_name, source, status, created_at, branch_id')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[admin leads]', error.message);
+    if (table) table.innerHTML = `<p style="color:var(--danger);padding:16px;font-size:13px;text-align:center">${esc(error.message)}</p>`;
+    return;
+  }
+
+  _adminLeadsAll = data || [];
+  populateLeadsFilterOptions(_adminLeadsAll);
+  applyLeadsFilters();
+}
+
+function populateLeadsFilterOptions(leads) {
+  const branchSel = document.getElementById('leads-filter-branch');
+  if (branchSel && branchSel.options.length <= 1) {
+    (state.branches || []).forEach(b => {
+      const o = document.createElement('option');
+      o.value = b.id; o.textContent = b.name;
+      branchSel.appendChild(o);
+    });
+  }
+  const srcSel = document.getElementById('leads-filter-source');
+  if (srcSel) {
+    const have = new Set(Array.from(srcSel.options).map(o => o.value));
+    [...new Set(leads.map(l => (l.source || '').toLowerCase()).filter(Boolean))].forEach(s => {
+      if (have.has(s)) return;
+      const o = document.createElement('option');
+      o.value = s; o.textContent = sourceLabelFull(s);
+      srcSel.appendChild(o);
+    });
+  }
+}
+
+function applyLeadsFilters() {
+  const branch = document.getElementById('leads-filter-branch')?.value || '';
+  const source = document.getElementById('leads-filter-source')?.value || '';
+  const status = document.getElementById('leads-filter-status')?.value || '';
+  const q      = (document.getElementById('leads-filter-search')?.value || '').trim().toLowerCase();
+
+  // KPIs reflect branch/source/search (NOT status — so the status funnel stays meaningful);
+  // the table applies the status filter on top.
+  const kpiSet = _adminLeadsAll.filter(l =>
+    (!branch || l.branch_id === branch) &&
+    (!source || (l.source || '').toLowerCase() === source) &&
+    (!q || (l.customer_name || '').toLowerCase().includes(q)));
+  const tableSet = kpiSet.filter(l => !status || (l.status || 'new').toLowerCase() === status);
+
+  renderLeadsKpis(kpiSet);
+  renderLeadsTable(tableSet);
+  const countEl = document.getElementById('leads-admin-count');
+  if (countEl) countEl.textContent = tableSet.length ? String(tableSet.length) : '';
+}
+
+function leadKpiTile(label, value) {
+  return `<div class="leads-kpi-tile"><div class="leads-kpi-value">${esc(String(value))}</div><div class="leads-kpi-label">${esc(label)}</div></div>`;
+}
+
+function renderLeadsKpis(leads) {
+  const grid = document.getElementById('leads-kpi-grid');
+  if (!grid) return;
+  const total = leads.length;
+  const by = { new: 0, contacted: 0, converted: 0, lost: 0 };
+  const bySource = {};
+  leads.forEach(l => {
+    const s = (l.status || 'new').toLowerCase();
+    by[s] = (by[s] || 0) + 1;
+    const src = (l.source || 'other').toLowerCase();
+    bySource[src] = (bySource[src] || 0) + 1;
+  });
+  const conv  = total ? Math.round((by.converted / total) * 100) : 0;
+  const chips = Object.keys(bySource).sort().map(s =>
+    `<span class="leads-src-chip"><span class="conv-platform-icon ${esc(s)}">${esc(sourceLabel(s))}</span>${bySource[s]}</span>`).join('');
+
+  grid.innerHTML = `
+    ${leadKpiTile('Total leads', total)}
+    ${leadKpiTile('New', by.new || 0)}
+    ${leadKpiTile('Converted', by.converted || 0)}
+    ${leadKpiTile('Conversion', conv + '%')}
+    <div class="leads-kpi-tile leads-kpi-sources">
+      <div class="leads-kpi-label">By source</div>
+      <div class="leads-src-chips">${chips || '<span style="color:#9ca3af">—</span>'}</div>
+    </div>`;
+}
+
+function renderLeadsTable(leads) {
+  const wrap = document.getElementById('leads-admin-table');
+  if (!wrap) return;
+
+  if (!leads.length) {
+    wrap.innerHTML = `
+      <div class="leads-empty-state">
+        <div class="leads-empty-icon"><svg class="icon"><use href="#i-inbox"/></svg></div>
+        <div class="leads-empty-title">No leads found</div>
+        <div class="leads-empty-sub">Try clearing the filters — new messages from Instagram, Facebook and WhatsApp land here automatically.</div>
+      </div>`;
+    return;
+  }
+
+  const statuses = ['new', 'contacted', 'converted', 'lost'];
+  wrap.innerHTML = `
+  <table class="leads-table">
+    <thead><tr>
+      <th>Name</th><th>Source</th><th>Branch</th><th>Status</th><th>Received</th><th></th>
+    </tr></thead>
+    <tbody>
+    ${leads.map(l => {
+      const src  = (l.source || '').toLowerCase();
+      const st   = (l.status || 'new').toLowerCase();
+      const opts = statuses.map(s => `<option value="${s}"${s === st ? ' selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`).join('');
+      return `
+      <tr>
+        <td class="lt-name">${esc(l.customer_name || 'Lead')}</td>
+        <td><span class="conv-platform-icon ${esc(src)}">${esc(sourceLabel(src))}</span></td>
+        <td class="lt-branch">${esc(branchName(l.branch_id))}</td>
+        <td><select class="lead-status-select st-${esc(st)}" onchange="updateLeadStatus('${esc(l.id)}', this.value)">${opts}</select></td>
+        <td class="lt-time">${esc(formatConvoTime(l.created_at))}</td>
+        <td><button class="lead-chat-btn" onclick="openAdminChat('${esc(l.id)}')" aria-label="Open chat"><svg class="icon"><use href="#i-inbox"/></svg></button></td>
+      </tr>`;
+    }).join('')}
+    </tbody>
+  </table>`;
+}
+
+async function updateLeadStatus(leadId, status) {
+  const { error } = await db.from('leads').update({ status }).eq('id', leadId);
+  if (error) { console.error('[lead status]', error.message); showToast('Could not update status', 'error'); return; }
+  const l = _adminLeadsAll.find(x => x.id === leadId);
+  if (l) l.status = status;
+  applyLeadsFilters();          // refresh KPI counts + status pill colour
+  showToast('Status updated');
+}
+
+// ── Admin chat modal — reuses renderThreadHtml + meta-send ──
+let _adminChatLeadId = null;
+let _adminChatBound  = false;
+
+function openAdminChat(leadId) {
+  const lead = _adminLeadsAll.find(l => l.id === leadId);
+  if (!lead) return;
+  _adminChatLeadId = leadId;
+
+  const src = (lead.source || '').toLowerCase();
+  const av  = document.getElementById('admin-chat-avatar');
+  if (av) { av.textContent = sourceLabel(src); av.className = 'conv-header-avatar ' + src; }
+  document.getElementById('admin-chat-name').textContent     = lead.customer_name || 'Lead';
+  document.getElementById('admin-chat-platform').textContent = lead.source || '';
+
+  const log = document.getElementById('admin-convo-log');
+  if (log) log.innerHTML = '<div class="leads-convo-empty">Loading…</div>';
+  document.getElementById('modal-lead-chat').style.display = 'flex';
+
+  bindAdminChat();
+  loadAdminChat(leadId, lead);
+}
+
+function bindAdminChat() {
+  if (_adminChatBound) return;
+  _adminChatBound = true;
+  document.getElementById('btn-admin-chat-close')?.addEventListener('click', closeAdminChat);
+  document.getElementById('btn-admin-convo-send')?.addEventListener('click', sendAdminChatMessage);
+  document.getElementById('admin-convo-input')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAdminChatMessage(); }
+  });
+  document.getElementById('modal-lead-chat')?.addEventListener('click', e => {
+    if (e.target.id === 'modal-lead-chat') closeAdminChat();   // click backdrop to close
+  });
+}
+
+function closeAdminChat() {
+  _adminChatLeadId = null;
+  document.getElementById('modal-lead-chat').style.display = 'none';
+}
+
+async function loadAdminChat(leadId, lead) {
+  const log = document.getElementById('admin-convo-log');
+  if (!log) return;
+  const { data, error } = await db
+    .from('lead_messages')
+    .select('id, direction, message, created_at')
+    .eq('lead_id', leadId)
+    .order('created_at', { ascending: true });
+
+  if (error) { log.innerHTML = `<div class="leads-convo-empty">${esc(error.message)}</div>`; return; }
+  if (!data || !data.length) { log.innerHTML = '<div class="leads-convo-empty">No messages yet</div>'; return; }
+  log.innerHTML = renderThreadHtml(data, lead);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function sendAdminChatMessage() {
+  if (!_adminChatLeadId) return;
+  const input = document.getElementById('admin-convo-input');
+  const log   = document.getElementById('admin-convo-log');
+  const body  = input.value.trim();
+  if (!body) return;
+
+  const leadId = _adminChatLeadId;
+  input.value  = '';
+  const bubble = appendOutgoingBubble(body, log);
+
+  try {
+    const res = await fetch('/.netlify/functions/meta-send', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ leadId, message: body }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not send message.');
+    markBubbleSent(bubble);
+  } catch (err) {
+    console.error('[admin send]', err);
+    markBubbleFailed(bubble);
+    showToast(err.message || 'Could not send message.', 'error');
+  }
+}
+
+// ============================================================
+// ADMIN — Connected Accounts (Settings)
+// ============================================================
+
+const INTEGRATION_PLATFORMS = [
+  { key: 'instagram', label: 'Instagram', badge: 'IG' },
+  { key: 'facebook',  label: 'Facebook',  badge: 'FB' },
+  { key: 'whatsapp',  label: 'WhatsApp',  badge: 'WA' },
+];
+
+// Read the enable/disable flags from settings.integrations (JSON). Missing → {} (all on).
+async function getIntegrationFlags() {
+  const { data } = await db.from('settings').select('value').eq('key', 'integrations').maybeSingle();
+  try { return JSON.parse(data?.value || '{}'); } catch { return {}; }
+}
+
+async function loadIntegrations() {
+  const list = document.getElementById('integrations-list');
+  if (!list) return;
+
+  // Live Meta connection status + in-app enable flags, in parallel.
+  const [flags, status] = await Promise.all([
+    getIntegrationFlags(),
+    fetch('/.netlify/functions/meta-status').then(r => r.ok ? r.json() : {}).catch(() => ({})),
+  ]);
+
+  list.innerHTML = INTEGRATION_PLATFORMS.map(p => {
+    const st            = status[p.key] || {};
+    const liveConnected = !!st.connected;
+    const enabled       = flags[p.key] !== false;      // default on
+    const connected     = liveConnected && enabled;    // effective state the button mirrors
+
+    let statusText, statusClass;
+    if (!enabled)           { statusText = 'Disconnected';         statusClass = 'disconnected'; }
+    else if (liveConnected) { statusText = st.name || 'Connected'; statusClass = 'connected'; }
+    else                    { statusText = 'Not connected';        statusClass = 'disconnected'; }
+
+    return `
+    <div class="integ-row">
+      <div class="conv-platform-icon ${p.key}">${p.badge}</div>
+      <div class="integ-info">
+        <div class="integ-name">${p.label}</div>
+        <div class="integ-status ${statusClass}">
+          <span class="integ-dot"></span>${esc(statusText)}
+        </div>
+      </div>
+      <button class="integ-btn ${connected ? 'disconnect' : 'connect'}" onclick="toggleIntegration('${p.key}', ${!connected})">
+        ${connected ? 'Disconnect' : 'Connect'}
+      </button>
+    </div>`;
+  }).join('');
+}
+
+async function toggleIntegration(platform, on) {
+  const flags = await getIntegrationFlags();
+  flags[platform] = on;
+  const { error } = await db.from('settings').upsert({ key: 'integrations', value: JSON.stringify(flags) }, { onConflict: 'key' });
+  if (error) {
+    console.error('[integrations toggle]', error.message);
+    showToast('Could not update — try again', 'error');
+    loadIntegrations();   // revert the switch to the real state
+    return;
+  }
+  showToast(on ? `${sourceLabelFull(platform)} resumed` : `${sourceLabelFull(platform)} paused`);
 }
 
 // ============================================================

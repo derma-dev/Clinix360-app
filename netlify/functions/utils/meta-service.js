@@ -324,6 +324,30 @@ function extractEvents(payload) {
   return { platform, events };
 }
 
+// ── Per-platform enable flag (admin "Connected Accounts" toggle) ──
+// Reads settings.integrations JSON, e.g. {"instagram":true,"facebook":false}.
+// FAIL-OPEN: a missing key, unset DB creds, or any error → enabled. A toggle
+// glitch must never silently swallow real inbound messages.
+async function isPlatformEnabled(platform) {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) return true;
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/settings?key=eq.integrations&select=value&limit=1`,
+      { headers: { apikey: key, Authorization: `Bearer ${key}` } }
+    );
+    if (!res.ok) return true;
+    const rows = await res.json();
+    if (!rows.length) return true;
+    const flags = JSON.parse(rows[0].value || '{}');
+    return flags[platform] !== false;   // only an explicit false disables
+  } catch (err) {
+    console.warn('[meta-service] isPlatformEnabled check failed — defaulting ON:', err.message);
+    return true;
+  }
+}
+
 // ── Incoming webhook payload handler (POST) ───────────────────
 async function handleWebhook(payload) {
   console.log('[meta-webhook] Webhook received — object:', payload.object);
@@ -333,6 +357,11 @@ async function handleWebhook(payload) {
 
   if (!platform) {
     console.log('[meta-service] Ignoring unsupported payload (object=' + payload.object + ')');
+    return { received: true };
+  }
+
+  if (!(await isPlatformEnabled(platform))) {
+    console.log(`[meta-service] ${platform} ingestion disabled in settings — skipping payload`);
     return { received: true };
   }
 

@@ -436,6 +436,10 @@
           <span class="sidebar-icon"><svg class="icon"><use href="#i-overview"/></svg></span>
           <span class="sidebar-label">Overview</span>
         </button>
+        <button class="sidebar-item" data-tab="leads">
+          <span class="sidebar-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
+          <span class="sidebar-label">Leads</span>
+        </button>
         <button class="sidebar-item" data-tab="reports">
           <span class="sidebar-icon"><svg class="icon"><use href="#i-reports"/></svg></span>
           <span class="sidebar-label">Reports</span>
@@ -541,6 +545,60 @@
         <div id="panel-override-status" style="display:none"></div>
       </div>
 
+      <!-- TAB: Leads -->
+      <div class="admin-tab" id="admin-tab-leads">
+        <div class="admin-tab-header">Leads</div>
+
+        <!-- KPI strip -->
+        <div class="leads-kpi-grid" id="leads-kpi-grid">
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+          <div class="skel-card"></div>
+        </div>
+
+        <!-- Pipeline -->
+        <div class="section-card">
+          <div class="section-header">
+            <span class="section-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
+            <span class="section-title">All Leads</span>
+            <span class="section-count" id="leads-admin-count"></span>
+          </div>
+
+          <!-- Filters -->
+          <div class="ov-filters-row leads-filters-row">
+            <div class="ov-filter-group">
+              <label class="ov-filter-label">Branch</label>
+              <select id="leads-filter-branch" class="text-input"><option value="">All branches</option></select>
+            </div>
+            <div class="ov-filter-group">
+              <label class="ov-filter-label">Source</label>
+              <select id="leads-filter-source" class="text-input"><option value="">All sources</option></select>
+            </div>
+            <div class="ov-filter-group">
+              <label class="ov-filter-label">Status</label>
+              <select id="leads-filter-status" class="text-input">
+                <option value="">All statuses</option>
+                <option value="new">New</option>
+                <option value="contacted">Contacted</option>
+                <option value="converted">Converted</option>
+                <option value="lost">Lost</option>
+              </select>
+            </div>
+            <div class="ov-filter-group leads-search-group">
+              <label class="ov-filter-label">Search</label>
+              <input type="text" id="leads-filter-search" class="text-input" placeholder="Name…">
+            </div>
+          </div>
+
+          <div class="leads-table-wrap">
+            <div id="leads-admin-table">
+              <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- TAB: Reports -->
       <div class="admin-tab" id="admin-tab-reports">
         <div class="admin-tab-header">Reports</div>
@@ -613,6 +671,21 @@
       <div class="admin-tab" id="admin-tab-settings">
         <div class="admin-tab-header">Settings</div>
 
+        <!-- Connected Accounts -->
+        <div class="section-card settings-card collapsed">
+          <div class="section-header settings-head">
+            <span class="section-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
+            <span class="section-title">Connected Accounts</span>
+            <span class="settings-chevron">▾</span>
+          </div>
+          <div class="settings-body" style="padding:8px 18px 18px">
+            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">Instagram, Facebook and WhatsApp accounts feeding the Leads inbox. Turn one off to pause ingesting new messages from that platform — existing leads and history stay untouched.</p>
+            <div id="integrations-list">
+              <div class="loading-wrap" style="padding:16px"><div class="spinner"></div></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Automations -->
         <div class="section-card settings-card collapsed">
           <div class="section-header settings-head" style="justify-content:space-between">
@@ -674,6 +747,9 @@
       <button class="bottom-nav-item active" data-tab="overview">
         <span><svg class="icon"><use href="#i-overview"/></svg></span><span>Overview</span>
       </button>
+      <button class="bottom-nav-item" data-tab="leads">
+        <span><svg class="icon"><use href="#i-leads"/></svg></span><span>Leads</span>
+      </button>
       <button class="bottom-nav-item" data-tab="reports">
         <span><svg class="icon"><use href="#i-reports"/></svg></span><span>Reports</span>
       </button>
@@ -689,6 +765,33 @@
       </button>
     </nav>
 
+  </div>
+</div>
+
+<!-- ============================================================
+     MODAL: Lead conversation (admin Leads tab)
+     ============================================================ -->
+<div id="modal-lead-chat" class="modal-overlay" style="display:none">
+  <div class="modal-card lead-chat-card">
+    <div class="leads-detail-header">
+      <div class="conv-header-avatar" id="admin-chat-avatar"></div>
+      <div class="conv-header-info">
+        <div class="conv-header-name" id="admin-chat-name"></div>
+        <div class="conv-header-platform" id="admin-chat-platform"></div>
+      </div>
+      <button class="lead-chat-close" id="btn-admin-chat-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="leads-convo-log" id="admin-convo-log">
+      <div class="leads-convo-empty">No messages yet</div>
+    </div>
+    <div class="leads-convo-compose">
+      <input type="text" id="admin-convo-input" class="convo-input" placeholder="Type a message…">
+      <button class="convo-send-btn" id="btn-admin-convo-send" aria-label="Send">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+        </svg>
+      </button>
+    </div>
   </div>
 </div>
 
