@@ -59,7 +59,7 @@ function createSupabaseClient() {
     async findLeadByPlatformId(platform, userId) {
       const col = idColumnFor(platform);
       const res = await fetch(
-        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name&limit=1`,
+        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`leads lookup failed: ${res.status} ${await res.text()}`);
@@ -106,6 +106,14 @@ function createSupabaseClient() {
       if (!res.ok) throw new Error(`lead fetch failed: ${res.status} ${await res.text()}`);
       const rows = await res.json();
       return rows[0] || null;
+    },
+
+    // Used to build the branch buttons on the comment DM, and to match the
+    // customer's answer back to a branch.
+    async listBranches() {
+      const res = await fetch(`${url}/rest/v1/branches?active=eq.true&select=id,name`, { headers });
+      if (!res.ok) throw new Error(`branches fetch failed: ${res.status} ${await res.text()}`);
+      return res.json();
     },
   };
 }
@@ -223,6 +231,7 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
     is_seen:   false,
   });
   console.log(`[meta-service] Message inserted for lead_id=${lead.id}`);
+  return lead;
 }
 
 // ── Webhook verification (GET) ────────────────────────────────
@@ -277,9 +286,14 @@ function extractEvents(payload) {
     for (const msg of (entry.messaging || [])) {
       events.push({
         senderId:    msg.sender?.id,
-        messageText: msg.message?.text,
+        // A button tap is a `postback`, not a `message` — its label lives on
+        // postback.title, so the tap reads as "Dwarka" in the inbox timeline
+        // instead of arriving as a blank turn.
+        messageText: msg.message?.text ?? msg.postback?.title,
         profileName: null,
         isEcho:      msg.message?.is_echo === true,
+        // Set only when they TAPPED something: a postback button, or a quick reply.
+        payload:     msg.postback?.payload ?? msg.message?.quick_reply?.payload,
         shape:       'messaging',
       });
     }
@@ -324,28 +338,59 @@ function extractEvents(payload) {
   return { platform, events };
 }
 
+// Instagram comment events — entry[].changes[].field='comments'. A comment is not
+// a message, so it gets its own stream instead of being squeezed into extractEvents.
+function extractComments(payload) {
+  if (payload.object !== 'instagram') return [];
+
+  const comments = [];
+  for (const entry of (payload.entry || [])) {
+    for (const change of (entry.changes || [])) {
+      if (change.field !== 'comments') continue;
+      const v = change.value || {};
+      comments.push({
+        commentId: v.id,
+        text:      v.text,
+        fromId:    v.from?.id,
+        username:  v.from?.username,
+        mediaId:   v.media?.id,
+        parentId:  v.parent_id,                  // set = it's a reply in a thread
+        accountId: v.recipient_id || entry.id,   // OUR ig account id
+      });
+    }
+  }
+  return comments;
+}
+
+// ── Settings reader ───────────────────────────────────────────
+// Returns the parsed JSON value of one settings row, or null on any failure —
+// each caller picks its own fallback.
+async function getSettingJson(key) {
+  const url  = process.env.SUPABASE_URL;
+  const anon = process.env.SUPABASE_ANON_KEY;
+  if (!url || !anon) return null;
+  try {
+    const res = await fetch(
+      `${url}/rest/v1/settings?key=eq.${encodeURIComponent(key)}&select=value&limit=1`,
+      { headers: { apikey: anon, Authorization: `Bearer ${anon}` } }
+    );
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (!rows.length) return null;
+    return JSON.parse(rows[0].value || 'null');
+  } catch (err) {
+    console.warn(`[meta-service] settings.${key} read failed:`, err.message);
+    return null;
+  }
+}
+
 // ── Per-platform enable flag (admin "Connected Accounts" toggle) ──
 // Reads settings.integrations JSON, e.g. {"instagram":true,"facebook":false}.
 // FAIL-OPEN: a missing key, unset DB creds, or any error → enabled. A toggle
 // glitch must never silently swallow real inbound messages.
 async function isPlatformEnabled(platform) {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return true;
-  try {
-    const res = await fetch(
-      `${url}/rest/v1/settings?key=eq.integrations&select=value&limit=1`,
-      { headers: { apikey: key, Authorization: `Bearer ${key}` } }
-    );
-    if (!res.ok) return true;
-    const rows = await res.json();
-    if (!rows.length) return true;
-    const flags = JSON.parse(rows[0].value || '{}');
-    return flags[platform] !== false;   // only an explicit false disables
-  } catch (err) {
-    console.warn('[meta-service] isPlatformEnabled check failed — defaulting ON:', err.message);
-    return true;
-  }
+  const flags = await getSettingJson('integrations');
+  return !flags || flags[platform] !== false;   // only an explicit false disables
 }
 
 // ── Incoming webhook payload handler (POST) ───────────────────
@@ -376,17 +421,33 @@ async function handleWebhook(payload) {
       continue;
     }
 
-    if (!ev.senderId || !ev.messageText) {
-      console.log(`[meta-service] Skipping ${platform}/${ev.shape} event — missing sender.id or message.text`);
+    // A button tap carrying a routing payload is actionable even if it somehow
+    // arrives with no title — the payload IS the answer.
+    if (!ev.senderId || (!ev.messageText && !ev.payload)) {
+      console.log(`[meta-service] Skipping ${platform}/${ev.shape} event — missing sender.id or content`);
       continue;
     }
 
     console.log(`[meta-service] Processing ${platform} message (${ev.shape}) from sender=${ev.senderId}: "${ev.messageText}"`);
 
     try {
-      await processIncomingMessage(ev.senderId, ev.messageText, platform, ev.profileName);
+      // messageText is only ever missing on a title-less button tap (see the guard
+      // above) — the timeline still needs a body, so fall back to a readable label.
+      const lead = await processIncomingMessage(
+        ev.senderId, ev.messageText || '(button tap)', platform, ev.profileName
+      );
+      await routeLeadFromReply(lead, ev.messageText, ev.payload);
     } catch (err) {
       console.error(`[meta-service] Error processing ${platform} message from sender=${ev.senderId}:`, err.message);
+    }
+  }
+
+  // Instagram post comments — a separate event stream from DMs.
+  for (const c of extractComments(payload)) {
+    try {
+      await processComment(c);
+    } catch (err) {
+      console.error(`[meta-service] Comment ${c.commentId} automation failed:`, err.message);
     }
   }
 
@@ -492,6 +553,187 @@ async function sendWhatsAppMessage(recipientId, text) {
   return data; // { messaging_product, contacts:[...], messages:[{ id }] }
 }
 
+// ── Instagram comment automation ──────────────────────────────
+// Someone comments on a post → we reply publicly under the comment ("Check your
+// DM") and send ONE DM that answers briefly and ends in the branch question.
+// Their answer routes the lead AND opens the 24h window, because the conversation
+// is then customer-initiated. Rules live in settings.comment_rules:
+//   [{ keyword: 'price', public: 'Check your DM', dm: 'Hi! … Which branch?' }]
+// First keyword hit wins; keyword '*' is the catch-all, tried only if nothing
+// else matched. Matching is case-insensitive substring.
+
+function matchCommentRule(text, rules) {
+  const t = (text || '').toLowerCase();
+  return rules.find(r => r?.keyword && r.keyword !== '*' && t.includes(r.keyword.toLowerCase()))
+      || rules.find(r => r?.keyword === '*')
+      || null;
+}
+
+// Private reply — DMs the commenter. Passing `comment_id` as the recipient is what
+// makes it legal: it opens a 7-day window instead of the usual 24h one. Meta allows
+// exactly ONE private reply per comment, ever — a second call errors.
+//
+// `branches` turns the message into a button template: one POSTBACK button per
+// branch, max 3 (Meta's limit). Buttons rather than quick replies because this DM
+// lands in the recipient's message-requests folder, where quick replies do not
+// render. postback rather than web_url because a link tap sends us nothing — no
+// event, no 24h window, no routing. The branch names stay in the text regardless,
+// so a typed answer still routes and desktop web users (no buttons there) still see
+// their options.
+// Returns { recipient_id, message_id }; recipient_id is the commenter's IGSID.
+async function sendCommentPrivateReply(commentId, text, branches = []) {
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
+
+  const buttons = branches.slice(0, 3).map((b) => ({
+    type:    'postback',                       // NOT web_url — a link sends us nothing
+    title:   String(b.name || '').slice(0, 20), // titles truncate past 20 chars
+    payload: `BRANCH:${b.id}`,
+  }));
+
+  const message = buttons.length
+    ? { attachment: { type: 'template', payload: { template_type: 'button', text, buttons } } }
+    : { text };
+
+  const igId = process.env.META_IG_ID || 'me';
+  const res  = await fetch(`https://graph.instagram.com/v21.0/${igId}/messages`, {
+    method:  'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ recipient: { comment_id: commentId }, message }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`IG private reply failed: ${res.status} ${msg}`);
+  }
+  console.log(`[meta-service] Private reply sent for comment ${commentId} → IGSID ${data.recipient_id} (${buttons.length} buttons)`);
+  return data;
+}
+
+// Public reply posted underneath the comment. Needs instagram_business_manage_comments.
+async function replyToComment(commentId, text) {
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
+
+  const res = await fetch(
+    `https://graph.instagram.com/v21.0/${encodeURIComponent(commentId)}/replies`,
+    {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ message: text }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`IG comment reply failed: ${res.status} ${msg}`);
+  }
+  console.log(`[meta-service] Public reply posted under comment ${commentId} (id=${data.id || 'n/a'})`);
+  return data;
+}
+
+async function processComment(c) {
+  if (!c.commentId || !c.text || !c.fromId) {
+    console.log('[meta-service] Skipping comment event — missing id, text or from.id');
+    return;
+  }
+  // Our own comment — including the public reply we just posted. Without this
+  // guard that reply re-triggers the webhook and the account answers itself forever.
+  if (c.fromId === c.accountId) {
+    console.log('[meta-service] Skipping our own comment');
+    return;
+  }
+  // Only top-level comments. A reply inside a thread has a parent_id.
+  if (c.parentId) {
+    console.log('[meta-service] Skipping threaded reply (has parent_id)');
+    return;
+  }
+
+  const rules = await getSettingJson('comment_rules');
+  const rule  = matchCommentRule(c.text, Array.isArray(rules) ? rules : []);
+  if (!rule) {
+    console.log(`[meta-service] Comment ${c.commentId}: no rule matched "${c.text}"`);
+    return;
+  }
+
+  const db = createSupabaseClient();
+
+  // DM first, on purpose. Meta rejects a second private reply to the same comment,
+  // so a redelivered webhook throws here and we never double-post the public reply.
+  // It also means we never publicly promise a DM that failed to send.
+  const sent = rule.dm
+    ? await sendCommentPrivateReply(c.commentId, rule.dm, await db.listBranches())
+    : null;
+  if (rule.public) await replyToComment(c.commentId, rule.public);
+  if (!sent) return;
+
+  // recipient_id from the send is the authoritative IGSID. The comment's own
+  // from.id is a different id space — using it here would fork one person into two
+  // leads and break DM dedupe permanently.
+  const lead = await processIncomingMessage(
+    sent.recipient_id,
+    `[comment] ${c.text}`,
+    'instagram',
+    c.username ? `@${c.username}` : null
+  );
+  await db.insertMessage({
+    lead_id:   lead.id,
+    direction: 'outgoing',
+    message:   rule.dm,
+    is_seen:   true,
+  });
+}
+
+// ── Branch routing from the customer's reply ──────────────────
+// The comment DM ends with "which branch?" — their answer both routes the lead
+// AND opens the 24h window. Matching is pure; see meta-service.test.js.
+//
+// Matches the full branch name or its first word, so "Dwarka Sec 12" is found by
+// someone who just types "dwarka". Returns the single match, or null when the
+// answer is unrecognised OR names more than one branch — guessing wrong sends the
+// lead to a branch that never expected them and hides it from the one that did.
+function matchBranch(text, branches) {
+  const t = (text || '').toLowerCase();
+  if (!t) return null;
+  const hits = branches.filter((b) => {
+    const name = (b.name || '').toLowerCase();
+    return name && (t.includes(name) || t.includes(name.split(' ')[0]));
+  });
+  return hits.length === 1 ? hits[0] : null;
+}
+
+// Only ever moves a lead still parked on the META_BRANCH_ID fallback, so it
+// self-disables the moment anyone — customer or staff — assigns the lead. No
+// conversation-state column, no expiry, and a late answer still works.
+//
+// `payload` is set when they TAPPED (postback button or quick reply); `text` is what
+// they typed. Both land here, so the feature works identically whether or not
+// buttons render on their device.
+async function routeLeadFromReply(lead, text, payload) {
+  const fallback = process.env.META_BRANCH_ID;
+  if (!lead || !fallback || lead.branch_id !== fallback) return;
+
+  const db = createSupabaseClient();
+
+  // A button tap carries the branch id verbatim — no guessing needed.
+  if (payload && payload.startsWith('BRANCH:')) {
+    const branchId = payload.slice('BRANCH:'.length);
+    await db.updateLead(lead.id, { branch_id: branchId });
+    console.log(`[meta-service] Lead ${lead.id} routed to branch ${branchId} (button tap)`);
+    return;
+  }
+
+  const branch = matchBranch(text, await db.listBranches());
+  if (!branch) {
+    console.log(`[meta-service] Lead ${lead.id}: no single branch match in "${text}" — left unrouted`);
+    return;
+  }
+  await db.updateLead(lead.id, { branch_id: branch.id });
+  console.log(`[meta-service] Lead ${lead.id} routed to ${branch.name}`);
+}
+
 module.exports = {
   verifyWebhook,
   handleWebhook,
@@ -501,5 +743,8 @@ module.exports = {
   createSupabaseClient,
   // exported for tests
   extractEvents,
+  extractComments,
+  matchCommentRule,
+  matchBranch,
   idColumnFor,
 };

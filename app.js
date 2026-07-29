@@ -31,6 +31,7 @@ let state = {
   adminPIN: null,
   cameFromAdmin: false,
   autocompleteData: { products: [], staff: [], names: [] },
+  commentRules: [],
   staffList: [],
   existingSummaryId: null,
   lastCalculatedClosing: 0,
@@ -169,7 +170,7 @@ function switchAdminTab(tab) {
   if (tab === 'leads') loadAdminLeads();
   if (tab === 'reports') initReportsTab();
   if (tab === 'notifications') loadAdminAlerts();
-  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); }
+  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); loadCommentRules(); }
   setRoute('#/admin/' + tab);
 }
 
@@ -895,6 +896,70 @@ async function removePaymentMode(code) {
   await savePaymentModesToDB();
   renderPaymentModesList();
   showToast('Payment mode removed ✓', 'success');
+}
+
+// ============================================================
+// INSTAGRAM COMMENT AUTOMATION (settings.comment_rules)
+// Rules are edited here and matched server-side by meta-service.js when the
+// `comments` webhook fires. This screen never talks to Meta.
+// ============================================================
+async function loadCommentRules() {
+  try {
+    const { data } = await db.from('settings').select('value').eq('key', 'comment_rules').single();
+    const arr = data && data.value ? JSON.parse(data.value) : [];
+    state.commentRules = Array.isArray(arr) ? arr : [];
+  } catch (e) { state.commentRules = []; }
+  renderCommentRules();
+}
+
+function renderCommentRules() {
+  const el = document.getElementById('comment-rules-list');
+  if (!el) return;
+  const rules = state.commentRules || [];
+  if (!rules.length) {
+    el.innerHTML = '<p style="font-size:13px;color:#9ca3af;margin:0">No rules yet — comments are left alone.</p>';
+    return;
+  }
+  el.innerHTML = rules.map((r, i) => `
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:6px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <span style="font-weight:600">${r.keyword === '*' ? 'Any comment' : esc(r.keyword)}</span>
+        <button class="del-row-btn" onclick="removeCommentRule(${i})" title="Remove">×</button>
+      </div>
+      <div style="font-size:12px;color:#6b7280;margin-top:6px">Reply: ${esc(r.public || '—')}</div>
+      <div style="font-size:12px;color:#6b7280;margin-top:2px">DM: ${esc(r.dm || '—')}</div>
+    </div>`).join('');
+}
+
+async function saveCommentRulesToDB() {
+  await db.from('settings').upsert(
+    { key: 'comment_rules', value: JSON.stringify(state.commentRules) },
+    { onConflict: 'key' }
+  );
+}
+
+async function addCommentRule() {
+  const kw  = (document.getElementById('new-rule-keyword')?.value || '').trim();
+  const pub = (document.getElementById('new-rule-public')?.value || '').trim();
+  const dm  = (document.getElementById('new-rule-dm')?.value || '').trim();
+  if (!kw)         { showToast('Enter a keyword, or * for any comment', 'error'); return; }
+  if (!pub && !dm) { showToast('Add a public reply or a DM', 'error'); return; }
+  if ((state.commentRules || []).some(r => r.keyword.toLowerCase() === kw.toLowerCase())) {
+    showToast('That keyword already has a rule', 'error'); return;
+  }
+  state.commentRules.push({ keyword: kw, public: pub, dm });
+  await saveCommentRulesToDB();
+  ['new-rule-keyword', 'new-rule-public', 'new-rule-dm']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  renderCommentRules();
+  showToast('Rule added ✓', 'success');
+}
+
+async function removeCommentRule(i) {
+  state.commentRules.splice(i, 1);
+  await saveCommentRulesToDB();
+  renderCommentRules();
+  showToast('Rule removed ✓', 'success');
 }
 
 // ============================================================
@@ -3556,6 +3621,9 @@ function bindGlobalEvents() {
   document.getElementById('new-payment-mode-input')?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); addPaymentMode(); }
   });
+
+  // Instagram comment automation (admin settings)
+  document.getElementById('btn-add-comment-rule')?.addEventListener('click', addCommentRule);
 
   // Branch modal
   document.getElementById('btn-modal-cancel').addEventListener('click', () => {
