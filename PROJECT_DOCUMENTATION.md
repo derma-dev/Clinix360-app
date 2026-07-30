@@ -9,7 +9,7 @@
 >
 > Minimum update per change: the relevant section + a line in [§21 Change log](#21-change-log).
 >
-> Last updated: **2026-07-28** · Covers commit `0c6e45f`
+> Last updated: **2026-07-30** · Facebook comment automation built (inert)
 
 ---
 
@@ -663,6 +663,40 @@ No match → the comment is left completely alone.
   who names a branch is routed for free.
 - **Top-level comments only**; anything with `parent_id` is skipped.
 
+### Facebook comment automation (same pattern, shared rules)
+
+Facebook Page comments run the **same** comment → public reply → one DM → branch-routing
+flow on **shared `comment_rules`** (no separate rule set, no second settings card). Built
+and unit-tested; **inert** until the Meta dashboard work below is done. Full spec:
+[FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md).
+
+The plumbing (`matchCommentRule`, `matchBranch`, `routeLeadFromReply`, `processIncomingMessage`,
+postback handling in `extractEvents`) is platform-agnostic and reused verbatim. Only the
+extractor and the two Graph calls are Facebook-specific — the existing `extractComments()`
+now dispatches by `payload.object` and tags each event with `platform`, and `processComment()`
+picks its sender from `c.platform`:
+
+- **Webhook field `feed`** (not Instagram's `comments`), filtered to `value.item === 'comment'`
+  and `value.verb === 'add'` — `feed` also carries posts/photos/likes and edits/removals.
+  Field names differ: `comment_id` (not `id`), `message` (not `text`), `from.name` inline.
+- **Private reply:** `POST graph.facebook.com/v21.0/{META_PAGE_ID|me}/messages` with
+  `recipient: { comment_id }` + a button template (same one-private-reply-per-comment limit).
+  Uses `META_PAGE_ACCESS_TOKEN`. **Not** the `/{comment-id}/private_replies` edge, which returns
+  an app-scoped `user_id` (not the PSID) and supports no buttons. **No `messaging_type`** — a
+  commenter hasn't messaged us, so `RESPONSE` would be a false assertion.
+- **Public reply:** `POST /{comment-id}/comments` (Instagram uses `/replies`), Page token.
+- **`recipient_id` (PSID)** from the send is the lead's `facebook_user_id`, never the comment's
+  `from.id` (app-scoped) — same id-space guard as Instagram. FB hands the display name over
+  inline in `from.name`, so leads start with a real name immediately.
+
+**Dashboard (still to do — all fail silently):** subscribe the Page webhook **`feed`** field,
+confirm **`messaging_postbacks`**, add **`pages_messaging` + `pages_read_engagement` +
+`pages_manage_engagement`** (Advanced Access / App Review — a separate track from Instagram's),
+and subscribe the Page to the app (`POST /{page-id}/subscribed_apps`). **Gated on Instagram
+comment automation going live first** — Facebook inherits Instagram's answer to the two open
+button/postback assumptions. Catch-all `*` is riskier on Facebook (more spam) — keyword-only
+recommended.
+
 ### Connected Accounts toggle
 
 - UI: Admin → Settings → Connected Accounts ([app.js:730-794](app.js#L730-L794)).
@@ -764,7 +798,7 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 | `admin_pin` | 4-digit admin PIN (string) |
 | `payment_modes` | JSON array `[{code,label}, …]` |
 | `integrations` | JSON flags `{"instagram":true,"facebook":true,"whatsapp":true}` — only an explicit `false` disables |
-| `comment_rules` | JSON array `[{keyword, public, dm}, …]` — Instagram comment automation ([§15](#instagram-comment-automation-comment--dm--branch-routing)) |
+| `comment_rules` | JSON array `[{keyword, public, dm}, …]` — Instagram & Facebook comment automation ([§15](#instagram-comment-automation-comment--dm--branch-routing)) |
 
 **Indexes**: `idx_leads_branch`, `idx_leads_instagram_user`, `idx_leads_facebook_user`,
 `idx_leads_whatsapp_user`, `idx_lead_notes_lead`, `idx_lead_messages_lead`.
@@ -921,6 +955,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-07-30 | — | **Facebook comment automation built (inert).** `extractComments()` generalized to also read FB Page `feed`/`item:'comment'` events (tagged `platform`); added `sendFacebookPrivateReply()` (`recipient:{comment_id}` → `/messages`, returns PSID, button template) + `replyToFacebookComment()` (`/comments`), shared `buildBranchButtonMessage()`, platform-aware `processComment()`. **Shared `comment_rules`** with Instagram — no new settings key, UI label edit only. Still needs Meta dashboard: Page `feed` + `messaging_postbacks` webhook fields, `pages_messaging`/`pages_read_engagement`/`pages_manage_engagement` + App Review, Page `subscribed_apps`. Spec: [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md). |
 | 2026-07-29 | — | **Instagram comment automation built.** `extractComments()` + `processComment()` (public reply + one private reply with 3 postback branch buttons), `matchCommentRule()`, `matchBranch()` + `routeLeadFromReply()` (branch routing from the customer's answer — closes multi-branch routing for IG), `extractEvents()` now handles `messaging[].postback`, `getSettingJson()` extracted from `isPlatformEnabled()`, new **Comment Automation** settings card + `settings.comment_rules`. **Still needs the `comments` and `messaging_postbacks` webhook fields subscribed and the `instagram_business_manage_comments` permission** — inert until then. |
 | 2026-07-28 | — | Specced Instagram comment automation → [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md). |
 | 2026-07-28 | — | Added this master documentation file. |
@@ -995,6 +1030,15 @@ Newest first. **Add a line here for every change that touches behaviour.**
 8. **Security hardening** — RLS + real auth instead of relying on the PIN/app layer.
 9. **Branch Emails tab** — still a placeholder.
 10. **Fix the schema-file drift** listed in [§17](#17-database-schema).
+11. **Facebook comment automation — CODE SHIPPED, not yet switched on.** Mirrors the
+    Instagram feature on shared `comment_rules`; see
+    [§15](#facebook-comment-automation-same-pattern-shared-rules). Inert until: subscribe the
+    Page **`feed`** + **`messaging_postbacks`** webhook fields, add **`pages_messaging` +
+    `pages_read_engagement` + `pages_manage_engagement`** (Advanced Access / App Review — a
+    separate track from Instagram), and subscribe the Page to the app (`/{page-id}/subscribed_apps`).
+    **Gated on Instagram going live first** — FB inherits IG's answer to the two open button/postback
+    assumptions. Procedure: [FACEBOOK_COMMENT_AUTOMATION.md §12](FACEBOOK_COMMENT_AUTOMATION.md).
+    Also still needs the client's keyword list/DM copy before it can go live.
 
 ---
 
@@ -1005,7 +1049,8 @@ Newest first. **Add a line here for every change that touches behaviour.**
 | **This file** | Everything. Start here, keep it current. |
 | [SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql) | The live DDL (with the drift caveats in §17) |
 | [WHATSAPP_INTEGRATION.md](WHATSAPP_INTEGRATION.md) | WhatsApp design, provider cost analysis, decision log, multi-branch routing options |
-| [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md) | Comment → public reply → auto-DM that asks the branch question → routing + 24 h window. Build-vs-buy, Meta API mechanics, full implementation spec. **Not built yet.** |
+| [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md) | Comment → public reply → auto-DM that asks the branch question → routing + 24 h window. Build-vs-buy, Meta API mechanics, full implementation spec. Built, not yet switched on. |
+| [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md) | The Facebook counterpart, on shared `comment_rules`. FB `feed` webhook, `/messages` `recipient:{comment_id}` (PSID), `/comments` public reply, Page permissions. Built, not yet switched on; gated on IG going live. |
 | [WHATSAPP_SETUP_RUNBOOK.md](WHATSAPP_SETUP_RUNBOOK.md) | Click-by-click Meta setup, test flow, client-handover replay, ranked gotchas |
 | [NETLIFY_CREDITS_WORKAROUND.md](NETLIFY_CREDITS_WORKAROUND.md) | Deploying/testing when production deploys are credit-blocked |
 | [Clinix360_Instagram_GoLive_Session_2026-06-23.md](Clinix360_Instagram_GoLive_Session_2026-06-23.md) | Why IG webhooks were silent (app in Development mode) and how it was fixed |

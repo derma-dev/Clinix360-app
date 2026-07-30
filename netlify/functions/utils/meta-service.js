@@ -338,25 +338,50 @@ function extractEvents(payload) {
   return { platform, events };
 }
 
-// Instagram comment events — entry[].changes[].field='comments'. A comment is not
-// a message, so it gets its own stream instead of being squeezed into extractEvents.
+// Post/media comment events. Instagram delivers these under entry[].changes[]
+// field 'comments'; Facebook Pages deliver them under field 'feed' with
+// value.item 'comment'. Both are normalized to one shape tagged with `platform`,
+// so processComment can pick the right sender. A comment is not a message, so it
+// never mixes with extractEvents()' messaging stream.
 function extractComments(payload) {
-  if (payload.object !== 'instagram') return [];
-
   const comments = [];
+
   for (const entry of (payload.entry || [])) {
     for (const change of (entry.changes || [])) {
-      if (change.field !== 'comments') continue;
       const v = change.value || {};
-      comments.push({
-        commentId: v.id,
-        text:      v.text,
-        fromId:    v.from?.id,
-        username:  v.from?.username,
-        mediaId:   v.media?.id,
-        parentId:  v.parent_id,                  // set = it's a reply in a thread
-        accountId: v.recipient_id || entry.id,   // OUR ig account id
-      });
+
+      // Instagram — field 'comments'
+      if (payload.object === 'instagram' && change.field === 'comments') {
+        comments.push({
+          platform:  'instagram',
+          commentId: v.id,
+          text:      v.text,
+          fromId:    v.from?.id,
+          username:  v.from?.username,
+          name:      null,                       // IG gives a username, not a display name
+          parentId:  v.parent_id,                // set = it's a reply in a thread
+          accountId: v.recipient_id || entry.id, // OUR ig account id
+        });
+        continue;
+      }
+
+      // Facebook Page — field 'feed', new comments only. 'feed' also carries
+      // posts/photos/likes (item !== 'comment') and edits/removals (verb !== 'add');
+      // drop all of those at the source.
+      if (payload.object === 'page' && change.field === 'feed'
+          && v.item === 'comment' && v.verb === 'add') {
+        comments.push({
+          platform:  'facebook',
+          commentId: v.comment_id,
+          text:      v.message,
+          fromId:    v.from?.id,                 // app-scoped — NOT the Messenger PSID
+          username:  null,
+          name:      v.from?.name,               // FB hands the display name over inline
+          parentId:  v.parent_id,                // set = it's a reply in a thread
+          accountId: entry.id,                   // OUR page id
+        });
+        continue;
+      }
     }
   }
   return comments;
@@ -581,19 +606,26 @@ function matchCommentRule(text, rules) {
 // so a typed answer still routes and desktop web users (no buttons there) still see
 // their options.
 // Returns { recipient_id, message_id }; recipient_id is the commenter's IGSID.
+// The button-template message body used by both the IG and FB comment private
+// replies. One POSTBACK button per branch, max 3 (Meta's limit). postback (never
+// web_url): a link tap sends us nothing — no event, no 24h window, no routing.
+// Titles truncate past 20 chars. With no branches, falls back to plain text.
+function buildBranchButtonMessage(text, branches = []) {
+  const buttons = branches.slice(0, 3).map((b) => ({
+    type:    'postback',
+    title:   String(b.name || '').slice(0, 20),
+    payload: `BRANCH:${b.id}`,
+  }));
+  return buttons.length
+    ? { message: { attachment: { type: 'template', payload: { template_type: 'button', text, buttons } } } }
+    : { message: { text } };
+}
+
 async function sendCommentPrivateReply(commentId, text, branches = []) {
   const token = process.env.META_ACCESS_TOKEN;
   if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
 
-  const buttons = branches.slice(0, 3).map((b) => ({
-    type:    'postback',                       // NOT web_url — a link sends us nothing
-    title:   String(b.name || '').slice(0, 20), // titles truncate past 20 chars
-    payload: `BRANCH:${b.id}`,
-  }));
-
-  const message = buttons.length
-    ? { attachment: { type: 'template', payload: { template_type: 'button', text, buttons } } }
-    : { text };
+  const { message } = buildBranchButtonMessage(text, branches);
 
   const igId = process.env.META_IG_ID || 'me';
   const res  = await fetch(`https://graph.instagram.com/v21.0/${igId}/messages`, {
@@ -607,7 +639,65 @@ async function sendCommentPrivateReply(commentId, text, branches = []) {
     const msg = data?.error?.message || JSON.stringify(data);
     throw new Error(`IG private reply failed: ${res.status} ${msg}`);
   }
-  console.log(`[meta-service] Private reply sent for comment ${commentId} → IGSID ${data.recipient_id} (${buttons.length} buttons)`);
+  console.log(`[meta-service] Private reply sent for comment ${commentId} → IGSID ${data.recipient_id} (${branches.slice(0, 3).length} buttons)`);
+  return data;
+}
+
+// Facebook private reply — DMs the commenter via the Messenger Platform. Passing
+// `comment_id` as the recipient is what makes a DM to a stranger legal, exactly as
+// on Instagram. Same one-private-reply-per-comment limit; same button template.
+// Uses the PAGE token (query param, like sendFacebookMessage). Deliberately does
+// NOT set messaging_type — a commenter hasn't messaged us, so 'RESPONSE' would be a
+// false assertion; the comment_id recipient is its own sanctioned out-of-window send.
+// Returns { recipient_id, message_id }; recipient_id is the commenter's PSID — the
+// id space Messenger and leads.facebook_user_id use.
+async function sendFacebookPrivateReply(commentId, text, branches = []) {
+  const token = process.env.META_PAGE_ACCESS_TOKEN;
+  if (!token) throw new Error('Missing META_PAGE_ACCESS_TOKEN env var');
+
+  const { message } = buildBranchButtonMessage(text, branches);
+  const pageId = process.env.META_PAGE_ID || 'me';
+
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/${pageId}/messages?access_token=${encodeURIComponent(token)}`,
+    {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ recipient: { comment_id: commentId }, message }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`FB private reply failed: ${res.status} ${msg}`);
+  }
+  console.log(`[meta-service] FB private reply sent for comment ${commentId} → PSID ${data.recipient_id} (${branches.slice(0, 3).length} buttons)`);
+  return data;
+}
+
+// Public reply posted under a Facebook comment. Endpoint edge is /comments
+// (Instagram uses /replies), with the Page token as a query param.
+// Needs pages_manage_engagement (+ pages_read_engagement).
+async function replyToFacebookComment(commentId, text) {
+  const token = process.env.META_PAGE_ACCESS_TOKEN;
+  if (!token) throw new Error('Missing META_PAGE_ACCESS_TOKEN env var');
+
+  const res = await fetch(
+    `https://graph.facebook.com/v21.0/${encodeURIComponent(commentId)}/comments?access_token=${encodeURIComponent(token)}`,
+    {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ message: text }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`FB comment reply failed: ${res.status} ${msg}`);
+  }
+  console.log(`[meta-service] FB public reply posted under comment ${commentId} (id=${data.id || 'n/a'})`);
   return data;
 }
 
@@ -658,25 +748,31 @@ async function processComment(c) {
     return;
   }
 
-  const db = createSupabaseClient();
+  const db       = createSupabaseClient();
+  const isFb     = c.platform === 'facebook';
+  const branches = await db.listBranches();
 
   // DM first, on purpose. Meta rejects a second private reply to the same comment,
   // so a redelivered webhook throws here and we never double-post the public reply.
   // It also means we never publicly promise a DM that failed to send.
   const sent = rule.dm
-    ? await sendCommentPrivateReply(c.commentId, rule.dm, await db.listBranches())
+    ? (isFb ? await sendFacebookPrivateReply(c.commentId, rule.dm, branches)
+            : await sendCommentPrivateReply(c.commentId, rule.dm, branches))
     : null;
-  if (rule.public) await replyToComment(c.commentId, rule.public);
+  if (rule.public) {
+    isFb ? await replyToFacebookComment(c.commentId, rule.public)
+         : await replyToComment(c.commentId, rule.public);
+  }
   if (!sent) return;
 
-  // recipient_id from the send is the authoritative IGSID. The comment's own
-  // from.id is a different id space — using it here would fork one person into two
-  // leads and break DM dedupe permanently.
+  // recipient_id from the send is the authoritative platform id (IGSID / PSID).
+  // The comment's own from.id is a different id space — using it here would fork one
+  // person into two leads and break DM dedupe permanently.
   const lead = await processIncomingMessage(
     sent.recipient_id,
     `[comment] ${c.text}`,
-    'instagram',
-    c.username ? `@${c.username}` : null
+    c.platform,
+    c.name || (c.username ? `@${c.username}` : null)   // FB has name inline; IG has username
   );
   await db.insertMessage({
     lead_id:   lead.id,

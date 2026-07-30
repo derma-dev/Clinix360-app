@@ -1266,7 +1266,7 @@ a failing curl in step 6 can't be confused with a bug in our code.
 
 ### Phase 1 — Meta dashboard (do first; it has a lead time)
 
-- [ ] **1.** Subscribe the **`comments`** and **`messaging_postbacks`** webhook fields on
+- [x] **1.** Subscribe the **`comments`** and **`messaging_postbacks`** webhook fields on
       the existing `/webhook/meta` callback. Add the
       **`instagram_business_manage_comments`** permission and re-authorise so the token
       carries the new scope. Full detail + the silent-failure modes: [§6](#6-meta-dashboard-setup).
@@ -1300,7 +1300,7 @@ a failing curl in step 6 can't be confused with a bug in our code.
 
 ### Phase 4 — prove the two assumptions before trusting the UX
 
-- [ ] **6.** Run **step 0a / 0b** from the [manual smoke test](#manual-smoke-test) by hand
+- [x] **6.** Run **step 0a / 0b** from the [manual smoke test](#manual-smoke-test) by hand
       with curl: does Meta accept a **button template** on a `recipient: { comment_id }`
       send, do the buttons render **while the DM is still in the Requests folder**, and does
       a tap open the 24h window?
@@ -1321,7 +1321,7 @@ a failing curl in step 6 can't be confused with a bug in our code.
 
 ### Phase 6 — end to end
 
-- [ ] **9.** Work through steps 1–13 of the [manual smoke test](#manual-smoke-test).
+- [x] **9.** Work through steps 1–13 of the [manual smoke test](#manual-smoke-test).
       Step 5 is the one that matters: a staff reply that would have failed before the
       customer's tap now sends.
 - [x] **10.** Update [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) **in the same

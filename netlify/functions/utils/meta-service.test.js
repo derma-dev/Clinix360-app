@@ -167,9 +167,67 @@ assert.equal(extractEvents({ object: 'page' }).events.length, 0);
   }).length, 0, 'DMs must not become comment events');
 }
 
-// Only Instagram has comment automation
+// Facebook uses the 'feed' field (with item:'comment'), never 'comments';
+// a page + 'comments' combo yields nothing.
 assert.equal(extractComments({ object: 'page', entry: [{ changes: [{ field: 'comments', value: {} }] }] }).length, 0);
 assert.equal(extractComments({}).length, 0);
+
+// ── Facebook Page feed comments: the comment-to-DM stream ──
+{
+  const payload = {
+    object: 'page',
+    entry: [{ id: 'PAGE_ID', time: 1753660800, changes: [{ field: 'feed', value: {
+      item: 'comment', verb: 'add',
+      comment_id: 'FB_COMMENT_1',
+      message: 'what is the PRICE of laser?',
+      from: { id: 'FB_USER_1', name: 'Priya Sharma' },
+      post_id: 'FB_POST_1',
+    } }] }],
+  };
+
+  const [c] = extractComments(payload);
+  assert.equal(c.platform,  'facebook');
+  assert.equal(c.commentId, 'FB_COMMENT_1');
+  assert.equal(c.text,      'what is the PRICE of laser?');
+  assert.equal(c.fromId,    'FB_USER_1');
+  assert.equal(c.name,      'Priya Sharma');        // FB gives the display name inline
+  assert.equal(c.accountId, 'PAGE_ID');             // entry.id = our page, for the self-guard
+
+  // 'feed' must not leak non-comment items, edits or removals
+  assert.equal(extractComments({ object:'page', entry:[{ id:'P', changes:[{ field:'feed', value:{ item:'post',  verb:'add' } }] }] }).length, 0);
+  assert.equal(extractComments({ object:'page', entry:[{ id:'P', changes:[{ field:'feed', value:{ item:'like',  verb:'add' } }] }] }).length, 0);
+  assert.equal(extractComments({ object:'page', entry:[{ id:'P', changes:[{ field:'feed', value:{ item:'comment', verb:'edited', comment_id:'x' } }] }] }).length, 0);
+  assert.equal(extractComments({ object:'page', entry:[{ id:'P', changes:[{ field:'feed', value:{ item:'comment', verb:'remove', comment_id:'x' } }] }] }).length, 0);
+
+  // A feed-comment payload must not leak into the DM stream
+  assert.equal(extractEvents(payload).events.length, 0, 'feed comment must not become a message event');
+
+  // Threaded-reply marker survives extraction
+  const [c2] = extractComments({ object:'page', entry:[{ id:'PAGE_ID', changes:[{ field:'feed', value: {
+    item:'comment', verb:'add', comment_id:'FB_C2', message:'ok',
+    from:{ id:'U', name:'X' }, parent_id:'FB_COMMENT_1',
+  } }] }] });
+  assert.equal(c2.parentId, 'FB_COMMENT_1');
+
+  // Self-comment guard: a Page-authored comment has from.id === entry.id
+  const [c3] = extractComments({ object:'page', entry:[{ id:'PAGE_ID', changes:[{ field:'feed', value: {
+    item:'comment', verb:'add', comment_id:'FB_C3', message:'Check your DM',
+    from:{ id:'PAGE_ID', name:'Clinix360' },
+  } }] }] });
+  assert.equal(c3.fromId, c3.accountId, 'our own reply must be detectable → no infinite loop');
+}
+
+// Regression: the IG branch of the generalized extractor still works
+{
+  const [ig] = extractComments({ object:'instagram', entry:[{ id:'IG_ID', changes:[{ field:'comments', value: {
+    from: { id: 'IG_USER', username: 'priya.sharma' }, id: 'IG_C1', text: 'hi', parent_id: 'IG_PARENT',
+  } }] }] });
+  assert.equal(ig.platform,  'instagram');
+  assert.equal(ig.commentId, 'IG_C1');
+  assert.equal(ig.username,  'priya.sharma');
+  assert.equal(ig.parentId,  'IG_PARENT');
+  assert.equal(ig.name,      null);
+}
 
 // Self-comment + threaded-reply markers survive extraction so processComment can skip them
 {
