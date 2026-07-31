@@ -215,6 +215,16 @@ assert.equal(extractComments({}).length, 0);
     from:{ id:'PAGE_ID', name:'Clinix360' },
   } }] }] });
   assert.equal(c3.fromId, c3.accountId, 'our own reply must be detectable → no infinite loop');
+
+  // Facebook sets parent_id on EVERY comment — for a top-level comment it equals
+  // post_id. Such a comment must NOT be flagged as a threaded reply (processComment
+  // would otherwise skip it — the exact bug that hid the first real test comment).
+  const [c4] = extractComments({ object:'page', entry:[{ id:'PAGE_ID', changes:[{ field:'feed', value: {
+    item:'comment', verb:'add', comment_id:'FB_C4', message:'book',
+    from:{ id:'U', name:'X' },
+    post_id:'POST_1', parent_id:'POST_1',        // parent_id === post_id → top-level
+  } }] }] });
+  assert.equal(c4.parentId, null, 'top-level comment (parent_id===post_id) must not be skipped as threaded');
 }
 
 // Regression: the IG branch of the generalized extractor still works

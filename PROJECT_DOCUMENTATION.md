@@ -679,6 +679,9 @@ picks its sender from `c.platform`:
 - **Webhook field `feed`** (not Instagram's `comments`), filtered to `value.item === 'comment'`
   and `value.verb === 'add'` — `feed` also carries posts/photos/likes and edits/removals.
   Field names differ: `comment_id` (not `id`), `message` (not `text`), `from.name` inline.
+  Also: **`parent_id` is set on every FB comment, even top-level** (where it equals `post_id`);
+  the extractor nulls it unless `parent_id !== post_id`, or all top-level comments get skipped
+  as "threaded". (Instagram only sets `parent_id` for real threads.)
 - **Private reply:** `POST graph.facebook.com/v21.0/{META_PAGE_ID|me}/messages` with
   `recipient: { comment_id }` + a button template (same one-private-reply-per-comment limit).
   Uses `META_PAGE_ACCESS_TOKEN`. **Not** the `/{comment-id}/private_replies` edge, which returns

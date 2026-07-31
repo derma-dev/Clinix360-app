@@ -377,7 +377,12 @@ function extractComments(payload) {
           fromId:    v.from?.id,                 // app-scoped — NOT the Messenger PSID
           username:  null,
           name:      v.from?.name,               // FB hands the display name over inline
-          parentId:  v.parent_id,                // set = it's a reply in a thread
+          // FB sets parent_id on EVERY comment — for a top-level comment it equals
+          // post_id (the parent IS the post); only a reply-in-a-thread has a different
+          // value. Null it when it's just the post, so the threaded-reply skip doesn't
+          // fire on top-level comments. (Instagram only sets parent_id for real threads,
+          // so its branch is unchanged.)
+          parentId:  v.parent_id && v.parent_id !== v.post_id ? v.parent_id : null,
           accountId: entry.id,                   // OUR page id
         });
         continue;
@@ -467,7 +472,7 @@ async function handleWebhook(payload) {
     }
   }
 
-  // Instagram post comments — a separate event stream from DMs.
+  // Post comments (Instagram AND Facebook) — a separate event stream from DMs.
   for (const c of extractComments(payload)) {
     try {
       await processComment(c);
