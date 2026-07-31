@@ -9,7 +9,7 @@
 >
 > Minimum update per change: the relevant section + a line in [§21 Change log](#21-change-log).
 >
-> Last updated: **2026-07-30** · Facebook comment automation built (inert)
+> Last updated: **2026-07-31** · FB comment automation: public reply made non-fatal; reply needs pages_manage_engagement
 
 ---
 
@@ -687,14 +687,17 @@ picks its sender from `c.platform`:
   Uses `META_PAGE_ACCESS_TOKEN`. **Not** the `/{comment-id}/private_replies` edge, which returns
   an app-scoped `user_id` (not the PSID) and supports no buttons. **No `messaging_type`** — a
   commenter hasn't messaged us, so `RESPONSE` would be a false assertion.
-- **Public reply:** `POST /{comment-id}/comments` (Instagram uses `/replies`), Page token.
+- **Public reply:** `POST /{comment-id}/comments` (Instagram uses `/replies`), Page token. Needs
+  `pages_manage_engagement` — **and is non-fatal:** a failure here (missing scope, 403, rate limit)
+  is logged and swallowed, because the DM has already been delivered. The lead is created regardless.
 - **`recipient_id` (PSID)** from the send is the lead's `facebook_user_id`, never the comment's
   `from.id` (app-scoped) — same id-space guard as Instagram. FB hands the display name over
   inline in `from.name`, so leads start with a real name immediately.
 
 **Dashboard (still to do — all fail silently):** subscribe the Page webhook **`feed`** field,
-confirm **`messaging_postbacks`**, add **`pages_messaging` + `pages_read_engagement` +
-`pages_manage_engagement`** (Advanced Access / App Review — a separate track from Instagram's),
+confirm **`messaging_postbacks`**, add **`pages_messaging` + `pages_read_user_content` +
+`pages_manage_engagement`** (Advanced Access / App Review — a separate track from Instagram's; the
+reply 403 names exactly these two),
 and subscribe the Page to the app (`POST /{page-id}/subscribed_apps`). **Gated on Instagram
 comment automation going live first** — Facebook inherits Instagram's answer to the two open
 button/postback assumptions. Catch-all `*` is riskier on Facebook (more spam) — keyword-only

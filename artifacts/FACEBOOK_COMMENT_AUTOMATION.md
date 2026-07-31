@@ -137,8 +137,13 @@ Content-Type: application/json
 { "message": "Check your DM 💬" }
 ```
 
-Permission: **`pages_manage_engagement`** (+ `pages_read_engagement`). Returns
+Permission: **`pages_manage_engagement`** + **`pages_read_user_content`** (the reply 403 names
+exactly these two — the edge reads the parent comment it replies under). Returns
 `{ "id": "<new comment id>" }`.
+
+> **The public reply is non-fatal.** `processComment` sends the DM *first*, then the public reply,
+> then writes the lead — so a public-reply failure (missing scope, 403, rate limit) is caught and
+> logged and the lead is still created. The DM is the lead-capture step; "Check your DM!" is cosmetic.
 
 Two differences from Instagram's public reply: the endpoint edge is **`/comments`**, not
 `/replies` ([Graph Comment node](https://developers.facebook.com/docs/graph-api/reference/comment/)),
@@ -473,7 +478,7 @@ async function sendFacebookPrivateReply(commentId, text, branches = []) {
 }
 
 // Public reply posted under a Facebook comment. Endpoint edge is /comments
-// (Instagram uses /replies). Needs pages_manage_engagement (+ pages_read_engagement).
+// (Instagram uses /replies). Needs pages_manage_engagement (+ pages_read_user_content).
 async function replyToFacebookComment(commentId, text) {
   const token = process.env.META_PAGE_ACCESS_TOKEN;
   if (!token) throw new Error('Missing META_PAGE_ACCESS_TOKEN env var');
@@ -603,8 +608,9 @@ No new env vars. All of this fails **silently** if missed, same as the Instagram
 3. **Add the Page permissions and get Advanced Access via App Review.** This is a *separate*
    App Review track from the Instagram permissions, with its own lead time:
    - `pages_messaging` — sending the private reply (`/messages`).
-   - `pages_read_engagement` — receiving the `feed` webhook and reading comments.
-   - `pages_manage_engagement` — posting the public reply (`/comments`).
+   - `pages_read_user_content` — receiving the `feed` webhook and reading comments.
+   - `pages_manage_engagement` — posting the public reply (`/comments`). Both are needed for the
+     reply; the 403 names `pages_read_user_content,pages_manage_engagement`.
    - (`pages_show_list` — listing/subscribing the Page; usually required to grant the above.)
 4. **Subscribe the Page to the app:** `POST /{page-id}/subscribed_apps` with the Page token
    (the Facebook equivalent of Instagram's `graph.instagram.com/.../subscribed_apps`). The
@@ -790,7 +796,7 @@ is wasted effort.
 
 ### Phase 0 — PREREQUISITE: Instagram must be live first
 
-- [ ] **0.** The Instagram comment automation is **switched on** ([IG §12](INSTAGRAM_COMMENT_AUTOMATION.md#12-implementation-order--start-here)
+- [x] **0.** The Instagram comment automation is **switched on** ([IG §12](INSTAGRAM_COMMENT_AUTOMATION.md#12-implementation-order--start-here)
       Phases 1, 4 and 6 done): `comments` + `messaging_postbacks` subscribed,
       `instagram_business_manage_comments` added, the App Live, and the two live checks passed —
       (a) button template accepted on a `recipient:{comment_id}` send, (b) a postback tap opens
@@ -799,7 +805,7 @@ is wasted effort.
 
 ### Phase 1 — Meta dashboard (long lead time; start early)
 
-- [ ] **1.** Subscribe the **`feed`** field and confirm **`messaging_postbacks`** on the Page
+- [x] **1.** Subscribe the **`feed`** field and confirm **`messaging_postbacks`** on the Page
       webhook. Add `pages_messaging` + `pages_read_engagement` + `pages_manage_engagement` and
       get **Advanced Access** via App Review. Subscribe the Page to the app
       (`/{page-id}/subscribed_apps`). Full detail + silent-failure modes: [§6](#6-meta-dashboard-setup).
@@ -808,26 +814,26 @@ is wasted effort.
 
 ### Phase 2 — pure logic, no network
 
-- [ ] **2.** Generalize `extractComments()` ([§5.1](#51-meta-servicejs--generalized-extractcomments))
+- [x] **2.** Generalize `extractComments()` ([§5.1](#51-meta-servicejs--generalized-extractcomments))
       and add the shared `buildBranchButtonMessage()` ([§5.2](#52-meta-servicejs--shared-button-builder)).
-- [ ] **3.** Add `sendFacebookPrivateReply()` and `replyToFacebookComment()` ([§5.3](#53-meta-servicejs--facebook-private-reply--public-reply)),
+- [x] **3.** Add `sendFacebookPrivateReply()` and `replyToFacebookComment()` ([§5.3](#53-meta-servicejs--facebook-private-reply--public-reply)),
       and make `processComment()` platform-aware ([§5.4](#54-meta-servicejs--platform-aware-processcomment)).
       Refactor the IG sender onto the shared builder.
-- [ ] **4.** Paste the [§7](#7-test-plan) assertions into `meta-service.test.js`.
+- [x] **4.** Paste the [§7](#7-test-plan) assertions into `meta-service.test.js`.
       *Verify:* `node netlify/functions/utils/meta-service.test.js` prints
       `meta-service: all checks passed`, including the IG regression.
 
 ### Phase 3 — UI (label only)
 
-- [ ] **5.** Update the Comment Automation card in [index.html](index.html) to read
+- [x] **5.** Update the Comment Automation card in [index.html](index.html) to read
       "Instagram & Facebook", and optionally note that rules apply to both. No app.js logic
       change.
 
 ### Phase 4 — end to end + docs
 
-- [ ] **6.** Work through the [manual smoke test](#manual-smoke-test). Step 3 (a staff reply
+- [x] **6.** Work through the [manual smoke test](#manual-smoke-test). Step 3 (a staff reply
       sends after the tap) is the one that matters.
-- [ ] **7.** Update [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) **in the same commit** —
+- [x] **7.** Update [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) **in the same commit** —
       §15 (Facebook subsection under comment automation), §21 (change log), §22 (roadmap: add
       the FB item, note shared rules + IG gating). Per the file's maintenance rule.
 

@@ -683,7 +683,7 @@ async function sendFacebookPrivateReply(commentId, text, branches = []) {
 
 // Public reply posted under a Facebook comment. Endpoint edge is /comments
 // (Instagram uses /replies), with the Page token as a query param.
-// Needs pages_manage_engagement (+ pages_read_engagement).
+// Needs pages_manage_engagement (+ pages_read_user_content) — the scopes the 403 names.
 async function replyToFacebookComment(commentId, text) {
   const token = process.env.META_PAGE_ACCESS_TOKEN;
   if (!token) throw new Error('Missing META_PAGE_ACCESS_TOKEN env var');
@@ -764,9 +764,16 @@ async function processComment(c) {
     ? (isFb ? await sendFacebookPrivateReply(c.commentId, rule.dm, branches)
             : await sendCommentPrivateReply(c.commentId, rule.dm, branches))
     : null;
+  // Public reply is cosmetic ("Check your DM!") and must NOT abort the lead.
+  // The DM above already reached the customer — a failure here (missing token
+  // scope, 403, rate limit) is logged and swallowed, never drops the lead.
   if (rule.public) {
-    isFb ? await replyToFacebookComment(c.commentId, rule.public)
-         : await replyToComment(c.commentId, rule.public);
+    try {
+      isFb ? await replyToFacebookComment(c.commentId, rule.public)
+           : await replyToComment(c.commentId, rule.public);
+    } catch (e) {
+      console.error(`[meta-service] Comment ${c.commentId}: public reply failed (DM already sent) — ${e.message}`);
+    }
   }
   if (!sent) return;
 
