@@ -273,7 +273,7 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
       <div class="conv-platform-icon ${esc(src)}">${label}</div>
       <div class="lead-card-info">
         <div class="lead-card-row1">
-          <span class="lead-card-name">${esc(lead.customer_name)}</span>
+          <span class="lead-card-name">${esc(leadDisplayName(lead.customer_name))}</span>
           <span class="lead-card-time ${count > 0 ? 'unread-time' : ''}">${time}</span>
         </div>
         <div class="lead-card-row2">
@@ -295,7 +295,7 @@ function openLeadDetail(leadId) {
   const src   = (lead.source || '').toLowerCase();
   const label = src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : src === 'whatsapp' ? 'WA' : (lead.source || '?').slice(0, 2).toUpperCase();
 
-  document.getElementById('lead-detail-name').textContent  = lead.customer_name;
+  document.getElementById('lead-detail-name').textContent  = leadDisplayName(lead.customer_name);
 
   const avatar = document.getElementById('lead-header-avatar');
   if (avatar) { avatar.textContent = label; avatar.className = 'conv-header-avatar ' + src; }
@@ -637,7 +637,7 @@ function renderLeadsTable(leads) {
       const opts = statuses.map(s => `<option value="${s}"${s === st ? ' selected' : ''}>${s.charAt(0).toUpperCase() + s.slice(1)}</option>`).join('');
       return `
       <tr>
-        <td class="lt-name">${esc(l.customer_name || 'Lead')}</td>
+        <td class="lt-name">${esc(leadDisplayName(l.customer_name) || 'Lead')}</td>
         <td><span class="conv-platform-icon ${esc(src)}">${esc(sourceLabel(src))}</span></td>
         <td class="lt-branch">${esc(branchName(l.branch_id))}</td>
         <td><select class="lead-status-select st-${esc(st)}" onchange="updateLeadStatus('${esc(l.id)}', this.value)">${opts}</select></td>
@@ -670,7 +670,7 @@ function openAdminChat(leadId) {
   const src = (lead.source || '').toLowerCase();
   const av  = document.getElementById('admin-chat-avatar');
   if (av) { av.textContent = sourceLabel(src); av.className = 'conv-header-avatar ' + src; }
-  document.getElementById('admin-chat-name').textContent     = lead.customer_name || 'Lead';
+  document.getElementById('admin-chat-name').textContent     = leadDisplayName(lead.customer_name) || 'Lead';
   document.getElementById('admin-chat-platform').textContent = lead.source || '';
 
   const log = document.getElementById('admin-convo-log');
@@ -3886,6 +3886,15 @@ function formatCurrency(amount) {
 
 function esc(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// Strip a trailing " (@handle)" from a stored lead name so the card shows the
+// person's name ("Gaurav Soni"), not the noisy handle. Older IG leads were stored
+// as "Name (@user)"; new ones are stored bare (see buildDisplayName in
+// meta-service.js). Only matches an "@…" parenthetical, so a real name that
+// happens to end in "(…)" is untouched.
+function leadDisplayName(name) {
+  return String(name || '').replace(/\s*\(@[^)]*\)\s*$/, '').trim();
 }
 
 let toastTimer;

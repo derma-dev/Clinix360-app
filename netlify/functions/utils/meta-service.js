@@ -179,11 +179,13 @@ function fetchProfile(platform, senderId) {
 }
 
 // Build a human-readable display name from a profile.
-// IG profiles have a username (-> "Name (@user)"); FB profiles only have `name`.
+// Show the real name ("Gaurav Soni"), NOT the handle — staff identify people by
+// name, and handles are changed freely. The username is a last-resort fallback
+// (IG comment webhooks carry no display name), shown bare without the "@"
+// because the "@" adds nothing useful and reads as clutter.
 function buildDisplayName(profile) {
   if (!profile) return null;
-  if (profile.name && profile.username) return `${profile.name} (@${profile.username})`;
-  return profile.username || profile.name || null;
+  return profile.name || profile.username || null;
 }
 
 // ── Process one incoming message (Instagram, Facebook OR WhatsApp) ──
@@ -204,7 +206,10 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
     console.log(`[meta-service] Lead found: id=${lead.id} (${platform})`);
     // Backfill the real name on older leads still showing the placeholder.
     if (!lead.customer_name || lead.customer_name === placeholder) {
-      const displayName = profileName || buildDisplayName(await fetchProfile(platform, senderId));
+      // Prefer a fetched real name over the passed handle: for IG comment leads
+      // profileName is just "@username" (the comment webhook has no display name),
+      // but once our DM lands the messaging IGSID can resolve a real profile.
+      const displayName = buildDisplayName(await fetchProfile(platform, senderId)) || profileName;
       if (displayName) {
         await db.updateLead(lead.id, { customer_name: displayName });
         console.log(`[meta-service] Lead name backfilled: "${displayName}"`);
@@ -212,7 +217,7 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
     }
   } else {
     // Fetch the sender's real profile for the new lead's name.
-    const displayName = profileName || buildDisplayName(await fetchProfile(platform, senderId)) || placeholder;
+    const displayName = buildDisplayName(await fetchProfile(platform, senderId)) || profileName || placeholder;
     lead = await db.createLead({
       branch_id:     branchId,
       source:        platform,
@@ -786,7 +791,7 @@ async function processComment(c) {
     sent.recipient_id,
     `[comment] ${c.text}`,
     c.platform,
-    c.name || (c.username ? `@${c.username}` : null)   // FB has name inline; IG has username
+    c.name || c.username || null                        // FB has name inline; IG has only a username
   );
   await db.insertMessage({
     lead_id:   lead.id,

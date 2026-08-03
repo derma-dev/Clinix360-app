@@ -9,7 +9,7 @@
 >
 > Minimum update per change: the relevant section + a line in [§21 Change log](#21-change-log).
 >
-> Last updated: **2026-08-03** · Realtime inbox — Supabase Postgres Changes push for `lead_messages`; manual refresh no longer needed (enable publication + deploy)
+> Last updated: **2026-08-03** · Lead names now show the person's name, not their IG handle (`buildDisplayName` drops `(@username)`, comment leads fetch a real name, client strips the suffix on existing rows)
 
 ---
 
@@ -575,12 +575,22 @@ WhatsApp, hence the explicit split at
 - **Non-text messages** (image/audio/…) produce `messageText === undefined` and are
   skipped downstream. WhatsApp delivery receipts arrive as `value.statuses[]` with no
   `messages[]` and are skipped for free.
-- **Profile names**: Instagram uses the User Profile API (`graph.instagram.com`,
-  `META_ACCESS_TOKEN`) → `"Name (@username)"`. Facebook uses the Graph API with the
-  **PAGE** token (`META_PAGE_ACCESS_TOKEN`). **WhatsApp has no profile API** — the name
-  rides inline in `contacts[].profile.name` and is passed in instead of fetched.
-  Placeholders: `Instagram User` / `Facebook User` / `WhatsApp User`, backfilled on the
-  next message once a real name is available.
+- **Profile names** (shown as the person's **name**, not their handle): Instagram uses
+  the User Profile API (`graph.instagram.com`, `META_ACCESS_TOKEN`) → just the **`name`**
+  ("Gaurav Soni"); the `@username` is a last-resort fallback only when no name resolves.
+  Facebook uses the Graph API with the **PAGE** token (`META_PAGE_ACCESS_TOKEN`).
+  **WhatsApp has no profile API** — the name rides inline in `contacts[].profile.name`
+  and is passed in instead of fetched. Placeholders: `Instagram User` / `Facebook User` /
+  `WhatsApp User`, backfilled on the next message once a real name is available.
+  - **A fetched real name always beats a passed handle**: in `processIncomingMessage`
+    the profile fetch is tried *before* the `profileName` arg. This matters for IG
+    **comment** leads — the comment webhook carries only a `username` (no display name),
+    so `processComment` used to store `@username` and never fetch. Now the messaging
+    IGSID (from the private-reply `recipient_id`) is resolved into a real name when Meta
+    returns one; the bare username is the fallback.
+  - **Client strip**: `leadDisplayName()` in [app.js](app.js) strips any trailing
+    ` (@handle)` from the stored `customer_name` at render, so older leads (stored as
+    `Name (@user)`) also show just the name — no DB backfill needed.
 - **Every inbound lead attaches to `META_BRANCH_ID`** — one hardcoded branch. Multi-branch
   routing is **unsolved**; see [§22](#22-roadmap--open-items).
 
@@ -967,6 +977,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-03 | — | **Lead names: show the person's name, not their Instagram handle.** `buildDisplayName` ([meta-service.js](netlify/functions/utils/meta-service.js)) now returns just the real `name` ("Gaurav Soni") and drops the appended `(@username)`; the bare username is a fallback only when no name resolves. `processIncomingMessage` now tries the profile fetch *before* the passed `profileName`, so IG **comment** leads (whose webhook carries only a username) resolve a real name from the messaging IGSID instead of being stored as `@username`. `processComment` passes the bare username (no `@`). Client-side `leadDisplayName()` ([app.js](app.js)) strips any trailing ` (@handle)` at render — branch card, branch chat header, admin table, admin chat — so existing leads stored as `Name (@user)` also show just the name, with no DB backfill. |
 | 2026-08-03 | — | **Realtime inbox.** Branch inbox + admin chat now subscribe to `lead_messages` INSERTs via Supabase Postgres Changes (`subscribeInbox` / `subscribeAdminChat` + an outgoing-echo DOM-marker dedupe (`data-sent-key`) in [app.js](app.js)); inbound messages and cross-staff sends appear live with no manual refresh. `branch_id` is now populated on every `lead_messages` insert (`meta-service` inbound + `processComment`, `meta-send` outbound) so the branch channel filters server-side; `getLeadById` selects it too. `renderThreadHtml` refactored to share a `_messageBubbleHtml` helper with the realtime appender (identical output). Requires enabling the `supabase_realtime` publication on `lead_messages` (+ the one-shot `branch_id` backfill) — until then it degrades to load-on-open. Spec: [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md). Also fixed the `lead_messages` schema-file drift ([§17](#17-database-schema)). |
 | 2026-07-30 | — | **Facebook comment automation built (inert).** `extractComments()` generalized to also read FB Page `feed`/`item:'comment'` events (tagged `platform`); added `sendFacebookPrivateReply()` (`recipient:{comment_id}` → `/messages`, returns PSID, button template) + `replyToFacebookComment()` (`/comments`), shared `buildBranchButtonMessage()`, platform-aware `processComment()`. **Shared `comment_rules`** with Instagram — no new settings key, UI label edit only. Still needs Meta dashboard: Page `feed` + `messaging_postbacks` webhook fields, `pages_messaging`/`pages_read_engagement`/`pages_manage_engagement` + App Review, Page `subscribed_apps`. Spec: [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md). |
 | 2026-07-29 | — | **Instagram comment automation built.** `extractComments()` + `processComment()` (public reply + one private reply with 3 postback branch buttons), `matchCommentRule()`, `matchBranch()` + `routeLeadFromReply()` (branch routing from the customer's answer — closes multi-branch routing for IG), `extractEvents()` now handles `messaging[].postback`, `getSettingJson()` extracted from `isPlatformEnabled()`, new **Comment Automation** settings card + `settings.comment_rules`. **Still needs the `comments` and `messaging_postbacks` webhook fields subscribed and the `instagram_business_manage_comments` permission** — inert until then. |

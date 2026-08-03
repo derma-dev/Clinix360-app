@@ -589,7 +589,7 @@ Small build. SQL + ~80 lines of `app.js` + three one-line server fixes + docs.
 
 ### Phase 1 — DB (enables everything; do first) — ☐ YOU RUN THIS
 
-- [ ] **1.** Run the SQL in [§6.1](#61-sql--publication--backfill) in the Supabase SQL
+- [x] **1.** Run the SQL in [§6.1](#61-sql--publication--backfill) in the Supabase SQL
       editor: ensure the `branch_id` column, enable the `supabase_realtime` publication
       on `lead_messages`, backfill existing rows.
       *Verify:* the final `SELECT count(*) … WHERE branch_id IS NULL` → **0**, and
