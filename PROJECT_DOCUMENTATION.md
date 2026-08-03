@@ -9,7 +9,7 @@
 >
 > Minimum update per change: the relevant section + a line in [§21 Change log](#21-change-log).
 >
-> Last updated: **2026-07-31** · FB comment automation: public reply made non-fatal; reply needs pages_manage_engagement
+> Last updated: **2026-08-03** · Realtime inbox — Supabase Postgres Changes push for `lead_messages`; manual refresh no longer needed (enable publication + deploy)
 
 ---
 
@@ -497,8 +497,13 @@ Two views over the same `leads` + `lead_messages` tables.
 - **Sending** (`sendLeadMessage`) is **optimistic**: the bubble appears immediately in a
   "Sending…" state, then resolves to a timestamp (`markBubbleSent`) or
   "Failed — not sent" (`markBubbleFailed`). It POSTs to `/.netlify/functions/meta-send`.
-- The left card's preview is **not realtime**; opening a thread re-queries and calls
-  `syncCardPreview()` to correct a stale card.
+- **Realtime since 2026-08-03** — the inbox subscribes to `lead_messages` INSERTs via
+  Supabase Postgres Changes (`subscribeInbox` / `subscribeAdminChat` + an echo-dedupe
+  set in [app.js](app.js)), so inbound messages and cross-staff sends appear live with
+  no refresh. Requires the `supabase_realtime` publication enabled on `lead_messages`
+  and the `branch_id` backfill; see [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md).
+  With realtime off it silently degrades to the old load-on-open behaviour, and
+  `syncCardPreview()` still patches a card when a thread is opened.
 - Message text is inserted with `textContent` / `esc()` — **XSS-safe**.
 
 ### Admin leads pipeline (`#/admin/leads`, [app.js:480-728](app.js#L480-L728))
@@ -816,13 +821,14 @@ there is no migration framework in the repo.
 
 | Table | `SUPABASE_SCHEMA.sql` says | Live DB + code actually use |
 |---|---|---|
-| `lead_messages` | `direction ('in'/'out')`, `body` | `direction ('incoming'/'outgoing')`, **`message`**, **`is_seen`**, **`seen_at`** |
 | `leads` | `name` | **`customer_name`** |
 | `settings` | (no mention) | `integrations` key exists |
 
-The code tolerates both direction spellings when *reading*
-(`['in','incoming'].includes(...)`) but always *writes* `incoming`/`outgoing`.
-**Fix the SQL file when you next touch the DB.**
+The `lead_messages` drift is **fixed (2026-08-03)**: `SUPABASE_SCHEMA.sql` now
+documents `direction ('incoming'/'outgoing')`, `message`, `is_seen`, `seen_at` and
+the populated `branch_id`. The code still tolerates both direction spellings when
+*reading* (`['in','incoming'].includes(...)`) and always *writes*
+`incoming`/`outgoing`.
 
 ---
 
@@ -944,7 +950,7 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
 | 5 | Resend sends from the shared `onboarding@resend.dev`. For production, verify a domain and change the `from:`. |
 | 6 | `README.md` is the day-1 guide and describes putting Supabase creds in `config.js` — **that is no longer true** (see [§5](#5-boot-sequence)). |
 | 7 | The branch **Emails** tab is a "Coming soon" placeholder. |
-| 8 | The inbox is **not realtime** — no subscriptions or polling. Leads load on tab open; `syncCardPreview()` patches stale previews when a thread is opened. |
+| 8 | ~~The inbox is not realtime~~ **Resolved 2026-08-03** — the inbox now uses Supabase Postgres Changes to push messages live (no refresh). See [§14](#14-lead-hub--unified-inbox) and [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md). Degrades to load-on-open if the `supabase_realtime` publication isn't enabled. |
 | 9 | `less_scan_override` exists in `cashup_summaries` but the current UI always auto-calculates from entries. |
 | 10 | The staff dropdown renders into a body-level portal to escape `overflow:hidden` — if it ever detaches visually, that's why. |
 | 11 | WhatsApp/IG/FB non-text messages (image, audio, sticker) are **silently dropped** — only `text` is ingested. |
@@ -961,6 +967,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-03 | — | **Realtime inbox.** Branch inbox + admin chat now subscribe to `lead_messages` INSERTs via Supabase Postgres Changes (`subscribeInbox` / `subscribeAdminChat` + an outgoing-echo dedupe set in [app.js](app.js)); inbound messages and cross-staff sends appear live with no manual refresh. `branch_id` is now populated on every `lead_messages` insert (`meta-service` inbound + `processComment`, `meta-send` outbound) so the branch channel filters server-side; `getLeadById` selects it too. `renderThreadHtml` refactored to share a `_messageBubbleHtml` helper with the realtime appender (identical output). Requires enabling the `supabase_realtime` publication on `lead_messages` (+ the one-shot `branch_id` backfill) — until then it degrades to load-on-open. Spec: [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md). Also fixed the `lead_messages` schema-file drift ([§17](#17-database-schema)). |
 | 2026-07-30 | — | **Facebook comment automation built (inert).** `extractComments()` generalized to also read FB Page `feed`/`item:'comment'` events (tagged `platform`); added `sendFacebookPrivateReply()` (`recipient:{comment_id}` → `/messages`, returns PSID, button template) + `replyToFacebookComment()` (`/comments`), shared `buildBranchButtonMessage()`, platform-aware `processComment()`. **Shared `comment_rules`** with Instagram — no new settings key, UI label edit only. Still needs Meta dashboard: Page `feed` + `messaging_postbacks` webhook fields, `pages_messaging`/`pages_read_engagement`/`pages_manage_engagement` + App Review, Page `subscribed_apps`. Spec: [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md). |
 | 2026-07-29 | — | **Instagram comment automation built.** `extractComments()` + `processComment()` (public reply + one private reply with 3 postback branch buttons), `matchCommentRule()`, `matchBranch()` + `routeLeadFromReply()` (branch routing from the customer's answer — closes multi-branch routing for IG), `extractEvents()` now handles `messaging[].postback`, `getSettingJson()` extracted from `isPlatformEnabled()`, new **Comment Automation** settings card + `settings.comment_rules`. **Still needs the `comments` and `messaging_postbacks` webhook fields subscribed and the `instagram_business_manage_comments` permission** — inert until then. |
 | 2026-07-28 | — | Specced Instagram comment automation → [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md). |
@@ -1032,7 +1039,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
    (`https://api.clinicea.com/api/v3/`, `api_key` header, Enterprise/add-on) with
    `getPayments` and webhooks. Open: does one webhook cover all branches, does the payload
    identify the clinic, and does it fire on payment vs bill.
-7. **Realtime inbox** — Supabase realtime subscriptions instead of load-on-open.
+7. **Realtime inbox — DONE (2026-08-03).** The inbox now uses Supabase Postgres Changes to push messages live; see [§14](#14-lead-hub--unified-inbox) and [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md). Requires the `supabase_realtime` publication enabled on `lead_messages` + the `branch_id` backfill; degrades to load-on-open otherwise.
 8. **Security hardening** — RLS + real auth instead of relying on the PIN/app layer.
 9. **Branch Emails tab** — still a placeholder.
 10. **Fix the schema-file drift** listed in [§17](#17-database-schema).
@@ -1054,6 +1061,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 |---|---|
 | **This file** | Everything. Start here, keep it current. |
 | [SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql) | The live DDL (with the drift caveats in §17) |
+| [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md) | Realtime inbox — research + impl spec. Supabase Postgres Changes push for `lead_messages`, the publication/backfill steps, and the optimistic-echo dedupe. |
 | [WHATSAPP_INTEGRATION.md](WHATSAPP_INTEGRATION.md) | WhatsApp design, provider cost analysis, decision log, multi-branch routing options |
 | [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md) | Comment → public reply → auto-DM that asks the branch question → routing + 24 h window. Build-vs-buy, Meta API mechanics, full implementation spec. Built, not yet switched on. |
 | [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md) | The Facebook counterpart, on shared `comment_rules`. FB `feed` webhook, `/messages` `recipient:{comment_id}` (PSID), `/comments` public reply, Page permissions. Built, not yet switched on; gated on IG going live. |

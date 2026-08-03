@@ -100,7 +100,7 @@ function createSupabaseClient() {
 
     async getLeadById(id) {
       const res = await fetch(
-        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,instagram_user_id,facebook_user_id,whatsapp_user_id,source&limit=1`,
+        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,branch_id,instagram_user_id,facebook_user_id,whatsapp_user_id,source&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`lead fetch failed: ${res.status} ${await res.text()}`);
@@ -223,9 +223,11 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
     console.log(`[meta-service] Lead created: id=${lead.id} name="${displayName}" for ${platform} sender=${senderId}`);
   }
 
-  // Insert incoming message
+  // Insert incoming message. branch_id is set so the realtime inbox channel can
+  // filter by branch server-side (see artifacts/REALTIME_INBOX.md).
   await db.insertMessage({
     lead_id:   lead.id,
+    branch_id: lead.branch_id,
     direction: 'incoming',
     message:   messageText,
     is_seen:   false,
@@ -788,6 +790,7 @@ async function processComment(c) {
   );
   await db.insertMessage({
     lead_id:   lead.id,
+    branch_id: lead.branch_id,
     direction: 'outgoing',
     message:   rule.dm,
     is_seen:   true,

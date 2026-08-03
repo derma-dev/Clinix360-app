@@ -72,6 +72,7 @@ exports.handler = async (event) => {
     // 2) Persist the outgoing message (only after a successful send)
     const rows = await db.insertMessage({
       lead_id:   leadId,
+      branch_id: lead.branch_id,
       direction: 'outgoing',
       message,
       is_seen:   true,

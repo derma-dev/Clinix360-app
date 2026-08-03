@@ -85,6 +85,8 @@ function setRoute(hash) {
 }
 
 function showHome() {
+  unsubscribeInbox();
+  unsubscribeAdminChat();
   state.currentBranch = null;
   state.isAdmin = false;
   state.cameFromAdmin = false;
@@ -199,6 +201,7 @@ async function loadLeadsTab() {
     });
   }
 
+  subscribeInbox(state.currentBranch?.id);   // live inbox (no-op until DB realtime is enabled)
   console.log('[leads] currentBranch.id =', state.currentBranch?.id);
 
   const { data: leads, error } = await db
@@ -400,6 +403,7 @@ async function sendLeadMessage() {
   // in the background. Reconcile the bubble's state when the request settles.
   input.value  = '';
   const bubble = appendOutgoingBubble(body);
+  _trackSent(leadId, body);   // suppress the realtime echo of our own send
 
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
@@ -454,20 +458,30 @@ function markBubbleFailed(bubble) {
 }
 
 // Build the chat thread HTML for a message list (pure). Shared by the branch
-// inbox (loadLeadMessages) and the admin Leads chat modal (loadAdminChat).
+// inbox (loadLeadMessages), the admin Leads chat modal (loadAdminChat), and the
+// realtime appender. Each bubble comes from _messageBubbleHtml; this wrapper
+// layers the date separators between bubbles.
 function renderThreadHtml(data, lead) {
-  const src         = (lead?.source || '').toLowerCase();
-  const avatarLabel = sourceLabel(src);
   let lastDate = null;
   return data.map(m => {
-    const isIncoming = ['in', 'incoming'].includes(m.direction);
-    const msgDate    = m.created_at.split('T')[0];
-    const separator  = msgDate !== lastDate
+    const msgDate   = m.created_at.split('T')[0];
+    const separator = msgDate !== lastDate
       ? `<div class="convo-date-sep"><span>${formatDateSeparator(msgDate)}</span></div>`
       : '';
     lastDate = msgDate;
-    const timeStr = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
-    return `${separator}
+    return separator + _messageBubbleHtml(m, lead);
+  }).join('');
+}
+
+// One message bubble (no date separator). renderThreadHtml layers separators on
+// top; the realtime appender uses this directly so a live-arriving bubble doesn't
+// render a redundant "Today" divider before itself.
+function _messageBubbleHtml(m, lead) {
+  const src         = (lead?.source || '').toLowerCase();
+  const avatarLabel = sourceLabel(src);
+  const isIncoming  = ['in', 'incoming'].includes(m.direction);
+  const timeStr     = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
+  return `
     <div class="leads-convo-msg ${isIncoming ? 'incoming' : 'outgoing'} convo-msg-anim">
       ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${esc(avatarLabel)}</div>` : ''}
       <div class="convo-msg-body">
@@ -475,7 +489,6 @@ function renderThreadHtml(data, lead) {
         <div class="leads-convo-msg-meta">${timeStr}</div>
       </div>
     </div>`;
-  }).join('');
 }
 
 // ============================================================
@@ -666,6 +679,7 @@ function openAdminChat(leadId) {
 
   bindAdminChat();
   loadAdminChat(leadId, lead);
+  subscribeAdminChat();   // live updates while the modal is open
 }
 
 function bindAdminChat() {
@@ -683,6 +697,7 @@ function bindAdminChat() {
 
 function closeAdminChat() {
   _adminChatLeadId = null;
+  unsubscribeAdminChat();
   document.getElementById('modal-lead-chat').style.display = 'none';
 }
 
@@ -711,6 +726,7 @@ async function sendAdminChatMessage() {
   const leadId = _adminChatLeadId;
   input.value  = '';
   const bubble = appendOutgoingBubble(body, log);
+  _trackSent(leadId, body);   // suppress the realtime echo of our own send
 
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
@@ -726,6 +742,126 @@ async function sendAdminChatMessage() {
     markBubbleFailed(bubble);
     showToast(err.message || 'Could not send message.', 'error');
   }
+}
+
+// ============================================================
+// REALTIME — live inbox via Supabase Postgres Changes
+// ------------------------------------------------------------
+// Removes the manual-refresh step: inbound messages (and sends from OTHER
+// staff/admin) are pushed to every open dashboard over a WebSocket that
+// supabase-js (already loaded) manages for us. We subscribe to lead_messages
+// INSERTs and append through the same render primitives the load-on-open path
+// uses — no second render path.
+//
+// Two scopes:
+//   • Branch inbox — one channel filtered by branch_id (needs the branch_id
+//     backfill on lead_messages; see artifacts/REALTIME_INBOX.md §6).
+//   • Admin chat modal — one unfiltered channel, live only while a modal is open.
+//
+// Outbound echoes: a message THIS client sent is also pushed back to it.
+// _trackSent tags sends for ~5 s so the handler can skip its own echo (the
+// optimistic bubble already represents it) while still showing sends from other
+// staff — the multi-user collaboration win.
+// ============================================================
+
+let _inboxMsgChan   = null;
+let _inboxBranchId  = null;
+let _adminMsgChan   = null;
+const _recentlySent = new Set();   // 'leadId|text' keys, cleared after 5 s
+
+function _trackSent(leadId, text) {
+  _recentlySent.add(`${leadId}|${text}`);
+  setTimeout(() => _recentlySent.delete(`${leadId}|${text}`), 5000);
+}
+
+function _isOutgoing(direction) {
+  return ['out', 'outgoing'].includes(direction);
+}
+
+// Mark a branch inbox card unread (dot + bolding) for a fresh inbound message.
+function _bumpCardUnread(leadId) {
+  const card = document.querySelector(`.lead-card[data-lead-id="${leadId}"]`);
+  if (!card) return;
+  card.classList.add('has-unread');
+  if (!card.querySelector('.lead-unread-dot')) {
+    card.querySelector('.lead-card-row2')?.insertAdjacentHTML('beforeend', '<span class="lead-unread-dot"></span>');
+  }
+  card.querySelector('.lead-card-time')?.classList.add('unread-time');
+  card.querySelector('.lead-card-preview')?.classList.add('unread-preview');
+}
+
+// One lead_messages INSERT in the branch scope.
+function _onBranchMessageInsert(row) {
+  if (_isOutgoing(row.direction) && _recentlySent.has(`${row.lead_id}|${row.message}`)) return; // own echo
+
+  const isActive = row.lead_id === _activeLeadId;
+
+  if (isActive) {
+    const log = document.getElementById('leads-convo-log');
+    if (log) {
+      log.querySelector('.leads-convo-empty')?.remove();
+      log.insertAdjacentHTML('beforeend', _messageBubbleHtml(row, _leads.find(l => l.id === row.lead_id)));
+      log.scrollTop = log.scrollHeight;
+    }
+    if (!_isOutgoing(row.direction)) markConversationSeen(row.lead_id);   // open convo → clear unread
+  } else if (!_isOutgoing(row.direction)) {
+    _bumpCardUnread(row.lead_id);                                         // closed convo → unread dot
+  }
+
+  syncCardPreview(row.lead_id, row);                                      // refresh preview + time
+
+  // A message from a lead not in the loaded list = a new or just-routed
+  // conversation. Refresh the list so its card appears.
+  if (!_leads.some(l => l.id === row.lead_id)) loadLeadsTab();
+}
+
+// One lead_messages INSERT in the admin scope — only the open modal convo updates.
+function _onAdminMessageInsert(row) {
+  if (_isOutgoing(row.direction) && _recentlySent.has(`${row.lead_id}|${row.message}`)) return; // own echo
+  if (row.lead_id !== _adminChatLeadId) return;
+  const log = document.getElementById('admin-convo-log');
+  if (!log) return;
+  log.querySelector('.leads-convo-empty')?.remove();
+  log.insertAdjacentHTML('beforeend', _messageBubbleHtml(row, _adminLeadsAll.find(l => l.id === row.lead_id)));
+  log.scrollTop = log.scrollHeight;
+}
+
+// ── Branch inbox scope ───────────────────────────────────────
+// Idempotent: subscribing the same branch twice is a no-op, so it's safe to
+// call from loadLeadsTab() on every tab open.
+function subscribeInbox(branchId) {
+  if (!branchId || !db || typeof db.channel !== 'function') return;
+  if (_inboxBranchId === branchId && _inboxMsgChan) return;
+  unsubscribeInbox();
+  _inboxBranchId = branchId;
+  _inboxMsgChan = db.channel(`inbox-msg:${branchId}`)
+    .on('postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'lead_messages',
+        filter: `branch_id=eq.${branchId}` },
+      payload => _onBranchMessageInsert(payload.new))
+    .subscribe();
+}
+
+function unsubscribeInbox() {
+  if (_inboxMsgChan && db && typeof db.removeChannel === 'function') db.removeChannel(_inboxMsgChan);
+  _inboxMsgChan = null;
+  _inboxBranchId = null;
+}
+
+// ── Admin chat modal scope ───────────────────────────────────
+function subscribeAdminChat() {
+  if (!db || typeof db.channel !== 'function') return;
+  unsubscribeAdminChat();
+  _adminMsgChan = db.channel('admin-msg')
+    .on('postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'lead_messages' },
+      payload => _onAdminMessageInsert(payload.new))
+    .subscribe();
+}
+
+function unsubscribeAdminChat() {
+  if (_adminMsgChan && db && typeof db.removeChannel === 'function') db.removeChannel(_adminMsgChan);
+  _adminMsgChan = null;
 }
 
 // ============================================================
@@ -1072,6 +1208,7 @@ async function verifyPIN() {
 // ============================================================
 
 async function openAdminPanel() {
+  unsubscribeInbox();        // leaving any branch context (e.g. "view as branch")
   showScreen('admin-panel');
   setRoute('#/admin/overview');
   // Always open on Overview tab

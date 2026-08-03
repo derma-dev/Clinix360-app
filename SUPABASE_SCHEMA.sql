@@ -175,15 +175,25 @@ CREATE TABLE IF NOT EXISTS lead_notes (
 CREATE INDEX IF NOT EXISTS idx_lead_notes_lead ON lead_notes(lead_id, created_at DESC);
 
 -- Messages on a lead — ordered chronologically to form a timeline.
+-- direction: 'incoming' (customer → us) | 'outgoing' (us → customer). The code
+-- always sets it explicitly; older rows may carry the day-1 'in'/'out' values,
+-- which readers tolerate (`['in','incoming'].includes(...)`).
+-- branch_id is populated on EVERY insert (inbound via meta-service, outbound via
+-- meta-send) so the realtime inbox channel can filter by branch server-side.
 CREATE TABLE IF NOT EXISTS lead_messages (
   id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   lead_id    UUID REFERENCES leads(id) ON DELETE CASCADE,
   branch_id  UUID REFERENCES branches(id) ON DELETE CASCADE,
-  direction  TEXT NOT NULL DEFAULT 'out',  -- 'in' (customer) | 'out' (staff)
-  body       TEXT NOT NULL DEFAULT '',
+  direction  TEXT NOT NULL DEFAULT 'outgoing',   -- 'incoming' (customer) | 'outgoing' (staff)
+  message    TEXT NOT NULL DEFAULT '',
+  is_seen    BOOLEAN DEFAULT false,              -- inbound messages staff haven't read yet
+  seen_at    TIMESTAMPTZ,                        -- when the convo was last marked seen
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_lead_messages_lead ON lead_messages(lead_id, created_at ASC);
+-- Realtime: lead_messages (and leads) are added to the supabase_realtime
+-- publication so the dashboard's Postgres-Changes channels can push new messages
+-- without a manual refresh. See artifacts/REALTIME_INBOX.md.
 
 -- RLS disabled everywhere (PIN-based app security):
 ALTER TABLE branches            DISABLE ROW LEVEL SECURITY;
