@@ -403,7 +403,7 @@ async function sendLeadMessage() {
   // in the background. Reconcile the bubble's state when the request settles.
   input.value  = '';
   const bubble = appendOutgoingBubble(body);
-  _trackSent(leadId, body);   // suppress the realtime echo of our own send
+  if (bubble) bubble.dataset.sentKey = `${leadId}|${body}`;   // mark so the realtime echo finds it, not a dup
 
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
@@ -726,7 +726,7 @@ async function sendAdminChatMessage() {
   const leadId = _adminChatLeadId;
   input.value  = '';
   const bubble = appendOutgoingBubble(body, log);
-  _trackSent(leadId, body);   // suppress the realtime echo of our own send
+  if (bubble) bubble.dataset.sentKey = `${leadId}|${body}`;   // mark so the realtime echo finds it, not a dup
 
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
@@ -758,24 +758,42 @@ async function sendAdminChatMessage() {
 //     backfill on lead_messages; see artifacts/REALTIME_INBOX.md §6).
 //   • Admin chat modal — one unfiltered channel, live only while a modal is open.
 //
-// Outbound echoes: a message THIS client sent is also pushed back to it.
-// _trackSent tags sends for ~5 s so the handler can skip its own echo (the
-// optimistic bubble already represents it) while still showing sends from other
-// staff — the multi-user collaboration win.
+// Outbound echoes: a message THIS client sent is also pushed back to it. Each
+// optimistic bubble is stamped with data-sent-key on send; the echo handler looks
+// that marker up in the DOM and, if found, consumes it and drops the echo (the
+// optimistic bubble already represents it). DOM presence — not a time window — is
+// the dedupe, so a slow Graph-API send (echo arriving well after send) still
+// matches. Echoes with no matching marker are sends from OTHER staff and render.
 // ============================================================
 
 let _inboxMsgChan   = null;
 let _inboxBranchId  = null;
 let _adminMsgChan   = null;
-const _recentlySent = new Set();   // 'leadId|text' keys, cleared after 5 s
-
-function _trackSent(leadId, text) {
-  _recentlySent.add(`${leadId}|${text}`);
-  setTimeout(() => _recentlySent.delete(`${leadId}|${text}`), 5000);
+// Find this client's own optimistic (still-in-DOM) bubble for an outgoing message,
+// keyed by 'leadId|text'. The optimistic bubble is stamped data-sent-key on send
+// (sendLeadMessage / sendAdminChatMessage); the realtime echo looks it up here.
+// DOM presence — not a time window — is the dedupe, so a slow Graph-API send
+// (echo arriving 10 s later) still matches and we don't double the bubble.
+function _findOwnSentBubble(log, key) {
+  if (!log) return null;
+  for (const el of log.querySelectorAll('[data-sent-key]')) {
+    if (el.dataset.sentKey === key) return el;
+  }
+  return null;
 }
 
 function _isOutgoing(direction) {
   return ['out', 'outgoing'].includes(direction);
+}
+
+// Append one bubble to the open branch thread (no-op if it isn't the active convo).
+function _appendBranchMessage(row) {
+  if (row.lead_id !== _activeLeadId) return;
+  const log = document.getElementById('leads-convo-log');
+  if (!log) return;
+  log.querySelector('.leads-convo-empty')?.remove();
+  log.insertAdjacentHTML('beforeend', _messageBubbleHtml(row, _leads.find(l => l.id === row.lead_id)));
+  log.scrollTop = log.scrollHeight;
 }
 
 // Mark a branch inbox card unread (dot + bolding) for a fresh inbound message.
@@ -792,35 +810,42 @@ function _bumpCardUnread(leadId) {
 
 // One lead_messages INSERT in the branch scope.
 function _onBranchMessageInsert(row) {
-  if (_isOutgoing(row.direction) && _recentlySent.has(`${row.lead_id}|${row.message}`)) return; // own echo
-
+  const key      = `${row.lead_id}|${row.message}`;
+  const outgoing = _isOutgoing(row.direction);
   const isActive = row.lead_id === _activeLeadId;
 
-  if (isActive) {
-    const log = document.getElementById('leads-convo-log');
-    if (log) {
-      log.querySelector('.leads-convo-empty')?.remove();
-      log.insertAdjacentHTML('beforeend', _messageBubbleHtml(row, _leads.find(l => l.id === row.lead_id)));
-      log.scrollTop = log.scrollHeight;
+  if (outgoing) {
+    if (isActive) {
+      // Our own send? The optimistic bubble is still in the DOM → consume its marker
+      // and drop the echo (no duplicate). Otherwise it's another staff member's send.
+      const own = _findOwnSentBubble(document.getElementById('leads-convo-log'), key);
+      if (own) { delete own.dataset.sentKey; return; }
+      _appendBranchMessage(row);
     }
-    if (!_isOutgoing(row.direction)) markConversationSeen(row.lead_id);   // open convo → clear unread
-  } else if (!_isOutgoing(row.direction)) {
-    _bumpCardUnread(row.lead_id);                                         // closed convo → unread dot
+    syncCardPreview(row.lead_id, row);   // refresh the "You:" preview either way
+    return;
   }
 
-  syncCardPreview(row.lead_id, row);                                      // refresh preview + time
-
-  // A message from a lead not in the loaded list = a new or just-routed
-  // conversation. Refresh the list so its card appears.
-  if (!_leads.some(l => l.id === row.lead_id)) loadLeadsTab();
+  // incoming
+  if (isActive) {
+    _appendBranchMessage(row);
+    markConversationSeen(row.lead_id);
+  } else {
+    _bumpCardUnread(row.lead_id);
+  }
+  syncCardPreview(row.lead_id, row);
+  if (!_leads.some(l => l.id === row.lead_id)) loadLeadsTab();   // new / routed lead
 }
 
 // One lead_messages INSERT in the admin scope — only the open modal convo updates.
 function _onAdminMessageInsert(row) {
-  if (_isOutgoing(row.direction) && _recentlySent.has(`${row.lead_id}|${row.message}`)) return; // own echo
   if (row.lead_id !== _adminChatLeadId) return;
   const log = document.getElementById('admin-convo-log');
   if (!log) return;
+  if (_isOutgoing(row.direction)) {
+    const own = _findOwnSentBubble(log, `${row.lead_id}|${row.message}`);
+    if (own) { delete own.dataset.sentKey; return; }   // our send — drop the echo
+  }
   log.querySelector('.leads-convo-empty')?.remove();
   log.insertAdjacentHTML('beforeend', _messageBubbleHtml(row, _adminLeadsAll.find(l => l.id === row.lead_id)));
   log.scrollTop = log.scrollHeight;

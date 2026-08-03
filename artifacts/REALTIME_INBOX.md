@@ -247,19 +247,18 @@ Two cases to serve, and they pull in opposite directions:
 - **Another staff/admin sent it** → append a confirmed outgoing bubble (this is the
   collaboration win).
 
-**Recommended approach (lazy, no schema change):** a short-lived `recentlySent`
-`Set` of `leadId|text` keys, populated on send and cleared after ~5 s. The realtime
-handler, for an outgoing INSERT:
-- if the key is in `recentlySent` → skip (the optimistic bubble owns it);
-- else → append a confirmed outgoing bubble + update the card.
+**As built — DOM-marker dedupe (no schema change, no time window).** On send, the
+optimistic bubble is stamped `data-sent-key="leadId|text"`. When an outgoing INSERT
+echoes back over realtime, the handler looks that marker up in the DOM:
+- if a bubble with that `data-sent-key` exists → it's our own send; consume the
+  marker and **drop the echo** (the optimistic bubble already represents it);
+- else → it's a send from another staff/admin → render it (the collaboration win).
 
-Incoming INSERTs always append (active thread) / bump (card) and, for the active
-thread, call the existing `markConversationSeen` so unread counts stay correct.
-
-**Robust upgrade (deferred):** a `client_message_id` column stamped by the sender
-and echoed in the INSERT; suppress echoes whose id matches one this session
-originated. Removes the 5 s / same-text ambiguity entirely. Not needed at this
-volume; noted in [§11](#11-deliberately-out-of-scope).
+DOM presence is the dedupe, not a time window. The echo only fires after the
+Graph-API send + DB insert, routinely **>5 s**, so an earlier fixed-window `Set`
+(`_recentlySent`, 5 s) expired before the echo arrived and **doubled the bubble** —
+that was the first bug report and why it was replaced. Incoming INSERTs always
+append (active thread) / bump unread (card) and call `markConversationSeen`.
 
 ### 5.4 Decisions worth arguing about
 
@@ -536,7 +535,7 @@ window), one as branch staff, one as admin.
 | 1 | **Enable the publication or nothing fires.** The channel connects and reports `SUBSCRIBED` even with the table absent from `supabase_realtime` — it just never emits. The #1 silent failure. |
 | 2 | **One `eq` filter per channel.** No `IN (list)`. This is why we filter by `branch_id`, not by the set of loaded leads. |
 | 3 | **`branch_id` must be populated.** The column exists but every insert leaves it NULL today. Without the backfill the inbox channel can't filter server-side. |
-| 4 | **Optimistic-echo double-bubble.** The sender's own outgoing INSERT is pushed back; without the `_recentlySent` guard you get two bubbles. And you can't blanket-ignore outgoing — that kills the multi-staff collaboration win. |
+| 4 | **Optimistic-echo double-bubble.** The sender's own outgoing INSERT is pushed back; a naive handler renders it a second time. Dedupe by **DOM marker** (`data-sent-key` on the optimistic bubble), **not a time window** — the echo only fires after the Graph-API send + DB insert (routinely >5 s), so a fixed window expires first and doubles the bubble (the first bug we hit). Don't blanket-ignore outgoing either — that kills the multi-staff collaboration win. |
 | 5 | **The schema file is stale on `lead_messages`.** [§17 drift](PROJECT_DOCUMENTATION.md#17-database-schema): real columns are `message`/`is_seen`/`seen_at`, direction `'incoming'`/`'outgoing'`. Don't trust the SQL file; trust the code. |
 | 6 | **Unsubscribe on exit.** Holding a channel while on the cashup screen wastes a socket and re-renders cards no one is looking at. `unsubscribeInbox()` on tab/modal close. |
 | 7 | **`is_seen` races on rapid inbound.** If two messages arrive in the same tick while the thread is open, `markConversationSeen` fires per message — harmless (idempotent bulk update) but worth knowing. |
@@ -607,14 +606,15 @@ Small build. SQL + ~80 lines of `app.js` + three one-line server fixes + docs.
 
 - [x] **4.** Realtime block added after `sendAdminChatMessage`: `subscribeInbox` /
       `unsubscribeInbox` (branch, filtered by `branch_id`), `subscribeAdminChat` /
-      `unsubscribeAdminChat` (admin, unfiltered), the `_recentlySent` echo-dedupe,
-      `_messageBubbleHtml` (shared with `renderThreadHtml`), `_bumpCardUnread`, and the
-      two INSERT handlers. `renderThreadHtml` refactored to use `_messageBubbleHtml`
+      `unsubscribeAdminChat` (admin, unfiltered), the DOM-marker echo dedupe
+      (`_findOwnSentBubble` + `data-sent-key`), `_messageBubbleHtml` (shared with
+      `renderThreadHtml`), `_appendBranchMessage`, `_bumpCardUnread`, and the two
+      INSERT handlers. `renderThreadHtml` refactored to use `_messageBubbleHtml`
       (identical output).
 - [x] **5.** Lifecycle wired: `loadLeadsTab` → `subscribeInbox` (idempotent);
       `showHome` + `openAdminPanel` → `unsubscribeInbox`; `sendLeadMessage` +
-      `sendAdminChatMessage` → `_trackSent`; `openAdminChat` → `subscribeAdminChat`;
-      `closeAdminChat` → `unsubscribeAdminChat`.
+      `sendAdminChatMessage` stamp `data-sent-key` on the optimistic bubble;
+      `openAdminChat` → `subscribeAdminChat`; `closeAdminChat` → `unsubscribeAdminChat`.
       *Verify:* `node --check app.js` → OK. Live verify after deploy via the
       [manual smoke test](#manual-smoke-test).
 
