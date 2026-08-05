@@ -239,6 +239,18 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(ig.name,      null);
 }
 
+// Instagram top-level comment whose parent_id points at the media (the post) — the
+// same shape that hid every top-level FB comment (commit d793b23). If Meta sends this,
+// processComment must NOT skip it as a threaded reply, or IG automation never fires.
+{
+  const [ig] = extractComments({ object:'instagram', entry:[{ id:'IG_ID', changes:[{ field:'comments', value: {
+    from: { id: 'IG_USER', username: 'priya.sharma' },
+    media: { id: 'MEDIA_1' },
+    id: 'IG_TOP', text: 'price?', parent_id: 'MEDIA_1',   // parent_id === media.id → top-level
+  } }] }] });
+  assert.equal(ig.parentId, null, 'top-level IG comment (parent_id===media.id) must not be skipped as threaded');
+}
+
 // Self-comment + threaded-reply markers survive extraction so processComment can skip them
 {
   const [c] = extractComments({

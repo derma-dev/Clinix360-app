@@ -366,7 +366,11 @@ function extractComments(payload) {
           fromId:    v.from?.id,
           username:  v.from?.username,
           name:      null,                       // IG gives a username, not a display name
-          parentId:  v.parent_id,                // set = it's a reply in a thread
+          // Null parent_id when it points at the media (the post), not another comment —
+          // the same top-level guard FB needs (commit d793b23). Safe: a reply's parent is
+          // always another comment id, never the media id. IG's live webhook shape is
+          // unverified; defensive until a real comment is tested.
+          parentId:  v.parent_id && v.parent_id !== v.media?.id ? v.parent_id : null,
           accountId: v.recipient_id || entry.id, // OUR ig account id
         });
         continue;
@@ -387,8 +391,7 @@ function extractComments(payload) {
           // FB sets parent_id on EVERY comment — for a top-level comment it equals
           // post_id (the parent IS the post); only a reply-in-a-thread has a different
           // value. Null it when it's just the post, so the threaded-reply skip doesn't
-          // fire on top-level comments. (Instagram only sets parent_id for real threads,
-          // so its branch is unchanged.)
+          // fire on top-level comments. IG is guarded the same way (parent_id vs media id).
           parentId:  v.parent_id && v.parent_id !== v.post_id ? v.parent_id : null,
           accountId: entry.id,                   // OUR page id
         });

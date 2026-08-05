@@ -1063,6 +1063,17 @@ Newest first. **Add a line here for every change that touches behaviour.**
     **Gated on Instagram going live first** — FB inherits IG's answer to the two open button/postback
     assumptions. Procedure: [FACEBOOK_COMMENT_AUTOMATION.md §12](FACEBOOK_COMMENT_AUTOMATION.md).
     Also still needs the client's keyword list/DM copy before it can go live.
+12. **Chatbot automation — RESEARCH, not started.** An LLM assistant that deflects repetitive
+    FAQs and pre-qualifies leads on Instagram / Facebook / WhatsApp, so staff reply only to
+    engaged, qualified conversations and can focus on treatment. Plugs into the existing
+    `processIncomingMessage` → `routeLeadFromReply` choke point and reuses the per-platform
+    senders; adds only two columns on `leads` (`bot_active`, `bot_state`) and a `chatbot_config`
+    settings row. Hybrid model: a constrained LLM (knowledge base + hard guardrails, structured
+    output) with a classifier-first safety net so medical / emergency questions hand off
+    **before** the LLM answers — the bot is never the doctor. **Gated** on the realtime inbox
+    being stable (item 7), routing being settled (item 1), and client decisions (platform,
+    model, qualification fields, KB source). Procedure:
+    [CHATBOT_AUTOMATION.md §12](artifacts/CHATBOT_AUTOMATION.md).
 
 ---
 
@@ -1076,6 +1087,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 | [WHATSAPP_INTEGRATION.md](WHATSAPP_INTEGRATION.md) | WhatsApp design, provider cost analysis, decision log, multi-branch routing options |
 | [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md) | Comment → public reply → auto-DM that asks the branch question → routing + 24 h window. Build-vs-buy, Meta API mechanics, full implementation spec. Built, not yet switched on. |
 | [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md) | The Facebook counterpart, on shared `comment_rules`. FB `feed` webhook, `/messages` `recipient:{comment_id}` (PSID), `/comments` public reply, Page permissions. Built, not yet switched on; gated on IG going live. |
+| [artifacts/CHATBOT_AUTOMATION.md](artifacts/CHATBOT_AUTOMATION.md) | Chatbot — research + impl spec. LLM assistant that deflects FAQs and pre-qualifies leads, plugging into the existing message choke point. Hybrid model (constrained LLM + KB + guardrails + classifier-first medical handoff), minimal schema, build-vs-buy. Research, not started; gated on inbox stability + client decisions. |
 | [WHATSAPP_SETUP_RUNBOOK.md](WHATSAPP_SETUP_RUNBOOK.md) | Click-by-click Meta setup, test flow, client-handover replay, ranked gotchas |
 | [NETLIFY_CREDITS_WORKAROUND.md](NETLIFY_CREDITS_WORKAROUND.md) | Deploying/testing when production deploys are credit-blocked |
 | [Clinix360_Instagram_GoLive_Session_2026-06-23.md](Clinix360_Instagram_GoLive_Session_2026-06-23.md) | Why IG webhooks were silent (app in Development mode) and how it was fixed |
