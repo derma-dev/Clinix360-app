@@ -484,16 +484,18 @@ Both delivery functions update `last_sent_at` on success. The webhook sender ret
 
 Two views over the same `leads` + `lead_messages` tables.
 
-### Branch inbox (`#/branch/leads`, [app.js:176-478](app.js#L176-L478))
+### Branch inbox (`#/branch/leads`, [app.js:180-507](app.js#L180-L507))
 
 - `loadLeadsTab()` queries leads for **the current branch only**, then pulls all their
   messages in **one** query and derives, per lead, the last message + unread count.
-- Left column = conversation cards (platform badge, name, preview, relative time, unread
-  dot). Right column = the chat thread. On mobile the detail column slides over.
+- **Centered leads table** on a light-beige canvas. A platform toggle
+  (All / Instagram / Facebook / WhatsApp) filters by source without refetching
+  (`bindLeadsToggle` / `applyLeadsFilter`, reusing the cached last-message map). Each row
+  shows **Date · Name · Concern** (concern = last message text, truncated to 64 chars).
+  Clicking a row opens the chat **over the leads area** (same footprint, with a dimmed
+  backdrop); the back button or a click on the backdrop returns to the list.
 - Opening a conversation calls `markConversationSeen()` — bulk-updates
   `is_seen = true, seen_at = now()` for that lead's incoming, unseen messages.
-- **Preview text**: outbound messages are prefixed with a styled **"You:"**
-  (`buildPreviewHtml`, [app.js:373](app.js#L373)).
 - **Sending** (`sendLeadMessage`) is **optimistic**: the bubble appears immediately in a
   "Sending…" state, then resolves to a timestamp (`markBubbleSent`) or
   "Failed — not sent" (`markBubbleFailed`). It POSTs to `/.netlify/functions/meta-send`.
@@ -503,7 +505,7 @@ Two views over the same `leads` + `lead_messages` tables.
   no refresh. Requires the `supabase_realtime` publication enabled on `lead_messages`
   and the `branch_id` backfill; see [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md).
   With realtime off it silently degrades to the old load-on-open behaviour, and
-  `syncCardPreview()` still patches a card when a thread is opened.
+  `syncCardPreview()` still patches a row's Concern cell when a thread is opened.
 - Message text is inserted with `textContent` / `esc()` — **XSS-safe**.
 
 ### Admin leads pipeline (`#/admin/leads`, [app.js:480-728](app.js#L480-L728))

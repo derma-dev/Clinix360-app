@@ -204,15 +204,32 @@
    <div class="branch-tab" id="branch-tab-leads">
      <div class="leads-hub">
 
-       <!-- ── Conversation Sidebar ── -->
-       <div class="leads-list-col" id="leads-list-col">
-         <div class="leads-list-header">
-           <h2 class="leads-list-title">Inbox</h2>
+       <!-- ── Centered leads table ── -->
+       <div class="leads-center">
+         <div class="leads-toolbar">
+           <h2 class="leads-page-title">Leads</h2>
+           <div class="leads-platform-toggle" id="leads-platform-toggle">
+             <button class="plat-btn active" data-src="all">All</button>
+             <button class="plat-btn" data-src="instagram">Instagram</button>
+             <button class="plat-btn" data-src="facebook">Facebook</button>
+             <button class="plat-btn" data-src="whatsapp">WhatsApp</button>
+           </div>
          </div>
-         <div id="leads-list">
-           <div class="loading-wrap"><div class="spinner"></div></div>
+
+         <div class="leads-table">
+           <div class="leads-table-head">
+             <span>Date</span>
+             <span>Name</span>
+             <span>Concern</span>
+           </div>
+           <div id="leads-list">
+             <div class="loading-wrap"><div class="spinner"></div></div>
+           </div>
          </div>
-       </div><!-- /leads-list-col -->
+       </div><!-- /leads-center -->
+
+       <!-- Backdrop: dims the leads area; click closes the chat -->
+       <div class="leads-backdrop" id="leads-backdrop"></div>
 
        <!-- ── Chat Panel ── -->
        <div class="leads-detail-col" id="leads-detail-col">

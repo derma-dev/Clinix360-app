@@ -183,6 +183,9 @@ function switchAdminTab(tab) {
 let _leads = [];
 let _activeLeadId = null;
 let _leadsTabBound = false;
+let _leadsLastMsg = {};
+let _leadsUnread  = {};
+let _leadsSourceFilter = 'all';
 
 async function loadLeadsTab() {
   const list = document.getElementById('leads-list');
@@ -194,7 +197,9 @@ async function loadLeadsTab() {
 
   if (!_leadsTabBound) {
     _leadsTabBound = true;
+    bindLeadsToggle();
     document.getElementById('btn-lead-back')?.addEventListener('click', closeLeadDetail);
+    document.getElementById('leads-backdrop')?.addEventListener('click', closeLeadDetail);
     document.getElementById('btn-convo-log')?.addEventListener('click', sendLeadMessage);
     document.getElementById('leads-convo-input')?.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendLeadMessage(); }
@@ -220,7 +225,9 @@ async function loadLeadsTab() {
   _leads = leads || [];
 
   if (!_leads.length) {
-    renderConversationList(_leads, {});
+    _leadsLastMsg = {};
+    _leadsUnread  = {};
+    applyLeadsFilter();
     return;
   }
 
@@ -243,7 +250,9 @@ async function loadLeadsTab() {
   });
 
   console.log('Conversation list (lastMsg map):', lastMsg);
-  renderConversationList(_leads, lastMsg, unreadCount);
+  _leadsLastMsg = lastMsg;
+  _leadsUnread  = unreadCount;
+  applyLeadsFilter();
 }
 
 function renderConversationList(leads, lastMsg, unreadCount = {}) {
@@ -254,35 +263,53 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
     list.innerHTML = `
       <div class="leads-empty-state">
         <div class="leads-empty-icon"><svg class="icon"><use href="#i-inbox"/></svg></div>
-        <div class="leads-empty-title">No conversations yet</div>
-        <div class="leads-empty-sub">Messages from Instagram and Facebook will appear here</div>
+        <div class="leads-empty-title">No leads yet</div>
+        <div class="leads-empty-sub">Messages from Instagram, Facebook and WhatsApp will appear here</div>
       </div>`;
     return;
   }
 
   list.innerHTML = leads.map(lead => {
-    const msg    = lastMsg[lead.id];
-    const prev   = buildPreviewHtml(msg);
-    const time   = msg ? formatConvoTime(msg.created_at) : '';
-    const count  = unreadCount[lead.id] || 0;
-    const src    = (lead.source || '').toLowerCase();
-    const label  = src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : (lead.source || '?').slice(0, 2).toUpperCase();
+    const count   = unreadCount[lead.id] || 0;
+    const src     = (lead.source || '').toLowerCase();
+    const text    = lastMsg[lead.id]?.message || '';
+    const concern = text
+      ? `<span class="lead-concern-text">${esc(text.slice(0, 64))}${text.length > 64 ? '…' : ''}</span>`
+      : `<span class="lead-concern-none">No messages yet</span>`;
 
     return `
     <div class="lead-card ${count > 0 ? 'has-unread' : ''}" data-lead-id="${esc(lead.id)}" onclick="openLeadDetail('${esc(lead.id)}')">
-      <div class="conv-platform-icon ${esc(src)}">${label}</div>
-      <div class="lead-card-info">
-        <div class="lead-card-row1">
-          <span class="lead-card-name">${esc(leadDisplayName(lead.customer_name))}</span>
-          <span class="lead-card-time ${count > 0 ? 'unread-time' : ''}">${time}</span>
-        </div>
-        <div class="lead-card-row2">
-          <span class="lead-card-preview ${count > 0 ? 'unread-preview' : ''}">${prev}</span>
-          ${count > 0 ? '<span class="lead-unread-dot"></span>' : ''}
-        </div>
-      </div>
+      <span class="lead-cell lead-date">${formatConvoTime(lead.created_at)}</span>
+      <span class="lead-cell lead-name">
+        <span class="conv-platform-icon sm ${esc(src)}">${sourceBadgeInner(src)}</span>
+        <span class="lead-name-text">${esc(leadDisplayName(lead.customer_name) || 'Lead')}</span>
+        ${count > 0 ? '<span class="lead-unread-dot"></span>' : ''}
+      </span>
+      <span class="lead-cell lead-concern">${concern}</span>
     </div>`;
   }).join('');
+}
+
+// Platform toggle (All / Instagram / Facebook / WhatsApp) filters the leads table
+// by source without refetching — reuses the cached last-message map from loadLeadsTab.
+function bindLeadsToggle() {
+  const tog = document.getElementById('leads-platform-toggle');
+  if (!tog || tog.dataset.bound) return;
+  tog.dataset.bound = '1';
+  tog.addEventListener('click', e => {
+    const btn = e.target.closest('.plat-btn');
+    if (!btn) return;
+    tog.querySelectorAll('.plat-btn').forEach(b => b.classList.toggle('active', b === btn));
+    _leadsSourceFilter = btn.dataset.src;
+    applyLeadsFilter();
+  });
+}
+
+function applyLeadsFilter() {
+  const filtered = _leadsSourceFilter === 'all'
+    ? _leads
+    : _leads.filter(l => (l.source || '').toLowerCase() === _leadsSourceFilter);
+  renderConversationList(filtered, _leadsLastMsg, _leadsUnread);
 }
 
 function openLeadDetail(leadId) {
@@ -293,12 +320,11 @@ function openLeadDetail(leadId) {
   document.querySelector(`.lead-card[data-lead-id="${leadId}"]`)?.classList.add('active');
 
   const src   = (lead.source || '').toLowerCase();
-  const label = src === 'instagram' ? 'IG' : src === 'facebook' ? 'FB' : src === 'whatsapp' ? 'WA' : (lead.source || '?').slice(0, 2).toUpperCase();
 
   document.getElementById('lead-detail-name').textContent  = leadDisplayName(lead.customer_name);
 
   const avatar = document.getElementById('lead-header-avatar');
-  if (avatar) { avatar.textContent = label; avatar.className = 'conv-header-avatar ' + src; }
+  if (avatar) { avatar.innerHTML = sourceBadgeInner(src); avatar.className = 'conv-header-avatar ' + src; }
 
   const platformLabel = document.getElementById('lead-platform-label');
   if (platformLabel) platformLabel.textContent = lead.source || '';
@@ -326,10 +352,6 @@ async function markConversationSeen(leadId) {
   if (card) {
     card.classList.remove('has-unread');
     card.querySelector('.lead-unread-dot')?.remove();
-    const t = card.querySelector('.lead-card-time');
-    const p = card.querySelector('.lead-card-preview');
-    if (t) t.classList.remove('unread-time');
-    if (p) p.classList.remove('unread-preview');
   }
 
   await db
@@ -372,23 +394,13 @@ async function loadLeadMessages(leadId) {
   syncCardPreview(leadId, data[data.length - 1]);
 }
 
-// Build inbox preview HTML for a message row. Outbound (mine) gets a "You:" tag;
-// inbound (customer) shows the bare text. Null msg → "No messages".
-function buildPreviewHtml(msg) {
-  if (!msg) return '<em>No messages</em>';
-  const text       = esc(msg.message.length > 50 ? msg.message.slice(0, 50) + '…' : msg.message);
-  const isOutgoing = ['out', 'outgoing'].includes(msg.direction);
-  return isOutgoing ? `<span class="preview-you">You:</span> ${text}` : text;
-}
-
-// Update an inbox card's preview text + time from a message row (or clear it).
+// Update a table row's Concern cell from a fresh message (or clear it).
 function syncCardPreview(leadId, msg) {
   const card = document.querySelector(`.lead-card[data-lead-id="${leadId}"]`);
-  if (!card) return;
-  const prevEl = card.querySelector('.lead-card-preview');
-  const timeEl = card.querySelector('.lead-card-time');
-  if (prevEl) prevEl.innerHTML = buildPreviewHtml(msg);
-  if (timeEl && msg) timeEl.textContent = formatConvoTime(msg.created_at);
+  if (!card || !msg) return;
+  const text = (msg.message || '').slice(0, 64);
+  const cell = card.querySelector('.lead-concern');
+  if (cell) cell.innerHTML = `<span class="lead-concern-text">${esc(text)}${(msg.message || '').length > 64 ? '…' : ''}</span>`;
 }
 
 async function sendLeadMessage() {
@@ -478,12 +490,11 @@ function renderThreadHtml(data, lead) {
 // render a redundant "Today" divider before itself.
 function _messageBubbleHtml(m, lead) {
   const src         = (lead?.source || '').toLowerCase();
-  const avatarLabel = sourceLabel(src);
   const isIncoming  = ['in', 'incoming'].includes(m.direction);
   const timeStr     = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
   return `
     <div class="leads-convo-msg ${isIncoming ? 'incoming' : 'outgoing'} convo-msg-anim">
-      ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${esc(avatarLabel)}</div>` : ''}
+      ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${sourceBadgeInner(src)}</div>` : ''}
       <div class="convo-msg-body">
         <div class="leads-convo-msg-text">${esc(m.message)}</div>
         <div class="leads-convo-msg-meta">${timeStr}</div>
@@ -505,6 +516,16 @@ function sourceLabel(src) {
 function sourceLabelFull(src) {
   return src === 'instagram' ? 'Instagram' : src === 'facebook' ? 'Facebook' : src === 'whatsapp' ? 'WhatsApp'
        : src ? src.charAt(0).toUpperCase() + src.slice(1) : 'Other';
+}
+
+// Inner markup for a platform badge: brand PNG for the 3 social platforms,
+// otherwise the 2-letter fallback (Walk-in, Google, Referral, …).
+function sourceBadgeInner(src) {
+  const s = (src || '').toLowerCase();
+  if (s === 'instagram' || s === 'facebook' || s === 'whatsapp') {
+    return `<img class="platform-icon-img" src="assets/icons8-${s}-48.png" alt="${sourceLabelFull(s)}">`;
+  }
+  return esc(sourceLabel(s));
 }
 function branchName(id) {
   return (state.branches || []).find(b => b.id === id)?.name || '—';
@@ -597,7 +618,7 @@ function renderLeadsKpis(leads) {
   });
   const conv  = total ? Math.round((by.converted / total) * 100) : 0;
   const chips = Object.keys(bySource).sort().map(s =>
-    `<span class="leads-src-chip"><span class="conv-platform-icon ${esc(s)}">${esc(sourceLabel(s))}</span>${bySource[s]}</span>`).join('');
+    `<span class="leads-src-chip"><span class="conv-platform-icon ${esc(s)}">${sourceBadgeInner(s)}</span>${bySource[s]}</span>`).join('');
 
   grid.innerHTML = `
     ${leadKpiTile('Total leads', total)}
@@ -638,7 +659,7 @@ function renderLeadsTable(leads) {
       return `
       <tr>
         <td class="lt-name">${esc(leadDisplayName(l.customer_name) || 'Lead')}</td>
-        <td><span class="conv-platform-icon ${esc(src)}">${esc(sourceLabel(src))}</span></td>
+        <td><span class="conv-platform-icon ${esc(src)}">${sourceBadgeInner(src)}</span></td>
         <td class="lt-branch">${esc(branchName(l.branch_id))}</td>
         <td><select class="lead-status-select st-${esc(st)}" onchange="updateLeadStatus('${esc(l.id)}', this.value)">${opts}</select></td>
         <td class="lt-time">${esc(formatConvoTime(l.created_at))}</td>
@@ -669,7 +690,7 @@ function openAdminChat(leadId) {
 
   const src = (lead.source || '').toLowerCase();
   const av  = document.getElementById('admin-chat-avatar');
-  if (av) { av.textContent = sourceLabel(src); av.className = 'conv-header-avatar ' + src; }
+  if (av) { av.innerHTML = sourceBadgeInner(src); av.className = 'conv-header-avatar ' + src; }
   document.getElementById('admin-chat-name').textContent     = leadDisplayName(lead.customer_name) || 'Lead';
   document.getElementById('admin-chat-platform').textContent = lead.source || '';
 
@@ -802,10 +823,8 @@ function _bumpCardUnread(leadId) {
   if (!card) return;
   card.classList.add('has-unread');
   if (!card.querySelector('.lead-unread-dot')) {
-    card.querySelector('.lead-card-row2')?.insertAdjacentHTML('beforeend', '<span class="lead-unread-dot"></span>');
+    card.querySelector('.lead-name')?.insertAdjacentHTML('beforeend', '<span class="lead-unread-dot"></span>');
   }
-  card.querySelector('.lead-card-time')?.classList.add('unread-time');
-  card.querySelector('.lead-card-preview')?.classList.add('unread-preview');
 }
 
 // One lead_messages INSERT in the branch scope.
@@ -928,7 +947,7 @@ async function loadIntegrations() {
 
     return `
     <div class="integ-row">
-      <div class="conv-platform-icon ${p.key}">${p.badge}</div>
+      <div class="conv-platform-icon ${p.key}">${sourceBadgeInner(p.key)}</div>
       <div class="integ-info">
         <div class="integ-name">${p.label}</div>
         <div class="integ-status ${statusClass}">
