@@ -3,6 +3,14 @@
 -- Run this entire file in your Supabase SQL Editor
 -- Project → SQL Editor → New Query → paste → Run
 -- ============================================================
+--
+-- ⚠️ DEPRECATED — DO NOT USE for the Clinix360 messaging dashboard.
+-- This is the day-1 cashup-only schema. It is MISSING every table the Meta/IG/FB/WA
+-- integration needs (leads, lead_messages, settings, cashup_automations, …), declares
+-- the leads name column as `name` (the code uses `customer_name`), and seeds branches
+-- with a default PIN of '0000'. Running it will silently break the messaging integration.
+-- Use SUPABASE_SCHEMA.sql (the canonical, up-to-date schema) instead. Safe to delete.
+-- ============================================================
 
 -- Branches table (stores branch names, state, and PINs)
 CREATE TABLE IF NOT EXISTS branches (

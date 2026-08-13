@@ -72,10 +72,13 @@ const handler = async () => {
     const fnName = auto.action_type === 'webhook'
       ? 'send-automation-webhook'
       : 'send-automation-report';
+    const internalSecret = process.env.INTERNAL_FUNCTION_SECRET;
     try {
       await fetch(`${SITE_URL}/.netlify/functions/${fnName}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: internalSecret
+          ? { 'Content-Type': 'application/json', 'x-internal-secret': internalSecret }
+          : { 'Content-Type': 'application/json' },
         body: JSON.stringify({ automation_id: auto.id, date_from: from, date_to: to }),
       });
     } catch (e) {

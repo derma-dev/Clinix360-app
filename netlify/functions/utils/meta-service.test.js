@@ -9,6 +9,7 @@ const {
   matchCommentRule,
   matchBranch,
   idColumnFor,
+  verifyMetaSignature,
 } = require('./meta-service');
 
 // ── idColumnFor: the silent-corruption guard ─────────────────
@@ -353,6 +354,46 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(matchBranch('janakpuri', []), null);
   // A blank/missing branch name must not match everything
   assert.equal(matchBranch('janakpuri', [{ id: 'x', name: '' }, { id: 'y' }]), null);
+}
+
+// ── Webhook signature verification (#1) ─────────────────────
+{
+  const crypto = require('crypto');
+  const body = JSON.stringify({ object: 'page', entry: [{ messaging: [{ sender: { id: 'S' }, message: { text: 'hi' } }] }] });
+  const secret = 'test_app_secret_value';
+  const good = 'sha256=' + crypto.createHmac('sha256', secret).update(body, 'utf8').digest('hex');
+
+  process.env.META_APP_SECRET = secret;
+  assert.equal(verifyMetaSignature(body, good), true, 'a valid HMAC signature must verify');
+  assert.equal(verifyMetaSignature(body, 'sha256=' + '0'.repeat(64)), false, 'a wrong signature must reject');
+  assert.equal(verifyMetaSignature(body, undefined), false, 'a missing signature header must reject');
+  assert.equal(verifyMetaSignature(body, 'badprefix=abc'), false, 'a malformed header must reject');
+  delete process.env.META_APP_SECRET;
+  assert.equal(verifyMetaSignature(body, undefined), true, 'no secret configured → dev fallback (allow + warn)');
+}
+
+// ── extractEvents carries Meta message ids for inbound idempotency (#4) ──
+{
+  const wa = extractEvents({
+    object: 'whatsapp_business_account',
+    entry: [{ changes: [{ field: 'messages', value: {
+      contacts: [{ profile: { name: 'A' }, wa_id: '91' }],
+      messages: [{ from: '91', id: 'wamid.XYZ', text: { body: 'hi' } }],
+    } }] }],
+  });
+  assert.equal(wa.events[0].messageId, 'wamid.XYZ', 'WA event must carry the wamid for dedup');
+
+  const ig = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{ sender: { id: 'IGS' }, message: { mid: 'm_123', text: 'hi' } }] }],
+  });
+  assert.equal(ig.events[0].messageId, 'm_123', 'IG/FB event must carry message.mid for dedup');
+
+  const pb = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{ sender: { id: 'IGS' }, postback: { mid: 'pb_1', title: 'Dwarka', payload: 'BRANCH:x' } }] }],
+  });
+  assert.equal(pb.events[0].messageId, 'pb_1', 'a postback must carry its mid for dedup');
 }
 
 console.log('meta-service: all checks passed');

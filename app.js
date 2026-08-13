@@ -372,6 +372,10 @@ async function loadLeadMessages(leadId) {
     .eq('lead_id', leadId)
     .order('created_at', { ascending: true });
 
+  // The user may have switched conversation while this fetch was in flight —
+  // don't paint a stale thread into the now-active convo window.
+  if (_activeLeadId !== leadId) return;
+
   if (error) {
     console.error('[lead_messages query]', error.message);
     log.innerHTML = `<div class="leads-convo-empty">${esc(error.message)}</div>`;
@@ -420,7 +424,7 @@ async function sendLeadMessage() {
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-staff-pin': _staffPin() },
       body:    JSON.stringify({ leadId, message: body }),
     });
     const data = await res.json().catch(() => ({}));
@@ -493,7 +497,7 @@ function _messageBubbleHtml(m, lead) {
   const isIncoming  = ['in', 'incoming'].includes(m.direction);
   const timeStr     = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
   return `
-    <div class="leads-convo-msg ${isIncoming ? 'incoming' : 'outgoing'} convo-msg-anim">
+    <div class="leads-convo-msg ${isIncoming ? 'incoming' : 'outgoing'} convo-msg-anim" data-msg-id="${esc(String(m.id || ''))}">
       ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${sourceBadgeInner(src)}</div>` : ''}
       <div class="convo-msg-body">
         <div class="leads-convo-msg-text">${esc(m.message)}</div>
@@ -752,7 +756,7 @@ async function sendAdminChatMessage() {
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-staff-pin': _staffPin() },
       body:    JSON.stringify({ leadId, message: body }),
     });
     const data = await res.json().catch(() => ({}));
@@ -807,11 +811,20 @@ function _isOutgoing(direction) {
   return ['out', 'outgoing'].includes(direction);
 }
 
+// The PIN of whoever is logged in (admin or branch), sent on every write to the
+// send endpoints so they can authorize server-side. Empty before login.
+function _staffPin() {
+  return state.adminPIN || state.currentBranch?.pin || '';
+}
+
 // Append one bubble to the open branch thread (no-op if it isn't the active convo).
 function _appendBranchMessage(row) {
   if (row.lead_id !== _activeLeadId) return;
   const log = document.getElementById('leads-convo-log');
   if (!log) return;
+  // Dedup vs a convo-load SELECT: if the row is already rendered (the SELECT
+  // resolved and painted it just before this realtime INSERT arrived), bail.
+  if (row.id && log.querySelector(`.leads-convo-msg[data-msg-id="${CSS.escape(String(row.id))}"]`)) return;
   log.querySelector('.leads-convo-empty')?.remove();
   log.insertAdjacentHTML('beforeend', _messageBubbleHtml(row, _leads.find(l => l.id === row.lead_id)));
   log.scrollTop = log.scrollHeight;
@@ -1430,9 +1443,9 @@ async function loadAdminBranches() {
         <div class="admin-branch-pin">${b.state ? esc(b.state) + ' · ' : ''}PIN: ${esc(b.pin)}</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
-        <button class="icon-text-btn branch-gear-btn" title="Edit branch" onclick="editBranch('${b.id}','${esc(b.name)}','${esc(b.pin)}','${esc(b.state||'')}')"><svg class="icon"><use href="#i-settings"/></svg></button>
+        <button class="icon-text-btn branch-gear-btn" title="Edit branch" onclick="editBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}','${esc(b.pin)}','${esc((b.state||'').replace(/'/g, "\\'"))}')"><svg class="icon"><use href="#i-settings"/></svg></button>
         <button class="link-btn" onclick="viewBranchAsAdmin('${b.id}')" style="color:#C4922A">View →</button>
-        <button class="danger-btn" onclick="deleteBranch('${b.id}','${esc(b.name)}')"><svg class="icon"><use href="#i-trash"/></svg></button>
+        <button class="danger-btn" onclick="deleteBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}')"><svg class="icon"><use href="#i-trash"/></svg></button>
       </div>
     </div>
   `).join('');
@@ -1897,7 +1910,7 @@ async function fireAutomationEmail(automation, from, to) {
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-staff-pin': _staffPin() },
         body: payload,
       });
       if (res.ok) return;
@@ -3904,7 +3917,7 @@ function formatCurrency(amount) {
 }
 
 function esc(str) {
-  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Strip a trailing " (@handle)" from a stored lead name so the card shows the

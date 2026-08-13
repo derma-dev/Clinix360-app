@@ -12,9 +12,84 @@
 > app configuration, the exact Graph API calls, the webhook payload shapes, the comment
 > automation engine, and a phased build order.
 >
-> **Read §2 (data model) first.** The integration is built on a `leads` + `lead_messages`
-> table pair. **The client's database does not currently have these.** Everything below
-> depends on them existing with the columns named, so §2 gives you the DDL to create them.
+> **Do Step 0 first.** The spec below is extracted from a working reference project
+> (vanilla JS + Supabase + Netlify Functions). The client's stack, schema, and conventions
+> will differ. **Examine the client's codebase and database before writing or changing any
+> code** — then adapt this spec to what you find. The **Step 0** box immediately below this
+> is mandatory and comes before everything else.
+
+---
+
+## ⚠️ Step 0 — Examine the client codebase & database FIRST
+
+**Do this before writing a single line of code or running any DDL.** This spec describes
+*what the IG integration does* and *how it's built in the reference project*. It is **not**
+a literal copy-paste — the client's stack and database will be different, and the
+integration must be adapted to fit what already exists. Mapping it wrongly (wrong table
+names, wrong DB-access pattern, wrong auth) is the #1 way this goes wrong.
+
+### 0.1 Examine the codebase
+
+Read enough of the repo to answer:
+
+- **Stack & framework** — React/Next/Vue/Svelte? Express/Fastify/PHP/Laravel/.NET? TypeScript
+  or plain JS? Is there a build step, or is it static files? (The reference is framework-less
+  vanilla JS — the client's almost certainly isn't.)
+- **How the app talks to its database** — direct SDK in the browser (supabase-js)? A REST/ORM
+  server layer the frontend calls? This decides whether the "frontend → DB" and "function → DB"
+  patterns in §6–§7 even apply, or whether all DB access must go through the client's existing
+  server/API layer. **Match the client's existing pattern; don't introduce a new one.**
+- **Existing integration / messaging / webhook code** — is there already a webhook receiver,
+  a "connected accounts" or integrations table, a settings/config store, a contacts/leads/
+  inbox feature, a scheduled-job runner? **Reuse what exists.** Don't build a parallel system.
+- **Auth model** — sessions, JWT, API keys, PIN? The webhook + send endpoints in §6 are
+  currently unauthenticated (Meta calls the webhook; the dashboard calls send). Decide how
+  that fits the client's auth — at minimum, the send endpoint should be protected, and the
+  webhook should be HMAC-verified (see §11).
+- **Secrets / env loading** — where are env vars read (`.env`, platform dashboard, a config
+  module)? Match it for the `META_*` / `SUPABASE_*` vars in §5.
+
+### 0.2 Examine the database schema
+
+Dump the **full** schema (every table + columns + types + constraints + RLS status). If
+Supabase, check the Table Editor or `\d` in the SQL editor; if SQL Server/MySQL/Postgres,
+the equivalent catalog query. Specifically look for tables that already resemble:
+
+| Reference table (this doc) | What it holds | Likely client aliases to look for |
+|---|---|---|
+| `leads` | one row per prospective customer | `customers`, `contacts`, `enquiries`, `patients`, `crm_leads` |
+| `lead_messages` | the conversation timeline | `messages`, `conversations`, `chat_messages`, `dm_log` |
+| `branches` | one row per location/clinic | `locations`, `clinics`, `stores`, `outlets` |
+| `settings` | key/value JSON config | `config`, `app_settings`, `options` |
+
+Record, for each: the **exact** table name and the **exact** column names. You will map every
+`db.from('leads')` / `db.from('lead_messages')` / `db.from('branches')` / `db.from('settings')`
+call in §6–§7, and every column the code reads/writes (`source`, `instagram_user_id`,
+`direction`, `branch_id`, `is_seen`, `status`, `name`/`customer_name`, etc.), onto these real
+names. **The client's DB is known to lack the `leads` infrastructure** — so expect to either
+create it (§2.1) or extend an existing table with the missing columns.
+
+Also check:
+- **RLS** — is Row-Level Security on? On which tables? The reference backend uses the **public
+  anon key** (no service-role key). If the client's RLS blocks anon reads/writes, every
+  webhook insert and every staff reply silently fails — you'll need permissive policies or a
+  service-role key server-side (§2.3).
+- **Realtime** — if Supabase, does the `supabase_realtime` publication exist, and which tables
+  are in it? The live inbox (§9) needs `lead_messages` (or its mapped equivalent) added to it.
+
+### 0.3 Write down the mapping before coding
+
+Before changing anything, record (in your plan / a scratch file):
+
+1. The stack and the DB-access pattern you'll use (reuse the client's existing one).
+2. The **table & column mapping**: reference name → client name, for all four tables and the
+   columns listed in §2.1. Flag every column that doesn't exist yet and must be added.
+3. The list of tables/columns to **create** (the ones with no existing equivalent).
+4. The RLS posture and whether realtime publication needs a table added.
+
+Only once that mapping exists, proceed to §2 (create or extend the tables) and §10 (build
+order). The DDL in §2.1 is the **reference shape** — create it verbatim only if the client has
+no equivalent tables; otherwise adapt the code to the real names you just recorded.
 
 ---
 
@@ -54,15 +129,20 @@ IG is a `source` value flowing through a unified Leads/Inbox. Implement it that 
 
 ## 2. Data model — **read first; client DB is missing this**
 
-> ⚠️ **The client's database does NOT have the `leads` table (and related columns) that
+> ⚠️ **The client's database is known to lack the `leads` table (and related columns) that
 > this integration is built on.** Every IG code path — inbound, outbound, comment
-> automation, the inbox, realtime — reads/writes these tables by these exact names and
-> columns. **You must create them (DDL below) before anything will work.**
+> automation, the inbox, realtime — reads/writes these tables. **After Step 0**, you know
+> what already exists. Then:
 >
-> If the client already has a leads-like table under a different name, you have two
-> choices: (a) create these tables as-is (simplest — all the code below works unchanged),
-> or (b) adapt every `db.from('leads')` / `db.from('lead_messages')` call to the client's
-> existing table and map the columns. Option (a) is strongly recommended.
+> - **If no equivalent tables exist** → create them verbatim from the DDL below. All the code
+>   in §6–§7 then works unchanged (after the `customer_name`↔`name` choice noted below).
+> - **If equivalent tables exist** (e.g. a `customers` / `messages` pair) → do **not** create
+>   duplicates. Extend them with any missing columns (notably `instagram_user_id`, `source`,
+>   `branch_id`, `direction`, `is_seen`) and map every `db.from(...)` call + column in §6–§7
+>   onto the real names you recorded in Step 0.3.
+>
+> The DDL below is the **reference shape** — the contract the code expects — not a command to
+> run it blindly. Reuse > create > duplicate, in that order.
 
 ### 2.1 Tables IG depends on
 
@@ -741,7 +821,8 @@ dashboard is read-only on connection state except for a pause/enable flag.
 ### 7.2 The inbox (unified — IG is one `source`)
 
 There is **no separate IG tab**. IG lives inside one "Leads/Inbox" view with a platform
-toggle (All / Instagram / …). For the branch view:
+toggle (All / Instagram / …). (The concrete layout, design tokens, and brand-badge helper
+are in **§7.5** — match the client's design system.) For the branch view:
 
 - **Load:** `db.from('leads').select('id, name, source, status, created_at, branch_id').eq('branch_id', currentBranch)`; then `db.from('lead_messages').select('lead_id, message, direction, created_at, is_seen').in('lead_id', ids)` to build last-message previews + unread counts.
 - **Open a thread:** `db.from('lead_messages').select('id, direction, message, created_at').eq('lead_id', id)` (ascending).
@@ -783,6 +864,104 @@ db.from('settings').upsert({ key:'integrations', value: JSON.stringify({ instagr
 The backend reads this fail-open (`isPlatformEnabled`): only an explicit `false` pauses
 ingestion — a missing key or a DB error leaves it enabled so a toggle glitch never silently
 drops real DMs.
+
+### 7.5 UI design — the current inbox layout (match the client's design system)
+
+> The dashboard's Leads/Inbox UI was recently restyled to **match the client's own design
+> language** (commit `3e05dbd`, "show similar design as the client one"). This subsection
+> documents what those IG-facing screens currently look like, so the implementation can match
+> the client's design system rather than invent a new look. **These are reference values** —
+> swap them for the client's real design tokens where they differ.
+
+**Design language.** Warm, light, cream-and-gold (not the Instagram gradient). The palette
+the reference uses:
+
+| Token | Value | Used for |
+|---|---|---|
+| `--primary` | `#C4922A` | gold accent — active toggle button, unread dot, links |
+| `--primary-dark` | `#8B6508` | hovered/pressed gold |
+| `--primary-light` | `#fdf3e3` | gold tint backgrounds |
+| `--bg` | `#faf6f1` | app background (warm off-white) |
+| leads area bg | `#f4eee2` | the Leads tab background (warm cream) |
+| card/table bg | `#fff` | the leads table + cards |
+| borders | `#e7ddc9` / `#ece3d2` / `#efe7d6` | warm tan hairlines |
+| text | `#2b2b2b` | primary (near-black) |
+| secondary text | `#6b6356` / `#8a7f6b` / `#9a8f7b` | concern text, headers, labels |
+| hover / active row | `#fbf7ef` / `#f6efe0` | lead row states |
+
+**Layout — table, not a messenger sidebar.** The branch Leads tab is a **centered table**
+with three columns, topped by a title + a platform toggle. Structure:
+
+```html
+<div class="leads-hub">
+  <div class="leads-center">
+    <div class="leads-toolbar">
+      <h2 class="leads-page-title">Leads</h2>
+      <div class="leads-platform-toggle" id="leads-platform-toggle">
+        <button class="plat-btn active" data-src="all">All</button>
+        <button class="plat-btn" data-src="instagram">Instagram</button>
+        <button class="plat-btn" data-src="facebook">Facebook</button>
+        <button class="plat-btn" data-src="whatsapp">WhatsApp</button>
+      </div>
+    </div>
+    <div class="leads-table">
+      <div class="leads-table-head"><span>Date</span><span>Name</span><span>Concern</span></div>
+      <div id="leads-list"><!-- .lead-card rows --></div>
+    </div>
+  </div>
+
+  <div class="leads-backdrop" id="leads-backdrop"></div>   <!-- dims leads area when chat open -->
+
+  <div class="leads-detail-col" id="leads-detail-col">     <!-- slide-over chat panel -->
+    <!-- header (back btn + avatar + name + platform label), convo log, compose -->
+  </div>
+</div>
+```
+
+Key behaviours:
+
+- **Platform toggle** filters the table client-side by `lead.source` **without refetching** —
+  it reuses the cached last-message map. The active button gets `var(--primary)` gold + white
+  text. Bind it once (`bindLeadsToggle`, guarded by `dataset.bound`), set `_leadsSourceFilter`,
+  call `applyLeadsFilter()` → `renderConversationList(filtered, …)`.
+- **Each lead row** (`.lead-card`) is a 3-cell grid: **Date** · **Name** (platform badge +
+  name + unread dot) · **Concern** (last message truncated to 64 chars, or italic "No
+  messages yet"). Unread rows bold the name + concern and show a gold `.lead-unread-dot`
+  inside the Name cell.
+- **Chat is a slide-over**, not a second column: opening a lead adds `.active` to
+  `.leads-detail-col` and fades in `.leads-backdrop` (CSS `:has(.leads-detail-col.active)`).
+  Clicking the backdrop (or the back button) closes the chat. On mobile the grid collapses to
+  Date · Name and the Concern column hides.
+- **Empty state:** title "No leads yet", subtext "Messages from Instagram, Facebook and
+  WhatsApp will appear here" (a centered icon + the two lines).
+
+**Platform badges are brand PNGs, not letters.** The recent redesign replaced every 2-letter
+badge (`IG`/`FB`/`WA`) with the brand logo via one helper used everywhere (lead rows, chat
+avatars, admin KPI chips, admin table, Connected Accounts):
+
+```js
+// Inner markup for a platform badge: brand PNG for the 3 social platforms,
+// otherwise the 2-letter fallback (Walk-in, Google, Referral, …).
+function sourceBadgeInner(src) {
+  const s = (src || '').toLowerCase();
+  if (s === 'instagram' || s === 'facebook' || s === 'whatsapp') {
+    return `<img class="platform-icon-img" src="assets/icons8-${s}-48.png" alt="${sourceLabelFull(s)}">`;
+  }
+  return esc(sourceLabel(s));   // 2-letter fallback for non-social sources
+}
+```
+
+Assets needed: `assets/icons8-instagram-48.png`, `assets/icons8-facebook-48.png`,
+`assets/icons8-whatsapp-48.png`. The `.conv-platform-icon` for these three has
+`background: transparent` so the logo shows with no coloured circle behind it (the gold
+circle is only for the 2-letter fallback sources). A smaller variant `.conv-platform-icon.sm`
+(30×30, 8px radius) is used inside the dense lead rows.
+
+> **Why this matters for IG:** the IG badge is `assets/icons8-instagram-48.png`, rendered by
+> `sourceBadgeInner('instagram')`, shown on every IG lead row, the open-conversation header
+> avatar, the incoming-message bubble avatar, and (in admin) the KPI chip and table. If the
+> client's design uses different brand marks, drop in those assets and keep the helper — the
+> `source === 'instagram'` branching is the only IG-specific part.
 
 ---
 
@@ -892,10 +1071,20 @@ your own outgoing row should be consumed, not rendered as a duplicate.
 
 ## 10. Build order — start here
 
-Each step is independently verifiable. Do §4 (Meta app) **first** — it has the longest lead
-time, in parallel with the code.
+Each step is independently verifiable. The very first thing is **reconnaissance** (Step 0) —
+examine the client's codebase and database before writing anything. In parallel, start the
+**Meta app** setup, because it has the longest lead time (App Review can take weeks).
 
-**Phase 0 — Meta app (parallel, long pole)** — §4
+**Step 0 — Reconnaissance (do this first)** — see the Step 0 box near the top
+- [ ] Map the client's stack, DB-access pattern, auth model, and env conventions.
+- [ ] Dump the DB schema; identify existing tables that resemble `leads`, `lead_messages`,
+      `branches`, `settings` and record their exact names + columns.
+- [ ] Decide: create the reference tables as-is (§2.1) **or** map the code onto the client's
+      existing tables. Write the table/column mapping down before coding.
+- [ ] Check RLS posture and (if Supabase) the `supabase_realtime` publication.
+- [ ] *Verify:* you have a written table/column mapping and a list of what's missing.
+
+**Phase 0 — Meta app (parallel, long pole; start now)** — §4
 - [ ] Create Business app; add Instagram product; generate `IGAA…` token.
 - [ ] Subscribe webhook fields: `messages`, `comments`, `messaging_postbacks`.
 - [ ] `subscribed_apps` per-account for those fields.

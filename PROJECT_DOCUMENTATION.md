@@ -855,7 +855,7 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 | `SUPABASE_ANON_KEY` | all DB-touching functions | Public anon key (also served to the browser) |
 | `RESEND_API_KEY` | 4 email functions | Resend API key — **secret** |
 | `META_APP_ID` | meta-service `getConfig()` | Meta app id |
-| `META_APP_SECRET` | meta-service `getConfig()` | Loaded but **currently unused** (see [§20](#20-security-model-quirks--known-issues)) |
+| `META_APP_SECRET` | `verifyMetaSignature()` | HMAC-verifies the `X-Hub-Signature-256` on every webhook POST (see [§20](#20-security-model-quirks--known-issues)) |
 | `META_VERIFY_TOKEN` | `verifyWebhook()` | Webhook GET handshake — shared by IG, FB **and** WA |
 | `META_ACCESS_TOKEN` | IG profile fetch + IG send | Instagram token (`IGAA…`) |
 | `META_PAGE_ACCESS_TOKEN` | FB profile fetch + FB send | Facebook **Page** access token |
@@ -864,6 +864,7 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 | `WHATSAPP_PHONE_NUMBER_ID` | WA send + WA status | Numeric **phone number ID**, not the number |
 | `WHATSAPP_ACCESS_TOKEN` | WA send + WA status | **Use a System User token with expiry Never** — the dashboard token dies in 24 h |
 | `URL` | check-automations | Injected by Netlify; falls back to the hardcoded site URL |
+| `INTERNAL_FUNCTION_SECRET` | check-automations → send-automation-* | Shared secret authorizing the cron's calls to the (now PIN/secret-gated) send endpoints. **Required** for scheduled automations to fire. |
 
 > **Env vars are read at deploy time — after adding or changing one you must trigger a
 > redeploy**, or the running deploy won't see it. A `403` on webhook verification with
@@ -898,9 +899,12 @@ There is exactly one test file, and it needs no framework and no env vars:
 node netlify/functions/utils/meta-service.test.js
 ```
 
-It asserts `idColumnFor()` maps correctly **and throws on unknown platforms**, and that
-`extractEvents()` parses real WhatsApp, FB/IG `messaging[]`, and `changes[]` test payloads.
-Everything else in the repo is manually verified.
+It asserts `idColumnFor()` maps correctly **and throws on unknown platforms**, that
+`extractEvents()` parses real WhatsApp, FB/IG `messaging[]`, and `changes[]` test payloads
+(and now carries `messageId` for inbound idempotency), that `extractComments()` handles the
+IG/FB comment + self/top-level guards, rule + branch matching — and that `verifyMetaSignature()`
+accepts a valid HMAC and rejects wrong / missing / malformed ones. Everything that touches the
+DB or network (senders, `insertMessage`, `processComment`) is still manually verified.
 
 ### Deploy
 
@@ -938,15 +942,22 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
 
 ### Security model
 
-- **RLS is disabled on every table.** The browser holds the public **anon key** with full
-  read/write on every table. **Security is enforced at the app/PIN layer only.** The anon
-  key is not a security boundary — anyone who opens devtools can read and write the
-  database directly.
+- **RLS is enabled but permissive on every table** (`allow_anon_all` — see
+  [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql)). The browser holds the public **anon
+  key** with full read/write; the net behaviour is identical to RLS-off. **Security is
+  enforced at the app/PIN layer only** — the anon key is not a security boundary; anyone who
+  opens devtools can read and write the database directly. (Tightening this needs Supabase
+  Auth or moving writes to the service_role — deferred, see [§22](#22-roadmap--open-items).)
 - The anon key is public *by design* and safe to ship. **Never commit** the Netlify deploy
   token or `RESEND_API_KEY`.
-- **`X-Hub-Signature-256` verification is absent for all platforms.** `META_APP_SECRET` is
-  loaded but never used to HMAC-check the POST body — anyone who learns the webhook URL can
-  forge inbound messages. Worth adding.
+- **`X-Hub-Signature-256` is now verified (2026-08-13).** `META_APP_SECRET` HMAC-checks the
+  POST body on every webhook ([meta-webhook.js](netlify/functions/meta-webhook.js) →
+  `verifyMetaSignature()`); a mismatch is rejected with 403. If `META_APP_SECRET` is unset,
+  verification is SKIPPED with a loud warning (dev fallback) — set it in prod.
+- **Send endpoints are now auth-gated (2026-08-13).** `meta-send`, `send-automation-report`
+  and `send-automation-webhook` require either a browser `x-staff-pin` header (the logged-in
+  admin/branch PIN) or a server `x-internal-secret` (`INTERNAL_FUNCTION_SECRET`, used by the
+  scheduled cron). Without one, 401.
 - Outbound tokens never reach the client: `meta-send` resolves the recipient from the lead
   row server-side.
 - User-supplied text is escaped (`esc()`) or set via `textContent` before rendering.
@@ -979,6 +990,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-13 | — | **Security & correctness hardening (7 issues).** **(1) Webhook signature verification** — `verifyMetaSignature()` HMAC-checks `X-Hub-Signature-256` with `META_APP_SECRET` on every POST ([meta-webhook.js](netlify/functions/meta-webhook.js)); 403 on mismatch; GET verify-token compare now constant-time. **(2) Send endpoints auth-gated** — `meta-send`, `send-automation-report`, `send-automation-webhook` require `x-staff-pin` (browser, the logged-in PIN) or `x-internal-secret` (`INTERNAL_FUNCTION_SECRET`, the cron); new `authorizeRequest()` in [meta-service.js](netlify/functions/utils/meta-service.js); `check-automations` sends the secret. **(4) Inbound idempotency** — new `lead_messages.external_message_id` (UNIQUE, partial index) + `insertMessage` uses PostgREST `resolution=ignore-duplicates`, so Meta redeliveries no longer duplicate timeline rows; `extractEvents` now carries `messageId` (mid/wamid). **(5) Inbound realtime dedup** — message bubbles carry `data-msg-id`; the realtime appender skips a row already painted by the convo-load SELECT (closes the inbound side of the dup class `dddb8ce` fixed for outbound). **(9)** `esc()` now escapes `'`; branch Edit/Delete `onclick` JS-escape names (`Women's`/`O'Brien` no longer break the buttons). **(10)** `loadLeadMessages` re-checks `_activeLeadId` after the await — opening two convos quickly no longer paints the wrong thread. **(22)** Schema drift — `SUPABASE_SCHEMA.sql` `leads.name` → `customer_name` (matches code); legacy `supabase-schema.sql` marked DEPRECATED. Tests added for signature verification + message-id threading. New env var: `INTERNAL_FUNCTION_SECRET`. RLS/anon-key hardening (#3 in the audit) deliberately deferred — it needs Supabase Auth / service_role and would touch the client PIN model. |
 | 2026-08-03 | — | **Lead names: show the person's name, not their Instagram handle.** `buildDisplayName` ([meta-service.js](netlify/functions/utils/meta-service.js)) now returns just the real `name` ("Gaurav Soni") and drops the appended `(@username)`; the bare username is a fallback only when no name resolves. `processIncomingMessage` now tries the profile fetch *before* the passed `profileName`, so IG **comment** leads (whose webhook carries only a username) resolve a real name from the messaging IGSID instead of being stored as `@username`. `processComment` passes the bare username (no `@`). Client-side `leadDisplayName()` ([app.js](app.js)) strips any trailing ` (@handle)` at render — branch card, branch chat header, admin table, admin chat — so existing leads stored as `Name (@user)` also show just the name, with no DB backfill. |
 | 2026-08-03 | — | **Realtime inbox.** Branch inbox + admin chat now subscribe to `lead_messages` INSERTs via Supabase Postgres Changes (`subscribeInbox` / `subscribeAdminChat` + an outgoing-echo DOM-marker dedupe (`data-sent-key`) in [app.js](app.js)); inbound messages and cross-staff sends appear live with no manual refresh. `branch_id` is now populated on every `lead_messages` insert (`meta-service` inbound + `processComment`, `meta-send` outbound) so the branch channel filters server-side; `getLeadById` selects it too. `renderThreadHtml` refactored to share a `_messageBubbleHtml` helper with the realtime appender (identical output). Requires enabling the `supabase_realtime` publication on `lead_messages` (+ the one-shot `branch_id` backfill) — until then it degrades to load-on-open. Spec: [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md). Also fixed the `lead_messages` schema-file drift ([§17](#17-database-schema)). |
 | 2026-07-30 | — | **Facebook comment automation built (inert).** `extractComments()` generalized to also read FB Page `feed`/`item:'comment'` events (tagged `platform`); added `sendFacebookPrivateReply()` (`recipient:{comment_id}` → `/messages`, returns PSID, button template) + `replyToFacebookComment()` (`/comments`), shared `buildBranchButtonMessage()`, platform-aware `processComment()`. **Shared `comment_rules`** with Instagram — no new settings key, UI label edit only. Still needs Meta dashboard: Page `feed` + `messaging_postbacks` webhook fields, `pages_messaging`/`pages_read_engagement`/`pages_manage_engagement` + App Review, Page `subscribed_apps`. Spec: [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md). |
@@ -1041,8 +1053,12 @@ Newest first. **Add a line here for every change that touches behaviour.**
    — the typed-answer path (`matchBranch`) already covers routing and is unit tested.
    Procedure: [INSTAGRAM_COMMENT_AUTOMATION.md §7 step 0](INSTAGRAM_COMMENT_AUTOMATION.md).
    Also still needs the client's keyword list and DM copy before it can go live.
-5. **Webhook signature verification** — HMAC-check `X-Hub-Signature-256` with
-   `META_APP_SECRET`, for all three platforms.
+5. ~~**Webhook signature verification**~~ — **DONE 2026-08-13.** `X-Hub-Signature-256` is
+   now HMAC-checked with `META_APP_SECRET` on every POST for all three platforms
+   ([meta-webhook.js](netlify/functions/meta-webhook.js) → `verifyMetaSignature()`). The
+   remaining open security item is the RLS/anon-key model (the `allow_anon_all` policy +
+   client-side PIN is still cosmetic) — tightening it needs Supabase Auth or service_role
+   writes; deferred as its own project (it would touch the client's PIN login).
 6. **Clinicea auto-capture (not built).** When a *payment* is registered in Clinicea (the
    clinic's main software) — not when a bill is generated — auto-insert a prefilled row into
    that branch's cashup sheet (amount + payment mode + branch; staff fill Product/Service +

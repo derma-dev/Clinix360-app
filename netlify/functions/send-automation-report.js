@@ -3,10 +3,12 @@
 // Generates a .doc report file and emails it as an attachment
 // ============================================================
 
+const { authorizeRequest } = require('./utils/meta-service');
+
 exports.handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, x-staff-pin, x-internal-secret',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Content-Type': 'application/json',
   };
@@ -16,6 +18,10 @@ exports.handler = async (event) => {
 
   let body;
   try { body = JSON.parse(event.body); } catch { return { statusCode: 400, headers, body: JSON.stringify({ error: 'Invalid JSON' }) }; }
+
+  if (!(await authorizeRequest(event))) {
+    return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
 
   const { automation_id, date_from, date_to } = body;
   const RESEND_API_KEY = process.env.RESEND_API_KEY;

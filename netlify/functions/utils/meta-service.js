@@ -4,6 +4,8 @@
 // or Netlify → Site Settings → Environment Variables (prod).
 // ============================================================
 
+const crypto = require('crypto');
+
 function getConfig() {
   const cfg = {
     appId:       process.env.META_APP_ID,
@@ -14,6 +16,67 @@ function getConfig() {
   const missing = Object.entries(cfg).filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) throw new Error(`Missing Meta env vars: ${missing.join(', ')}`);
   return cfg;
+}
+
+// ── Security helpers ──────────────────────────────────────────
+// Constant-time string compare. Length mismatch fast-fails (only the
+// equal-length case is timing-sensitive for the secret bytes).
+function safeEqual(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+// Verify Meta's X-Hub-Signature-256 HMAC over the raw request body. Meta signs
+// every webhook POST with META_APP_SECRET; this is the only way to know a payload
+// really came from Meta. If no secret is configured we log loudly and allow, so
+// local dev without the secret isn't broken — prod MUST set it to actually enforce.
+function verifyMetaSignature(rawBody, signatureHeader) {
+  const appSecret = process.env.META_APP_SECRET;
+  if (!appSecret) {
+    console.warn('[meta-service] META_APP_SECRET not set — webhook signature verification SKIPPED (insecure; set it in prod).');
+    return true;
+  }
+  if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
+  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody, 'utf8').digest('hex');
+  return safeEqual(signatureHeader, expected);
+}
+
+// Authorize a write/send request from EITHER the browser (a logged-in staff PIN —
+// admin or any branch) OR the server (a shared INTERNAL_FUNCTION_SECRET, used by
+// the scheduled check-automations cron). Without one of these, the send endpoints
+// would let anyone DM every customer from the business's accounts.
+async function authorizeRequest(event) {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) return false;
+  const h = { apikey: key, Authorization: `Bearer ${key}` };
+  const headers = event.headers || {};
+
+  // 1) Server-to-server (scheduled cron → send-automation-*).
+  const internalSecret = headers['x-internal-secret'];
+  const expectedSecret = process.env.INTERNAL_FUNCTION_SECRET;
+  if (expectedSecret && internalSecret && safeEqual(internalSecret, expectedSecret)) return true;
+
+  // 2) Browser: a logged-in staff PIN.
+  const staffPin = headers['x-staff-pin'];
+  if (!staffPin) return false;
+  try {
+    const r = await fetch(`${url}/rest/v1/settings?key=eq.admin_pin&select=value&limit=1`, { headers: h });
+    if (r.ok) {
+      const rows = await r.json();
+      if (rows[0] && rows[0].value && safeEqual(staffPin, String(rows[0].value))) return true;
+    }
+  } catch (e) { console.warn('[meta-service] admin_pin lookup failed:', e.message); }
+  try {
+    const r = await fetch(`${url}/rest/v1/branches?select=pin`, { headers: h });
+    if (r.ok) {
+      const rows = await r.json();
+      if (rows.some((b) => b.pin && safeEqual(staffPin, String(b.pin)))) return true;
+    }
+  } catch (e) { console.warn('[meta-service] branch pin lookup failed:', e.message); }
+  return false;
 }
 
 // ── Platform tables ───────────────────────────────────────────
@@ -91,7 +154,9 @@ function createSupabaseClient() {
     async insertMessage(data) {
       const res = await fetch(`${url}/rest/v1/lead_messages`, {
         method:  'POST',
-        headers,
+        // resolution=ignore-duplicates → a redelivered webhook whose external_message_id
+        // already exists is a silent no-op instead of a duplicate row.
+        headers: { ...headers, Prefer: 'return=representation, resolution=ignore-duplicates' },
         body:    JSON.stringify(data),
       });
       if (!res.ok) throw new Error(`lead_messages insert failed: ${res.status} ${await res.text()}`);
@@ -191,7 +256,7 @@ function buildDisplayName(profile) {
 // ── Process one incoming message (Instagram, Facebook OR WhatsApp) ──
 // `profileName` is set only for WhatsApp, which ships the sender's name in the
 // webhook payload instead of exposing a profile API.
-async function processIncomingMessage(senderId, messageText, platform = 'instagram', profileName = null) {
+async function processIncomingMessage(senderId, messageText, platform = 'instagram', profileName = null, messageId = null) {
   const branchId = process.env.META_BRANCH_ID;
   if (!branchId) throw new Error('Missing META_BRANCH_ID env var');
 
@@ -231,11 +296,12 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
   // Insert incoming message. branch_id is set so the realtime inbox channel can
   // filter by branch server-side (see artifacts/REALTIME_INBOX.md).
   await db.insertMessage({
-    lead_id:   lead.id,
-    branch_id: lead.branch_id,
-    direction: 'incoming',
-    message:   messageText,
-    is_seen:   false,
+    lead_id:             lead.id,
+    branch_id:           lead.branch_id,
+    direction:           'incoming',
+    message:             messageText,
+    is_seen:             false,
+    external_message_id: messageId || null,   // dedupes Meta webhook redeliveries (UNIQUE)
   });
   console.log(`[meta-service] Message inserted for lead_id=${lead.id}`);
   return lead;
@@ -252,14 +318,14 @@ function verifyWebhook(query) {
   const challenge      = query['hub.challenge'];
 
   console.log('VERIFY_TOKEN_ENV=', expected ? '(set)' : '(MISSING)');
-  console.log('TOKEN_FROM_URL=', hubVerifyToken);
+  // Don't log the token value from the URL — it's a (low-value) secret landing in logs.
 
   if (!expected) {
     console.error('[meta-service] META_VERIFY_TOKEN is not set in the environment');
     return { valid: false };
   }
 
-  if (mode === 'subscribe' && hubVerifyToken === expected) {
+  if (mode === 'subscribe' && safeEqual(String(hubVerifyToken), String(expected))) {
     console.log('[meta-service] Webhook verified');
     return { valid: true, challenge };
   }
@@ -297,6 +363,7 @@ function extractEvents(payload) {
         // postback.title, so the tap reads as "Dwarka" in the inbox timeline
         // instead of arriving as a blank turn.
         messageText: msg.message?.text ?? msg.postback?.title,
+        messageId:   msg.message?.mid ?? msg.postback?.mid,   // for inbound idempotency
         profileName: null,
         isEcho:      msg.message?.is_echo === true,
         // Set only when they TAPPED something: a postback button, or a quick reply.
@@ -323,6 +390,7 @@ function extractEvents(payload) {
           events.push({
             senderId:    m.from,
             messageText: m.text?.body,   // non-text (image/audio/…) → undefined → skipped downstream
+            messageId:   m.id,           // WA wamid, for inbound idempotency
             profileName: nameByWaId.get(m.from) || null,
             isEcho:      false,          // we only subscribe `messages`, not `message_echoes`
             shape:       'whatsapp',
@@ -335,6 +403,7 @@ function extractEvents(payload) {
       events.push({
         senderId:    value.sender?.id,
         messageText: value.message?.text,
+        messageId:   value.message?.mid,
         profileName: null,
         isEcho:      value.message?.is_echo === true,
         shape:       'changes',
@@ -474,7 +543,7 @@ async function handleWebhook(payload) {
       // messageText is only ever missing on a title-less button tap (see the guard
       // above) — the timeline still needs a body, so fall back to a readable label.
       const lead = await processIncomingMessage(
-        ev.senderId, ev.messageText || '(button tap)', platform, ev.profileName
+        ev.senderId, ev.messageText || '(button tap)', platform, ev.profileName, ev.messageId
       );
       await routeLeadFromReply(lead, ev.messageText, ev.payload);
     } catch (err) {
@@ -855,6 +924,8 @@ async function routeLeadFromReply(lead, text, payload) {
 
 module.exports = {
   verifyWebhook,
+  verifyMetaSignature,
+  authorizeRequest,
   handleWebhook,
   sendInstagramMessage,
   sendFacebookMessage,

@@ -6,7 +6,7 @@
 // POST — Incoming message events from Meta
 // ============================================================
 
-const { verifyWebhook, handleWebhook } = require('./utils/meta-service');
+const { verifyWebhook, verifyMetaSignature, handleWebhook } = require('./utils/meta-service');
 
 exports.handler = async (event) => {
   // ── GET: webhook verification ─────────────────────────────
@@ -25,6 +25,14 @@ exports.handler = async (event) => {
 
   // ── POST: incoming webhook event ─────────────────────────
   if (event.httpMethod === 'POST') {
+    // Verify Meta's HMAC signature BEFORE trusting the body — without it anyone who
+    // knows the public webhook URL can forge inbound messages / comment automation.
+    const signature = event.headers['x-hub-signature-256'];
+    if (!verifyMetaSignature(event.body || '', signature)) {
+      console.error('[meta-webhook] Invalid X-Hub-Signature-256 — rejecting');
+      return { statusCode: 403, body: 'Invalid signature' };
+    }
+
     let payload;
     try {
       payload = JSON.parse(event.body || '{}');

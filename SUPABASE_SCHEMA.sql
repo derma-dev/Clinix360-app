@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS leads (
   id         UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   branch_id  UUID REFERENCES branches(id) ON DELETE CASCADE,
-  name       TEXT NOT NULL DEFAULT '',
+  customer_name TEXT NOT NULL DEFAULT '',
   phone      TEXT DEFAULT '',
   source     TEXT DEFAULT '',  -- Walk-in | WhatsApp | Instagram | Facebook | Google | Referral | Other
   service    TEXT DEFAULT '',
@@ -159,6 +159,8 @@ ALTER TABLE leads ADD COLUMN IF NOT EXISTS source TEXT DEFAULT '';
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS instagram_user_id TEXT;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS facebook_user_id  TEXT;
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS whatsapp_user_id  TEXT;
+-- The leads name column is `customer_name` (the code reads/writes it everywhere).
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS customer_name TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_leads_branch ON leads(branch_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_leads_instagram_user ON leads(instagram_user_id);
 CREATE INDEX IF NOT EXISTS idx_leads_facebook_user  ON leads(facebook_user_id);
@@ -191,6 +193,13 @@ CREATE TABLE IF NOT EXISTS lead_messages (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_lead_messages_lead ON lead_messages(lead_id, created_at ASC);
+-- Idempotency: Meta redelivers a webhook POST on timeout. external_message_id holds the
+-- Meta message id (IG/FB mid, WA wamid) so a redelivery inserts nothing new (the UNIQUE
+-- index + PostgREST resolution=ignore-duplicates make it a no-op). Nullable: comment-path
+-- and outgoing staff sends carry no Meta id, so the partial index exempts them.
+ALTER TABLE lead_messages ADD COLUMN IF NOT EXISTS external_message_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS lead_messages_external_message_id_key
+  ON lead_messages(external_message_id) WHERE external_message_id IS NOT NULL;
 -- Realtime: lead_messages (and leads) are added to the supabase_realtime
 -- publication so the dashboard's Postgres-Changes channels can push new messages
 -- without a manual refresh. See artifacts/REALTIME_INBOX.md.

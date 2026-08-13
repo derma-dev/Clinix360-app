@@ -8,12 +8,12 @@
 // the client never passes the access token or recipient id.
 // ============================================================
 
-const { sendInstagramMessage, sendFacebookMessage, sendWhatsAppMessage, createSupabaseClient } = require('./utils/meta-service');
+const { sendInstagramMessage, sendFacebookMessage, sendWhatsAppMessage, createSupabaseClient, authorizeRequest } = require('./utils/meta-service');
 
 exports.handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Content-Type, x-staff-pin, x-internal-secret',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Content-Type': 'application/json',
   };
@@ -37,6 +37,10 @@ exports.handler = async (event) => {
   }
   if (Buffer.byteLength(message, 'utf8') > 1000) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: 'Message too long (max 1000 bytes)' }) };
+  }
+
+  if (!(await authorizeRequest(event))) {
+    return { statusCode: 401, headers, body: JSON.stringify({ error: 'Unauthorized' }) };
   }
 
   try {
