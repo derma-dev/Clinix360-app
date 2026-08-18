@@ -17,6 +17,27 @@
 > and [§22](PROJECT_DOCUMENTATION.md#22-roadmap--open-items). Written: **2026-08-03** · Planned
 > against current `main` (HEAD `bcc572d`).
 >
+> **Client clarification (2026-08-17).** The client's *first* priority is the bot itself, not
+> the plumbing around it: an IG DM chatbot that answers simple queries (price, sessions
+> needed), **attempts to book in-chat** (this moves booking from §10's out-of-scope into
+> scope — soft booking: offer slot → confirm → hand to staff to lock, no calendar
+> integration), **determines the branch** by asking where the customer lives and mapping to
+> the nearest branch (fallback: ask which branch they prefer — reuses
+> `matchBranch`/`routeLeadFromReply`), and **only escalates to staff** when it can't handle
+> the conversation. Several §11 open questions are now answered: platform = **Instagram
+> first**; the bot mines **past staff↔customer conversations** for its KB.
+>
+> **Corpus status (2026-08-17): extracted — and it's all test traffic.**
+> `node scripts/export-conversations.js` (DB) and `--meta` (full IG history via
+> `GET /{IG_ID}/conversations`) produced `artifacts/data/conversations.jsonl` (11 convos, 97
+> msgs) + `ig_history.jsonl` (5 threads, 85 msgs). Every thread is developer testing — the
+> project's IG account (@dermadwarka) has **no real customer history**. Usable signal: the
+> staff-authored comment-automation copy (consultation ₹500, the branch question) and one
+> full qualification→booking exemplar (service → branch → slot offer → "let me lock for
+> you"). **The real corpus must come from the client's own IG account** — the same
+> `--meta` pull with their token once their integration exists. `artifacts/data/` is
+> gitignored (customer PII).
+>
 > **One-line summary:** an LLM-backed assistant that answers repetitive FAQs and pre-qualifies
 > leads on Instagram / Facebook / WhatsApp, so staff reply only to engaged, qualified
 > conversations. It plugs into the **one choke point every inbound message already flows

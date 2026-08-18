@@ -27,3 +27,10 @@ Thumbs.db
 
 # others
 .agents
+
+# Conversation corpus exports (customer PII — never commit)
+artifacts/data/
+artifacts/CHATBOT_BRAINSTORM_2026-08-17.md
+/scripts
+Clinicea_Service_Names.md
+

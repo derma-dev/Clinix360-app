@@ -1,4 +1,4 @@
-# Instagram Integration — Build Spec (Client Handoff)
+-# Instagram Integration — Build Spec (Client Handoff)
 
 > **Purpose of this document.** This is a self-contained spec for implementing the
 > **Instagram-only** integration described inside. It was extracted from a working
@@ -17,6 +17,39 @@
 > will differ. **Examine the client's codebase and database before writing or changing any
 > code** — then adapt this spec to what you find. The **Step 0** box immediately below this
 > is mandatory and comes before everything else.
+
+---
+
+## 🔒 Scope — Instagram ONLY, but IG must keep working
+
+**This engagement integrates Instagram, and only Instagram.** The #1 rule: **the IG flow must
+work end-to-end** — webhook → lead + message → inbox → staff reply, plus comment automation.
+Do **not** build new Facebook or WhatsApp features. But do **not** break the shared
+infrastructure IG depends on, either. IG shares its webhook receiver, parser, lead/message
+layer, and Supabase client with FB/WA, so those shared functions must stay intact even though
+only the IG branch ever actually runs.
+
+What "Instagram only" means in practice:
+
+- **Don't build new FB/WA features.** No Facebook Page or WhatsApp webhook subscriptions,
+  tokens, number setup, or UI rows. FB/WA are a **separate** later engagement.
+- **Leave FB/WA env vars unset** (`META_PAGE_ACCESS_TOKEN`, `META_PAGE_ID`, `WHATSAPP_*`) and
+  don't subscribe their webhook fields. This is correct and **does not affect IG** — IG uses
+  its own token (`META_ACCESS_TOKEN`) and the `object === 'instagram'` webhook branch, both
+  independent of the FB/WA paths.
+- **Port the shared functions INTACT.** `platformFor`, `extractEvents`,
+  `processIncomingMessage`, `createSupabaseClient` (the multi-platform `ID_COLUMNS`),
+  `meta-send`'s source dispatch, and the `facebook_user_id` / `whatsapp_user_id` columns all
+  sit alongside the IG code. Their FB/WA branches are **inert** (nothing fires without the
+  matching webhooks/tokens) but **do not strip them out** — the IG branch lives in the same
+  functions and tables, and a careless removal is the easiest way to break IG. If a FB/WA
+  piece is genuinely needed for the IG path to run, **keep it**; we'll wire FB/WA properly
+  later.
+- **Admin UI:** build the Leads pages, Comment Automation, and Connected Accounts for
+  Instagram. Comment automation fires on IG comments only.
+
+In short: **IG working > IG-only purity.** Never sacrifice a working IG path to enforce the
+scope limit — just don't *add* new FB/WA functionality.
 
 ---
 
@@ -65,15 +98,18 @@ the equivalent catalog query. Specifically look for tables that already resemble
 Record, for each: the **exact** table name and the **exact** column names. You will map every
 `db.from('leads')` / `db.from('lead_messages')` / `db.from('branches')` / `db.from('settings')`
 call in §6–§7, and every column the code reads/writes (`source`, `instagram_user_id`,
-`direction`, `branch_id`, `is_seen`, `status`, `name`/`customer_name`, etc.), onto these real
+`direction`, `branch_id`, `is_seen`, `status`, `customer_name`, etc.), onto these real
 names. **The client's DB is known to lack the `leads` infrastructure** — so expect to either
 create it (§2.1) or extend an existing table with the missing columns.
 
 Also check:
-- **RLS** — is Row-Level Security on? On which tables? The reference backend uses the **public
-  anon key** (no service-role key). If the client's RLS blocks anon reads/writes, every
-  webhook insert and every staff reply silently fails — you'll need permissive policies or a
-  service-role key server-side (§2.3).
+- **RLS — likely already ON in the client's DB; check it.** The backend *and* the browser
+  both use the **public anon key** (no service-role key). If RLS is enabled on a table
+  without an `anon` policy, that table is silently invisible/unwritable to both — webhooks
+  insert nothing, replies 401, and the failure gives no error. Run the check query in §2.3
+  and record which of `leads`, `lead_messages`, `branches`, `settings` have RLS on. Note the
+  trap: `authorizeRequest` (§6.6) reads `settings.admin_pin` + `branches.pin` with the anon
+  key — those two must stay anon-readable or **auth itself breaks**.
 - **Realtime** — if Supabase, does the `supabase_realtime` publication exist, and which tables
   are in it? The live inbox (§9) needs `lead_messages` (or its mapped equivalent) added to it.
 
@@ -135,7 +171,7 @@ IG is a `source` value flowing through a unified Leads/Inbox. Implement it that 
 > what already exists. Then:
 >
 > - **If no equivalent tables exist** → create them verbatim from the DDL below. All the code
->   in §6–§7 then works unchanged (after the `customer_name`↔`name` choice noted below).
+>   in §6–§7 then works unchanged (the lead-name column is `customer_name`).
 > - **If equivalent tables exist** (e.g. a `customers` / `messages` pair) → do **not** create
 >   duplicates. Extend them with any missing columns (notably `instagram_user_id`, `source`,
 >   `branch_id`, `direction`, `is_seen`) and map every `db.from(...)` call + column in §6–§7
@@ -166,11 +202,11 @@ CREATE TABLE IF NOT EXISTS branches (
 CREATE TABLE IF NOT EXISTS leads (
   id                 UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   branch_id          UUID REFERENCES branches(id) ON DELETE CASCADE,
-  name               TEXT DEFAULT '',         -- shown in the inbox; staff-facing
   source             TEXT DEFAULT '',         -- 'instagram' | 'facebook' | 'whatsapp' | …
   service            TEXT DEFAULT '',
   status             TEXT DEFAULT 'new',      -- 'new' | 'contacted' | 'converted' | 'lost'
   notes              TEXT DEFAULT '',
+  customer_name      TEXT NOT NULL DEFAULT '',  -- shown in the inbox; the code reads/writes customer_name everywhere
   instagram_user_id  TEXT,                    -- ★ the IG-scoped sender id (IGSID); dedupe key for IG
   facebook_user_id   TEXT,                    -- (skip — FB only)
   whatsapp_user_id   TEXT,                    -- (skip — WhatsApp only)
@@ -192,6 +228,13 @@ CREATE TABLE IF NOT EXISTS lead_messages (
   created_at  TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_lead_messages_lead ON lead_messages(lead_id, created_at ASC);
+-- Idempotency: Meta redelivers a webhook POST on timeout. external_message_id holds the
+-- Meta message id (IG/FB mid, WA wamid); a redelivery is a silent no-op via the UNIQUE
+-- index + PostgREST resolution=ignore-duplicates. Nullable: the comment path and outgoing
+-- staff sends carry no Meta id (exempted by the partial index).
+ALTER TABLE lead_messages ADD COLUMN IF NOT EXISTS external_message_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS lead_messages_external_message_id_key
+  ON lead_messages(external_message_id) WHERE external_message_id IS NOT NULL;
 
 -- ── settings — key/value JSON store for app config ──────────────────
 CREATE TABLE IF NOT EXISTS settings (
@@ -204,13 +247,14 @@ CREATE TABLE IF NOT EXISTS settings (
 --   'admin_pin'       -> (only if you use the PIN auth model)
 ```
 
-> **Column-name note.** The backend dedupes IG leads on `leads.instagram_user_id`. The
-> frontend reads `leads` as `id, name, source, status, created_at, branch_id` and
-> `lead_messages` as `id, lead_id, message, direction, created_at, is_seen, seen_at,
-> branch_id`. If you change any column name, you must update every reference in §6 and §7.
-> In the working project the lead name column is `customer_name`; below I've written
-> `name` for readability — **pick one and use it consistently** (search-and-replace
-> `customer_name` ↔ `name` if you want to match the reference code verbatim).
+> **Column-name note.** The lead-name column is **`customer_name`** — the code reads/writes
+> it everywhere (the schema's `CREATE TABLE` plus an `ALTER … ADD COLUMN IF NOT EXISTS
+> customer_name` migration confirm it). The backend dedupes IG leads on
+> `leads.instagram_user_id`. The frontend reads `leads` as
+> `id, customer_name, source, status, created_at, branch_id` and `lead_messages` as
+> `id, lead_id, message, direction, created_at, is_seen, seen_at, branch_id,
+> external_message_id`. If you map onto the client's existing tables, update every reference
+> in §6–§7 to the real names.
 
 ### 2.2 Realtime publication (required for the live inbox — see §9)
 
@@ -223,27 +267,59 @@ alter publication supabase_realtime add table lead_messages;
 -- (If they're already added, this errors harmlessly.)
 ```
 
-### 2.3 Row-Level Security (RLS) — important decision
+### 2.3 Row-Level Security (RLS) — **check first; the client's DB likely already has it ON**
 
-The backend functions talk to Supabase using the **public anon key** (not a service-role
-key). Two valid setups — pick one:
+The backend functions talk to Supabase with the **public anon key** (no service-role key).
+So does the browser. If RLS is enabled on a table and there's no policy for the `anon` role,
+that table is **invisible and unwritable** to both — and the failure is **silent**
+(PostgREST returns empty rows / 0 inserts; no error is thrown). The client's DB is very
+likely already RLS-enabled, so **don't assume it's off — check**.
 
-- **RLS disabled on these tables** (simplest, matches the reference project's original
-  posture): the anon key can read/write everything, security is enforced at the app/PIN
-  layer.
+**Step 1 — check what's actually on:**
+
+```sql
+select relname as table_name, relrowsecurity as rls_on
+from pg_class
+where relname in ('leads','lead_messages','branches','settings')
+order by relname;
+```
+
+**Step 2 — if RLS is ON (likely), the `anon` role must be able to do the following** or IG
+breaks silently:
+
+| Table | anon must… | why |
+|---|---|---|
+| `leads` | `select`, `insert`, `update` | webhook finds / creates / routes leads; inbox lists them |
+| `lead_messages` | `select`, `insert`, `update` | webhook + send insert rows; inbox reads + marks-seen |
+| `branches` | `select` | comment buttons, branch routing, **and `authorizeRequest` reads `branches.pin`** |
+| `settings` | `select`, `insert`/`update` | `comment_rules` / `integrations` CRUD, **and `authorizeRequest` reads `settings.admin_pin`** |
+
+> ⚠️ **The auth trap.** `authorizeRequest` (§6.6) reads `settings.admin_pin` and
+> `branches.pin` **with the anon key**. If RLS blocks anon `select` on those rows, the send
+> endpoint 401s everyone — including legit staff — so the integration looks "broken" when the
+> real cause is a missing read policy. The pin tables **must** be anon-readable for auth to
+> work at all.
+
+Two ways to satisfy the requirements — pick one:
+
+- **(A) Permissive `anon` policies** on the four tables (simplest; matches the reference,
+  which relies on app/PIN-layer security rather than RLS for these). Postgres requires *some*
+  policy to exist when RLS is on; these grant full access to the anon role the functions and
+  browser use:
   ```sql
-  alter table leads          disable row level security;
-  alter table lead_messages  disable row level security;
-  alter table branches       disable row level security;
-  alter table settings       disable row level security;
+  create policy "anon_all_leads"          on leads          for all to anon, authenticated using (true) with check (true);
+  create policy "anon_all_lead_messages"  on lead_messages  for all to anon, authenticated using (true) with check (true);
+  create policy "anon_all_branches"       on branches       for all to anon, authenticated using (true) with check (true);
+  create policy "anon_all_settings"       on settings       for all to anon, authenticated using (true) with check (true);
   ```
-- **RLS enabled** (harder, the reference project later moved to this): you must add
-  policies that let the anon role `select`/`insert`/`update` on `leads`, `lead_messages`,
-  `branches`, `settings`. Without those policies, **every webhook and every staff reply
-  silently fails** (Supabase returns empty rows / 401). The browser client also uses the
-  anon key, so the same policies serve both.
+- **(B) Use a SERVICE-ROLE key server-side** in the functions (`createSupabaseClient`,
+  `getSettingJson`, `authorizeRequest`) instead of the anon key. The service role bypasses
+  RLS, so webhook/send paths work regardless of policies — but **never ship the service-role
+  key to the browser** (the browser keeps the anon key). More moving parts (two keys, two
+  client constructors) but tighter if the client's RLS is intentionally restrictive.
 
-If unsure, start with RLS **disabled** and harden after the integration is working.
+If the §2.3 check shows RLS **off** on all four tables, nothing extra is needed — but re-run
+the check after any schema migration, since migration tooling can flip it back on.
 
 ---
 
@@ -371,18 +447,47 @@ sample, which is why everything looks fine until you test with a real DM.)
 
 To flip the app to **Live**, App Settings → Basic requires:
 - App icon (1024×1024 PNG)
-- **Privacy policy URL** (serve a static `privacy.html` — required by Meta; include a
-  `#data-deletion` section for the data-deletion URL field)
+- **Privacy policy URL** — a public `privacy.html` (see §4.6). Satisfies two Meta fields at
+  once: the Privacy Policy URL and the Data Deletion Instructions URL.
 - Category → "Business and Pages"
 
 After that, App Review (§4.2) gates public access.
+
+### 4.6 Privacy policy page (`privacy.html`) — required to go Live
+
+Meta will **not** let you flip the app from **Development → Live** without a public **Privacy
+Policy URL**, and App Review needs a **Data Deletion Instructions URL**. Both are hard
+blockers — and without Live mode Meta sends **zero** real webhooks (§11 #1), so the entire
+integration stays dead until this page exists and is reachable.
+
+It's a single static HTML page at a public HTTPS URL, e.g. `https://<your-site>/privacy.html`
+(served as-is by the host; no build step). Base it on the reference `privacy.html`. It must
+cover, at minimum:
+
+- **What you collect** — Instagram message data (the sender's Instagram-scoped ID + message
+  content received via the Meta Platform) and the lead/message records stored from it.
+- **How you use it** — to read and reply to customer enquiries.
+- **Data sharing** — Meta/Instagram, plus your hosting + DB providers (e.g. Netlify + Supabase).
+- **Data retention.**
+- **A `#data-deletion` section** — a contact path (email) for users to request deletion and a
+  timeframe. Put the `id="data-deletion"` anchor on that section: its URL
+  (`https://<site>/privacy.html#data-deletion`) is what you paste into Meta's **Data
+  Deletion Instructions URL** field.
+- **Contact.**
+
+Fill in the client's real business name, the data-deletion contact email, and an "updated"
+date. The page must be live at the exact URL **before** you set it in the Meta dashboard and
+flip the app to Live.
 
 ---
 
 ## 5. Environment variables
 
 Set in `.env` locally and in **Netlify → Site settings → Environment variables** in
-production (not committed to the repo). Any change requires a **redeploy**.
+production (not committed to the repo). Any change requires a **redeploy**. The reference
+project ships a **`.env.example`** template listing every variable below with comments —
+copy it to `.env` and fill in the values; only the IG-relevant subset is shown here (leave
+the FB/WA vars in the template unset, per the scope box up top).
 
 ```bash
 # Supabase — required by every function
@@ -394,7 +499,13 @@ META_ACCESS_TOKEN=your_instagram_access_token_here   # the IGAA… token from §
 META_VERIFY_TOKEN=any_random_string_you_choose       # must match the Meta dashboard webhook field
 META_BRANCH_ID=your_fallback_branch_uuid_here        # UUID of the branch new IG leads attach to
 META_APP_ID=your_app_id_here                         # declared by getConfig(); keep set
-META_APP_SECRET=your_app_secret_here                 # declared by getConfig(); keep set
+META_APP_SECRET=your_app_secret_here                 # ★ ALSO verifies the webhook HMAC (§6.2) — set it in prod
+
+# Security — protects the write/send endpoints from forgery (§6.6)
+# The browser sends x-staff-pin (the logged-in PIN); server-to-server callers (e.g. a
+# scheduled cron) send x-internal-secret = this value. Required for staff replies /
+# automations to fire once meta-send is auth-gated. Generate a long random string.
+INTERNAL_FUNCTION_SECRET=your_random_internal_secret_here
 
 # Optional (IG only)
 # META_IG_ID=your_ig_account_numeric_id_here        # defaults to 'me' (resolved via the token)
@@ -403,9 +514,20 @@ META_APP_SECRET=your_app_secret_here                 # declared by getConfig(); 
 # META_PAGE_ACCESS_TOKEN, META_PAGE_ID, WHATSAPP_*
 ```
 
-> `META_BRANCH_ID` is the **fallback** branch for every newly-created IG lead. Comment
-> automation later moves the lead to the correct branch once the customer answers
-> "which branch?". It must be a real `branches.id` UUID.
+> **Where does `META_BRANCH_ID` come from?** It's not from Meta — it's the **`id` (UUID) of a
+> row in your own `branches` table** (§2.1). Create the table, insert a branch (plus an
+> "Unassigned" catch-all), then copy the generated `id` into this var:
+>
+> ```sql
+> insert into branches (name, pin, active)
+> values ('Unassigned', '0000', true)
+> returning id;          -- ← paste this UUID into META_BRANCH_ID
+> ```
+>
+> This is the **fallback** `branch_id` written on every new IG lead (DMs + comment-automation
+> leads). Comment automation later moves the lead to the real branch once the customer answers
+> "which branch?" (`routeLeadFromReply`, §6.8). Changing the var later only affects *new* leads;
+> existing leads keep their assigned `branch_id`.
 
 ---
 
@@ -421,14 +543,14 @@ load-bearing, easy-to-get-wrong parts.
 | Path | Method | Body / Query | Returns |
 |---|---|---|---|
 | `/webhook/meta` | GET | `?hub.mode=subscribe&hub.verify_token=…&hub.challenge=…` | `200` → the `hub.challenge` as **plain text**; else `403 Forbidden` |
-| `/webhook/meta` | POST | a Meta webhook payload (JSON) | `200 { status: "ok" }` |
-| `/.netlify/functions/meta-send` | POST | `{ "leadId": "<uuid>", "message": "<text>" }` | `200 { ok: true, message: <row> }`; `400/404/502` on error |
+| `/webhook/meta` | POST | a Meta webhook payload (JSON) + `X-Hub-Signature-256` header | `200 { status: "ok" }`; `403` if the HMAC signature is missing/invalid (when `META_APP_SECRET` is set) |
+| `/.netlify/functions/meta-send` | POST | `{ "leadId", "message" }` + `x-staff-pin` (browser) or `x-internal-secret` (cron) header | `200 { ok: true, message: <row> }`; `401` unauthorized; `400/404/502` on error |
 | `/.netlify/functions/meta-status` | GET | — | `200 { instagram: { connected: bool, name: "@handle" } }` |
 
 ### 6.2 `meta-webhook.js` — thin wrapper
 
 ```js
-const { verifyWebhook, handleWebhook } = require('./utils/meta-service');
+const { verifyWebhook, verifyMetaSignature, handleWebhook } = require('./utils/meta-service');
 
 exports.handler = async (event) => {
   if (event.httpMethod === 'GET') {
@@ -438,6 +560,11 @@ exports.handler = async (event) => {
       : { statusCode: 403, body: 'Forbidden' };
   }
   if (event.httpMethod === 'POST') {
+    // Verify Meta's HMAC over the RAW body BEFORE trusting it. Without this, anyone who
+    // knows the public webhook URL can forge inbound DMs / comment automation.
+    if (!verifyMetaSignature(event.body || '', event.headers['x-hub-signature-256'])) {
+      return { statusCode: 403, body: 'Invalid signature' };
+    }
     const payload = JSON.parse(event.body || '{}');           // let JSON errors 400
     await handleWebhook(payload);                             // must finish before 200
     return { statusCode: 200, headers: { 'Content-Type': 'application/json' },
@@ -447,10 +574,25 @@ exports.handler = async (event) => {
 };
 ```
 
-> ⚠️ **Security gap to be aware of (and ideally fix):** the reference POST handler does
-> **not** verify Meta's `X-Hub-Signature-256` HMAC. `META_APP_SECRET` is required by config
-> but never used at runtime. For a production client, add HMAC verification: hash the raw
-> request body with `META_APP_SECRET` using HMAC-SHA256 and compare to the header. See §11.
+The signature check HMAC-SHA256s the **raw body** with `META_APP_SECRET` and constant-time
+compares it to the `sha256=…` header. **Dev fallback:** if `META_APP_SECRET` isn't set it
+logs a warning and **allows** (so local dev without the secret isn't broken) — **prod must
+set it** to actually enforce. Port the helper verbatim:
+
+```js
+const crypto = require('crypto');
+function safeEqual(a, b) {                                     // constant-time compare
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+}
+function verifyMetaSignature(rawBody, signatureHeader) {
+  const appSecret = process.env.META_APP_SECRET;
+  if (!appSecret) return true;                                 // dev: warn + allow — SET IN PROD
+  if (!signatureHeader?.startsWith('sha256=')) return false;
+  const expected = 'sha256=' + crypto.createHmac('sha256', appSecret).update(rawBody, 'utf8').digest('hex');
+  return safeEqual(signatureHeader, expected);
+}
+```
 
 ### 6.3 Webhook verification (GET) — depends ONLY on `META_VERIFY_TOKEN`
 
@@ -458,16 +600,17 @@ exports.handler = async (event) => {
 function verifyWebhook(query) {
   const expected = process.env.META_VERIFY_TOKEN;
   if (!expected) return { valid: false };
-  if (query['hub.mode'] === 'subscribe' && query['hub.verify_token'] === expected) {
-    return { valid: true, challenge: query['hub.challenge'] };
+  if (query['hub.mode'] === 'subscribe' && safeEqual(String(query['hub.verify_token']), expected)) {
+    return { valid: true, challenge: query['hub.challenge'] };   // constant-time compare (§6.2)
   }
   return { valid: false };
 }
 ```
 
-Crucial: do **not** require the other `META_*` vars on the GET path. A missing app
-secret/access token must not block the URL verification handshake — Meta won't let you
-subscribe fields until the URL verifies.
+`safeEqual` (constant-time, §6.2) keeps the verify-token comparison from being a timing
+oracle, and the token value from the URL is no longer logged. Crucial: do **not** require
+the other `META_*` vars on the GET path. A missing app secret/access token must not block
+the URL verification handshake — Meta won't let you subscribe fields until the URL verifies.
 
 ### 6.4 Platform detection + payload extraction (the core parser)
 
@@ -492,6 +635,7 @@ function extractEvents(payload) {
       events.push({
         senderId:    msg.sender?.id,
         messageText: msg.message?.text ?? msg.postback?.title,   // a button tap's label becomes the text
+        messageId:   msg.message?.mid ?? msg.postback?.mid,      // Meta id → inbound idempotency (§6.5)
         isEcho:      msg.message?.is_echo === true,              // our own outbound — skip
         payload:     msg.postback?.payload ?? msg.message?.quick_reply?.payload, // button-tap routing data
         profileName: null,
@@ -504,6 +648,7 @@ function extractEvents(payload) {
       if (change.field !== 'messages') continue;     // comments handled separately (§6.7)
       const value = change.value || {};
       events.push({ senderId: value.sender?.id, messageText: value.message?.text,
+                    messageId: value.message?.mid,
                     isEcho: value.message?.is_echo === true, profileName: null, shape: 'changes' });
     }
   }
@@ -522,34 +667,35 @@ function extractEvents(payload) {
 const ID_COLUMNS = { instagram: 'instagram_user_id' /*, facebook:…, whatsapp:… */ };
 const PLACEHOLDER_NAMES = { instagram: 'Instagram User' };
 
-async function processIncomingMessage(senderId, messageText, platform = 'instagram', profileName = null) {
+async function processIncomingMessage(senderId, messageText, platform = 'instagram', profileName = null, messageId = null) {
   const branchId = process.env.META_BRANCH_ID;     // throws if missing
   const db = createSupabaseClient();
 
   let lead = await db.findLeadByPlatformId(platform, senderId);   // lookup by instagram_user_id
   if (lead) {
     // backfill the real display name on older leads still showing the placeholder
-    if (!lead.name || lead.name === PLACEHOLDER_NAMES[platform]) {
+    if (!lead.customer_name || lead.customer_name === PLACEHOLDER_NAMES[platform]) {
       const display = buildDisplayName(await fetchInstagramProfile(senderId)) || profileName;
-      if (display) await db.updateLead(lead.id, { name: display });
+      if (display) await db.updateLead(lead.id, { customer_name: display });
     }
   } else {
     const display = buildDisplayName(await fetchInstagramProfile(senderId)) || profileName || PLACEHOLDER_NAMES[platform];
     lead = await db.createLead({
-      branch_id: branchId,
-      source:    platform,
-      name:      display,
+      branch_id:     branchId,
+      source:        platform,
+      customer_name: display,
       [ID_COLUMNS[platform]]: senderId,             // instagram_user_id = the IGSID
-      status:    'new',
+      status:        'new',
     });
   }
 
   await db.insertMessage({
-    lead_id:   lead.id,
-    branch_id: lead.branch_id,                      // ★ set on every row (realtime filter)
-    direction: 'incoming',
-    message:   messageText,
-    is_seen:   false,
+    lead_id:             lead.id,
+    branch_id:           lead.branch_id,            // ★ set on every row (realtime filter)
+    direction:           'incoming',
+    message:             messageText,
+    is_seen:             false,
+    external_message_id: messageId || null,         // ★ dedupes Meta webhook redeliveries (UNIQUE, §2.1)
   });
   return lead;
 }
@@ -584,6 +730,8 @@ exports.handler = async (event) => {
   if (!leadId || !message) return { statusCode: 400, /* … */ };
   if (Buffer.byteLength(message, 'utf8') > 1000) return { statusCode: 400, /* too long */ };
 
+  if (!(await authorizeRequest(event))) return { statusCode: 401, /* Unauthorized */ };
+
   const db   = createSupabaseClient();
   const lead = await db.getLeadById(leadId);            // selects id, branch_id, instagram_user_id, source
   if (!lead) return { statusCode: 404, /* not found */ };
@@ -602,6 +750,14 @@ exports.handler = async (event) => {
   }
 };
 ```
+
+> **Auth gate (`authorizeRequest`).** Every send must come from either the browser — header
+> `x-staff-pin` equal to the logged-in admin PIN or any branch PIN (looked up from
+> `settings.admin_pin` / `branches.pin`, constant-time compared) — or a server caller — header
+> `x-internal-secret` equal to `INTERNAL_FUNCTION_SECRET` (used by scheduled automations).
+> Anything else → `401`. Without this the public URL would let anyone DM every customer from
+> the business's account. The frontend sends the PIN on every write via a `_staffPin()` helper
+> (`state.adminPIN || state.currentBranch?.pin`).
 
 ```js
 // POST https://graph.instagram.com/v21.0/{me|META_IG_ID}/messages  (Bearer token)
@@ -773,7 +929,7 @@ for (const ev of events) {
   if (ev.isEcho) continue;                                  // skip our own outbound
   if (!ev.senderId || (!ev.messageText && !ev.payload)) continue;
   const lead = await processIncomingMessage(
-    ev.senderId, ev.messageText || '(button tap)', 'instagram', ev.profileName);
+    ev.senderId, ev.messageText || '(button tap)', 'instagram', ev.profileName, ev.messageId);
   await routeLeadFromReply(lead, ev.messageText, ev.payload);   // ← routing hook
 }
 for (const c of extractComments(payload)) await processComment(c);  // comments stream
@@ -801,7 +957,10 @@ Node 18 built-in `fetch`, anon key as both `apikey` and `Authorization: Bearer`.
 no service-role key. Methods needed: `findLeadByPlatformId`, `getLeadById`, `createLead`,
 `updateLead`, `insertMessage`, `listBranches` — each is a one-liner against
 `${SUPABASE_URL}/rest/v1/<table>` with the standard PostgREST headers
-(`{ apikey, Authorization, 'Content-Type', Prefer: 'return=representation' }`).
+(`{ apikey, Authorization, 'Content-Type', Prefer: 'return=representation' }`). The message
+inserter adds `resolution=ignore-duplicates` to `Prefer`, so an insert whose
+`external_message_id` already exists (a Meta webhook redelivery) is a silent no-op — this is
+the inbound-dedupe mechanism (see §2.1 + §6.5).
 
 ---
 
@@ -818,52 +977,96 @@ dashboard is read-only on connection state except for a pause/enable flag.
    (so creds live in env, not in shipped code). Create the supabase-js client `db`.
 2. Load `branches`, then bind the inbox.
 
-### 7.2 The inbox (unified — IG is one `source`)
+### 7.2 The Leads pages (branch inbox + admin)
 
-There is **no separate IG tab**. IG lives inside one "Leads/Inbox" view with a platform
-toggle (All / Instagram / …). (The concrete layout, design tokens, and brand-badge helper
-are in **§7.5** — match the client's design system.) For the branch view:
+There is **no separate IG tab**. IG lives inside the Leads screens — the **branch inbox**
+and the **admin Leads page** — both keyed by `source`. (The concrete layout, design tokens,
+and brand-badge helper are in **§7.5** — match the client's design system.) For the
+**branch** view:
 
-- **Load:** `db.from('leads').select('id, name, source, status, created_at, branch_id').eq('branch_id', currentBranch)`; then `db.from('lead_messages').select('lead_id, message, direction, created_at, is_seen').in('lead_id', ids)` to build last-message previews + unread counts.
-- **Open a thread:** `db.from('lead_messages').select('id, direction, message, created_at').eq('lead_id', id)` (ascending).
+- **Load:** `db.from('leads').select('id, customer_name, source, status, created_at, branch_id').eq('branch_id', currentBranch)`; then `db.from('lead_messages').select('lead_id, message, direction, created_at, is_seen').in('lead_id', ids)` to build last-message previews + unread counts.
+- **Open a thread:** `db.from('lead_messages').select('id, direction, message, created_at').eq('lead_id', id)` (ascending). **Stale-thread guard:** bail if the user switched conversation while the fetch was in flight (`_activeLeadId !== leadId`), or you'll paint the wrong thread.
 - **Mark seen:** `db.from('lead_messages').update({ is_seen: true, seen_at: now }).eq('lead_id', id).in('direction', ['in','incoming']).eq('is_seen', false)`.
-- **Send:** optimistic bubble, then `POST /.netlify/functions/meta-send` with `{ leadId, message }`. On success the realtime echo of your own row is deduped by matching `data-sent-key = "${lead_id}|${message}"` (DOM presence, not a time window — survives a slow Graph send).
+- **Send:** optimistic bubble, then `POST /.netlify/functions/meta-send` with `{ leadId, message }` **and header `x-staff-pin: <logged-in PIN>`** (the endpoint is auth-gated — §6.6). Two client-side dedupes keep the thread clean: (a) your own send's realtime echo is consumed by matching `data-sent-key = "${lead_id}|${message}"` on the optimistic bubble; (b) each bubble is stamped `data-msg-id`, so a realtime INSERT that a just-finished convo-load SELECT already painted is skipped.
 - **Platform badge:** for `source === 'instagram'` render the IG logo; IG leads are identified solely by `source`.
 
-Admin view is the same pattern, unscoped by branch, with a Source `<select>` dynamically
-populated from the distinct `source` values present (so "Instagram" only appears once an IG
-lead exists) and a status filter (`new/contacted/converted/lost` → the `status` column).
+**Admin Leads page** (`admin-tab-leads`) — the cross-branch view where IG leads are managed:
 
-### 7.3 Comment automation settings UI
+- **KPI strip** (`leads-kpi-grid`): Total / New / Contacted / Converted tiles + per-source
+  chips (each IG chip uses the brand PNG via `sourceBadgeInner`). Conversion % is computed
+  client-side. Rendered by `renderLeadsKpis(leads)`.
+- **Filters** (`leads-filters-row`), all applied client-side against the cached
+  `_adminLeadsAll` array: **Branch**, **Source** (a `<select>` dynamically populated from
+  the distinct `source` values present — "Instagram" appears only once an IG lead exists),
+  **Status** (`new / contacted / converted / lost`, mapped to the `status` column), and a
+  name **Search**.
+- **Table** (`leads-admin-table`, `renderLeadsTable`): name (brand badge + display name),
+  source, branch, a per-row **status `<select>`** (`updateLeadStatus` →
+  `db.from('leads').update({ status })`), and created time. Each row has a chat button →
+  `openAdminChat(id)`.
+- **Lead-chat modal** (`modal-lead-chat`): opens on row click. Header shows the brand avatar
+  + name + platform label (`admin-chat-avatar/name/platform`); body is the `lead_messages`
+  thread (`admin-convo-log`); the compose box sends via `POST /.netlify/functions/meta-send`
+  with the `x-staff-pin` header — the **same** send path and 24h-window rules as the branch
+  inbox. It runs its **own** realtime channel (`admin-msg`, unfiltered) so an incoming reply
+  lands live while the modal is open (deduped by `data-msg-id`); unsubscribe on close.
+- **Load:** `db.from('leads').select('id, customer_name, source, status, branch_id, created_at')`
+  (all branches, admin-scoped), then per-lead last-message/unread like the branch inbox.
 
-A settings card that manages the `comment_rules` JSON array. **The frontend never matches
-or sends** — it only CRUDs the rules; matching happens server-side on the `comments`
-webhook (§6.7).
+### 7.3 Comment Automation (Admin → Settings card)
+
+A collapsible card under **Admin → Settings → "Comment Automation"** that manages the
+`settings.comment_rules` JSON array. **The frontend never matches or sends** — it only CRUDs
+the rules; the match + the public reply + the DM all happen server-side when the `comments`
+webhook fires (§6.7, §8).
+
+Card structure (from `index.html`):
+- A description line restating the contract: public reply under the comment + one DM that
+  ends in the branch question; a per-branch button is appended automatically; first keyword
+  wins; `*` catches all; name the branches in the text too (buttons don't show on desktop).
+- A rules list (`comment-rules-list`) — each saved rule rendered as a card with a delete
+  control (`removeCommentRule`).
+- An add row: `new-rule-keyword` (or `*`), `new-rule-public` (the public reply), `new-rule-dm`
+  (textarea — the DM body), and `btn-add-comment-rule`.
+
+CRUD — all through the `settings` table under key `comment_rules`:
 
 ```js
-// Load:  db.from('settings').select('value').eq('key','comment_rules').single()
-// Save:  db.from('settings').upsert({ key:'comment_rules', value: JSON.stringify(rules) }, { onConflict:'key' })
+// Load (when the Settings tab opens):
+db.from('settings').select('value').eq('key','comment_rules').single()
+// Save (on add / delete):
+db.from('settings').upsert({ key:'comment_rules', value: JSON.stringify(rules) }, { onConflict:'key' })
 ```
 
-HTML inputs per rule: `keyword` (or `*` for any), `public` reply text, `dm` body. Validate:
-require a keyword and at least one of public/dm; block duplicate keywords (case-insensitive).
-See §8.3 for the rule shape and copy guidelines.
+Validation in `addCommentRule`: require a keyword; require at least one of `public` / `dm`;
+block duplicate keywords (case-insensitive). `keyword === '*'` renders as "Any comment". See
+§8.3 for the rule shape and the copy rules that fall out of Meta's mechanics (always end on a
+question, spell the branch names, no prices in the public field).
 
-### 7.4 Connected Accounts
+### 7.4 Connected Accounts (Admin → Settings card)
 
-A settings card rendering one row per platform from a constant list
-(`{ key:'instagram', label:'Instagram', badge:'IG' }`). Live status comes from
-`GET /.netlify/functions/meta-status`. The Connect/Disconnect button only flips
-`settings.integrations.instagram` (a **pause** flag for ingestion, not an OAuth revoke):
+A collapsible card under **Admin → Settings → "Connected Accounts"** showing one row per
+platform. For IG it reports whether the token is live and lets the admin **pause** ingestion.
 
-```js
-// { instagram: true } in settings.integrations
-db.from('settings').upsert({ key:'integrations', value: JSON.stringify({ instagram: on }) }, { onConflict:'key' });
-```
+- **Rows** are generated from a constant list, e.g.
+  `INTEGRATION_PLATFORMS = [{ key:'instagram', label:'Instagram', badge:'IG' }, …]`, each
+  rendered with the brand PNG via `sourceBadgeInner`.
+- **Live status** comes from the server (source of truth), not the DB:
+  `GET /.netlify/functions/meta-status` → `{ instagram: { connected: bool, name: '@handle' } }`.
+  Each row shows a status pill — Connected (`@handle`) vs Not connected.
+- **The button is a pause toggle, not OAuth.** Connect/Disconnect only writes the
+  per-platform flag in `settings.integrations`:
 
-The backend reads this fail-open (`isPlatformEnabled`): only an explicit `false` pauses
-ingestion — a missing key or a DB error leaves it enabled so a toggle glitch never silently
-drops real DMs.
+  ```js
+  db.from('settings').upsert({ key:'integrations', value: JSON.stringify({ instagram: on }) }, { onConflict:'key' });
+  ```
+
+  The IG connection itself is established entirely **server-side** via `META_ACCESS_TOKEN`
+  in env — there is **no OAuth flow in the frontend**. "Disconnect" stops ingesting new IG
+  DMs; it does **not** revoke the token and leaves existing leads/history untouched.
+- The backend reads this flag **fail-open** (`isPlatformEnabled`, §6.4): only an explicit
+  `integrations.instagram === false` pauses ingestion — a missing key, missing DB creds, or
+  any read error leaves it **enabled**, so a settings glitch never silently drops real DMs.
 
 ### 7.5 UI design — the current inbox layout (match the client's design system)
 
@@ -1094,7 +1297,9 @@ examine the client's codebase and database before writing anything. In parallel,
 **Phase 1 — Database** — §2
 - [ ] Create `branches`, `leads`, `lead_messages`, `settings` (DDL in §2.1).
 - [ ] Add `leads` + `lead_messages` to `supabase_realtime` publication (§2.2).
-- [ ] Decide RLS posture (§2.3); insert the fallback branch + an "Unassigned" branch.
+- [ ] Check RLS with the §2.3 query (the client's DB likely already has it ON); add the
+      permissive anon policies (or switch the server to a service-role key) so the anon-key
+      functions can read/write. Insert the fallback branch + an "Unassigned" branch.
 - [ ] Set `META_BRANCH_ID` to the fallback branch UUID.
 
 **Phase 2 — Backend, pure logic (no network)** — §6
@@ -1121,7 +1326,8 @@ examine the client's codebase and database before writing anything. In parallel,
       branch button routes the lead and lets a subsequent staff reply send.
 
 **Phase 6 — Harden + docs**
-- [ ] Add `X-Hub-Signature-256` HMAC verification (§11).
+- [ ] Wire `X-Hub-Signature-256` HMAC verification into the webhook POST (§6.2) and
+      `authorizeRequest` onto the send endpoint (§6.6); set `META_APP_SECRET` + `INTERNAL_FUNCTION_SECRET`.
 - [ ] Decide token rotation strategy (no auto-refresh today).
 - [ ] Update the project's master docs in the same commit as each change.
 
@@ -1134,9 +1340,10 @@ In roughly the order they'll bite:
 1. **App in Development mode.** Meta sends zero real webhook notifications in dev mode —
    not even from testers. The dashboard "Test" button works (manual sample), so everything
    looks fine until a real DM produces an empty log. Go **Live** (§4.5).
-2. **`X-Hub-Signature-256` not verified.** The reference POST handler trusts any caller.
-   For a production client, HMAC-verify the raw body with `META_APP_SECRET` and reject on
-   mismatch. (`META_APP_SECRET` is already in env; currently unused.)
+2. **Webhook signature — verify it (the reference now does).** `verifyMetaSignature`
+   HMAC-SHA256s the raw body with `META_APP_SECRET` and rejects on mismatch. **Gotcha: it
+   fails open if `META_APP_SECRET` is unset** (dev convenience) — so in prod you MUST set the
+   var, or verification is silently skipped and the webhook is forgeable. (§6.2.)
 3. **No token refresh.** The system consumes one long-lived `IGAA…` token from env. When
    it expires, every send/profile fetch fails softly (`connected: false`, DMs stop). Humans
    must regenerate. Consider a System User token with expiry **Never** for production.
@@ -1157,10 +1364,21 @@ In roughly the order they'll bite:
     as inbound and create phantom leads. (§6.4.)
 11. **Two webhook shapes for IG DMs.** Real DMs arrive as `entry[].messaging[]`; Meta's
     "Test" button sends `entry[].changes[].field='messages'`. Handle both. (§6.4.)
-12. **RLS + anon key.** If RLS is enabled and policies aren't in place for the anon role,
-    every webhook insert and every staff reply silently fails. (§2.3.)
+12. **RLS + anon key (the client's DB likely already has RLS ON).** The functions and
+    browser use the anon key; if RLS is on without an `anon` policy on
+    `leads`/`lead_messages`/`branches`/`settings`, every read returns empty and every insert
+    is a silent no-op. **Including `authorizeRequest`'s read of `admin_pin`/`branches.pin` —
+    so auth 401s too.** Run the §2.3 check; add permissive anon policies or switch the server
+    to a service-role key.
 13. **One private reply per comment, ever.** Send the DM **first** so a webhook redelivery
     fails at the DM step and doesn't double-post the public reply. (§8.1.)
+14. **Send endpoint auth.** `meta-send` is gated by `authorizeRequest` (browser `x-staff-pin`
+    or cron `x-internal-secret`). Deploy without `INTERNAL_FUNCTION_SECRET` set — or with the
+    browser not sending a valid PIN — and every staff reply silently 401s. (§6.6.)
+15. **Inbound dedupe needs the column.** Meta redelivers a webhook POST on timeout. Without
+    `lead_messages.external_message_id` + its partial UNIQUE index (and
+    `resolution=ignore-duplicates` on the insert), each redelivery creates a duplicate row →
+    duplicate bubbles in the inbox. (§2.1, §6.5.)
 
 ---
 
@@ -1177,8 +1395,11 @@ node netlify/functions/utils/meta-service.test.js
 It asserts the load-bearing edge cases: IG-vs-FB payload extraction, echo skipping,
 postback title becoming message text, self-comment guard, `parent_id`-vs-media normalization
 (top-level comment not wrongly skipped), rule matching (first-hit-wins, `*` catch-all,
-case-insensitive), and branch matching (full name vs first word, ambiguous → null).
-**Port these tests** — they are the single source of truth for webhook-shape edge cases.
+case-insensitive), branch matching (full name vs first word, ambiguous → null), **webhook
+signature verification** (valid HMAC passes; wrong / missing / malformed header reject;
+unset `META_APP_SECRET` → dev allow), and **message-id extraction** (WA `wamid`, IG/FB
+`message.mid`, postback `mid` all carried for dedup). **Port these tests** — they are the
+single source of truth for webhook-shape edge cases.
 
 **End-to-end smoke test (needs Live app + tester account):**
 
@@ -1195,5 +1416,6 @@ case-insensitive), and branch matching (full name vs first word, ambiguous → n
 
 ---
 
-*End of spec. Build IG only; leave the Facebook/WhatsApp code paths out unless and until
-those channels are also scoped in.*
+*End of spec. Build the Instagram path only — don't add new Facebook/WhatsApp functionality,
+but keep the shared infrastructure intact so IG keeps working. FB/WA are a separate later
+engagement.*
