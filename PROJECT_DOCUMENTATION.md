@@ -954,9 +954,9 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
   POST body on every webhook ([meta-webhook.js](netlify/functions/meta-webhook.js) →
   `verifyMetaSignature()`); a mismatch is rejected with 403. If `META_APP_SECRET` is unset,
   verification is SKIPPED with a loud warning (dev fallback) — set it in prod.
-  Base64-encoded bodies (`event.isBase64Encoded`) are decoded before HMAC (2026-08-18), and
-  a mismatch logs received-vs-expected signature prefixes + body length to distinguish a
-  wrong secret from body mangling.
+  Base64-encoded bodies (`event.isBase64Encoded`) are decoded before HMAC, and a mismatch
+  logs whether the body was base64 — persistent failures after that point to a wrong/stale
+  `META_APP_SECRET`.
 - **Send endpoints are now auth-gated (2026-08-13).** `meta-send`, `send-automation-report`
   and `send-automation-webhook` require either a browser `x-staff-pin` header (the logged-in
   admin/branch PIN) or a server `x-internal-secret` (`INTERNAL_FUNCTION_SECRET`, used by the

@@ -25,17 +25,23 @@ exports.handler = async (event) => {
 
   // ── POST: incoming webhook event ─────────────────────────
   if (event.httpMethod === 'POST') {
+    // Netlify may deliver the body base64-encoded — decode BEFORE HMAC/parse or the
+    // signature is computed over the wrong bytes and every webhook 403s.
+    const rawBody = event.isBase64Encoded
+      ? Buffer.from(event.body || '', 'base64').toString('utf8')
+      : event.body || '';
+
     // Verify Meta's HMAC signature BEFORE trusting the body — without it anyone who
     // knows the public webhook URL can forge inbound messages / comment automation.
     const signature = event.headers['x-hub-signature-256'];
-    if (!verifyMetaSignature(event.body || '', signature)) {
-      console.error('[meta-webhook] Invalid X-Hub-Signature-256 — rejecting');
+    if (!verifyMetaSignature(rawBody, signature)) {
+      console.error(`[meta-webhook] Invalid X-Hub-Signature-256 — rejecting (isBase64Encoded=${!!event.isBase64Encoded}; if this persists, META_APP_SECRET is likely wrong/stale)`);
       return { statusCode: 403, body: 'Invalid signature' };
     }
 
     let payload;
     try {
-      payload = JSON.parse(event.body || '{}');
+      payload = JSON.parse(rawBody || '{}');
     } catch {
       return {
         statusCode: 400,
