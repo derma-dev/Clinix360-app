@@ -35,7 +35,19 @@ exports.handler = async (event) => {
     // knows the public webhook URL can forge inbound messages / comment automation.
     const signature = event.headers['x-hub-signature-256'];
     if (!verifyMetaSignature(rawBody, signature)) {
-      console.error(`[meta-webhook] Invalid X-Hub-Signature-256 — rejecting (isBase64Encoded=${!!event.isBase64Encoded}; if this persists, META_APP_SECRET is likely wrong/stale)`);
+      // TEMP DEBUG — remove once the mismatch is identified. Digest is safe to log
+      // (HMAC of the body); it lets us tell "wrong secret" from "mangled body" offline.
+      const sec = process.env.META_APP_SECRET || '';
+      const expected = sec ? 'sha256=' + require('crypto').createHmac('sha256', sec).update(rawBody, 'utf8').digest('hex') : null;
+      console.error('[meta-webhook] SIG-DEBUG ' + JSON.stringify({
+        sigHeader: signature || null,
+        expected: expected ? expected.slice(0, 20) + '…' : 'NO_SECRET_SET',
+        sigLen: (signature || '').length,
+        bodyLen: rawBody.length,
+        bodyStart: rawBody.slice(0, 120),
+        contentType: event.headers['content-type'] || null,
+      }));
+      console.error(`[meta-webhook] Invalid X-Hub-Signature-256 — rejecting (isBase64Encoded=${!!event.isBase64Encoded})`);
       return { statusCode: 403, body: 'Invalid signature' };
     }
 
