@@ -14,6 +14,11 @@
 >    DM the test IG, click the dashboard), list **exactly what the user should do** as a short
 >    checklist. If the unit/live checks already covered everything, say "no manual test needed" —
 >    don't invent work.
+> 6. **Publish budget: Netlify free account = 300 build credits — ≈15 publishes for us.**
+>    Pushing ≠ publishing — deploys are manual and each costs credits. So: implement +
+>    unit-verify several steps, commit, publish **once**, then run all their live checks
+>    together. Docs-only commits never publish. No unnecessary commits either — one commit
+>    per coherent chunk, not per file. Track the count in the Status block below.
 >
 > Steps are vertical slices: implement → verify → only then move on. Each step's Verify is
 > the exit test; don't start step N+1 with step N failing.
@@ -25,14 +30,16 @@
 
 ## Status
 
-- **Now:** Step 2 live check — share a post to the test IG DM after deploy, confirm `🔗 shared post:` row in the inbox (code + unit tests done 2026-08-24, awaiting deploy)
-- **Done:** Step 1
-- **Remaining:** Steps 2–20
+- **Now:** Step 3 — `chatbot_config` settings row + admin card (Step 2 done + live-verified)
+- **Done:** Steps 1–2
+- **Remaining:** Steps 3–20
 - **Blockers:** Gemini API key needed by Step 6's live check (unit part runs mocked without it)
+- **Publish budget:** 2/15 used (Step 2 ×2: initial publish + ig_post fix publish) · **13 left** — batch live checks, docs-only commits never publish
 
 ## Log (append one line per completed step — date · step · what/why/learned)
 
 - 2026-08-24 · Step 1 · §4 schema applied via SQL editor + verified over REST (all cols/tables live, old rows carry defaults, existing reads fine). Deviation: plan's `bigint lead_id` → **uuid** (`leads.id` is UUID). Found + fixed pre-existing drift: live `leads` has `email`/`assigned_to`, lacks `service`/`notes`/`updated_at` the schema file claimed — nothing in this repo's code touches the dead columns (grep-verified), so no breakage.
+- 2026-08-24 · Step 2 · attachments labeled instead of dropped, unit + live verified (share → `🔗 shared post: <caption>`, photo → `📷 image` on test IG). **Live finding:** shared posts arrive as `ig_post` (legacy `share` type removed ~Feb 2026 — brainstorm doc was stale); payload carries `ig_post_media_id` directly, so plan §3.4's permalink→media-id map is unnecessary for shares. Real-image display in inbox deliberately NOT built (CDN url is short-lived; durable fetch+store arrives with Step 15 vision, which needs the bytes anyway).
 
 ---
 
@@ -46,7 +53,7 @@
 ### Step 2 — Attachment capture in `extractEvents`
 - **Implement:** shares (permalink, share_type) → `🔗 shared post: <share_text>`; images → `📷 image`; non-text no longer dropped. Bot-independent — fixes inbox display today.
 - **Verify:** unit test with fixture webhook payloads (text / share / image); live: DM a post share to test IG → label appears in inbox timeline.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-24 (unit fixtures + live on test IG; ig_post type discovered live — `🔗 shared post: <caption>` + `ev.attachment {type, mediaId, title, url}`)
 
 ### Step 3 — `chatbot_config` + Settings card
 - **Implement:** settings row + admin card (mirrors `comment_rules` card): **mode section off/shadow/live (D24)**, model, KB, locality map, canned replies (incl. kb_miss/llm_error hold copy, disclosure, refusal-ok), `offer_stale_days`, turn caps.
