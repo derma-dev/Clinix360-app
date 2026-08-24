@@ -70,7 +70,7 @@ assert.throws(() => idColumnFor(undefined), /Unknown platform/);
   assert.equal(events.length, 0, 'status/delivery payloads must yield no events');
 }
 
-// ── WhatsApp: non-text (image) is dropped downstream, not crashed on ──
+// ── WhatsApp: non-text (image) is labeled, not dropped (chatbot Step 2) ──
 {
   const { events } = extractEvents({
     object: 'whatsapp_business_account',
@@ -79,13 +79,13 @@ assert.throws(() => idColumnFor(undefined), /Unknown platform/);
         field: 'messages',
         value: {
           contacts: [{ profile: { name: 'Gaurav' }, wa_id: '919999999999' }],
-          messages: [{ from: '919999999999', type: 'image', image: { id: 'media-id' } }],
+          messages: [{ from: '919999999999', id: 'wamid.IMG', type: 'image', image: { id: 'media-id' } }],
         },
       }],
     }],
   });
   assert.equal(events.length, 1);
-  assert.equal(events[0].messageText, undefined, 'no text body → handleWebhook skips it');
+  assert.equal(events[0].messageText, '📷 image', 'image → label reaches the timeline');
 }
 
 // ── Regression: FB/IG shapes still parse (idColumnFor refactor touched this path) ──
@@ -307,6 +307,62 @@ assert.equal(extractComments({}).length, 0);
   });
   assert.equal(events[0].isEcho, true);
   assert.equal(events[0].payload, undefined);
+}
+
+// ── Attachments: shares/images are labeled, not dropped (chatbot Step 2) ──
+{
+  // IG shared post — permalink in payload.url, no text
+  const { events } = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{
+      sender:  { id: 'IGSID_1' },
+      message: { mid: 'm_share', attachments: [{
+        type: 'share', payload: { url: 'https://www.instagram.com/reel/Cxyz/', share_type: 'media_share' },
+      }] },
+    }] }],
+  });
+  assert.equal(events.length, 1, 'a share must not be dropped');
+  assert.equal(events[0].messageText, '🔗 shared post: https://www.instagram.com/reel/Cxyz/');
+  assert.equal(events[0].attachment.type, 'share');
+  assert.equal(events[0].attachment.permalink, 'https://www.instagram.com/reel/Cxyz/');
+  assert.equal(events[0].attachment.shareType, 'media_share');
+  assert.equal(events[0].messageId, 'm_share', 'share carries its mid for dedup');
+  assert.equal(events[0].isEcho, false);
+
+  // IG image — often arrives URL-less; label needs no URL
+  const img = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{
+      sender:  { id: 'IGSID_1' },
+      message: { mid: 'm_img', attachments: [{ type: 'image', payload: {} }] },
+    }] }],
+  });
+  assert.equal(img.events.length, 1);
+  assert.equal(img.events[0].messageText, '📷 image');
+  assert.equal(img.events[0].attachment.type, 'image');
+
+  // Text + attachment together (captioned share): text wins, permalink still rides along
+  const both = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{
+      sender:  { id: 'IGSID_1' },
+      message: { mid: 'm_both', text: 'price of this?', attachments: [{
+        type: 'share', payload: { url: 'https://www.instagram.com/p/ABC/' },
+      }] },
+    }] }],
+  });
+  assert.equal(both.events[0].messageText, 'price of this?');
+  assert.equal(both.events[0].attachment.permalink, 'https://www.instagram.com/p/ABC/');
+
+  // Unknown attachment type: still labeled, never dropped
+  const odd = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{
+      sender:  { id: 'IGSID_1' },
+      message: { mid: 'm_v', attachments: [{ type: 'video' }] },
+    }] }],
+  });
+  assert.equal(odd.events[0].messageText, '📎 video');
 }
 
 // ── Rule matching ────────────────────────────────────────────

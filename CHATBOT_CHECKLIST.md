@@ -10,6 +10,10 @@
 >    the commit (one-line message + what's in it) and **wait for the user's go-ahead. Never
 >    auto-commit.** [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) updates belong in the
 >    **same commit** (§15/§21/§22).
+> 5. When reporting a finished step: if any part of its **Verify needs a human** (deploy first,
+>    DM the test IG, click the dashboard), list **exactly what the user should do** as a short
+>    checklist. If the unit/live checks already covered everything, say "no manual test needed" —
+>    don't invent work.
 >
 > Steps are vertical slices: implement → verify → only then move on. Each step's Verify is
 > the exit test; don't start step N+1 with step N failing.
@@ -21,7 +25,7 @@
 
 ## Status
 
-- **Now:** Step 2 — attachment capture in `extractEvents` (Step 1 done + verified)
+- **Now:** Step 2 live check — share a post to the test IG DM after deploy, confirm `🔗 shared post:` row in the inbox (code + unit tests done 2026-08-24, awaiting deploy)
 - **Done:** Step 1
 - **Remaining:** Steps 2–20
 - **Blockers:** Gemini API key needed by Step 6's live check (unit part runs mocked without it)

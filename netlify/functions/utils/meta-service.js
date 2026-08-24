@@ -346,6 +346,16 @@ function platformFor(object) {
        : null;
 }
 
+// Non-text payloads → a display label so they reach the timeline instead of
+// being dropped at the no-content guard (chatbot Step 2; fixes inbox display —
+// shares/images used to vanish). IG shares carry the post permalink; image
+// attachments often arrive URL-less, so the label needs no URL.
+function attachmentLabel(type, payload) {
+  if (type === 'share') return `🔗 shared post: ${payload?.url || '(no link)'}`;
+  if (type === 'image') return '📷 image';
+  return `📎 ${type || 'attachment'}`;
+}
+
 // Flatten a webhook payload into a list of message events.
 // Returns { platform: null, events: [] } for anything we don't handle.
 function extractEvents(payload) {
@@ -357,17 +367,24 @@ function extractEvents(payload) {
   for (const entry of (payload.entry || [])) {
     // Shape A — real FB/IG DMs: entry[].messaging[]
     for (const msg of (entry.messaging || [])) {
+      const att = (msg.message?.attachments || [])[0];
       events.push({
         senderId:    msg.sender?.id,
         // A button tap is a `postback`, not a `message` — its label lives on
         // postback.title, so the tap reads as "Dwarka" in the inbox timeline
-        // instead of arriving as a blank turn.
-        messageText: msg.message?.text ?? msg.postback?.title,
+        // instead of arriving as a blank turn. An attachment-only message has
+        // no text — synthesize the label above. Text wins when both exist.
+        messageText: msg.message?.text ?? msg.postback?.title
+                        ?? (att ? attachmentLabel(att.type, att.payload) : undefined),
         messageId:   msg.message?.mid ?? msg.postback?.mid,   // for inbound idempotency
         profileName: null,
         isEcho:      msg.message?.is_echo === true,
         // Set only when they TAPPED something: a postback button, or a quick reply.
         payload:     msg.postback?.payload ?? msg.message?.quick_reply?.payload,
+        // Set only for attachment messages — permalink feeds the share→offer-price
+        // flow (final plan §3.4); the label above is just the inbox display.
+        attachment:  att ? { type: att.type, permalink: att.payload?.url, shareType: att.payload?.share_type }
+                         : undefined,
         shape:       'messaging',
       });
     }
@@ -389,7 +406,9 @@ function extractEvents(payload) {
         for (const m of (value.messages || [])) {
           events.push({
             senderId:    m.from,
-            messageText: m.text?.body,   // non-text (image/audio/…) → undefined → skipped downstream
+            // Non-text (image/audio/…) gets the attachment label instead of being dropped
+            messageText: m.text?.body
+                          ?? (m.type && m.type !== 'text' ? attachmentLabel(m.type) : undefined),
             messageId:   m.id,           // WA wamid, for inbound idempotency
             profileName: nameByWaId.get(m.from) || null,
             isEcho:      false,          // we only subscribe `messages`, not `message_echoes`
