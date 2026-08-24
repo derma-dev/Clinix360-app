@@ -136,6 +136,11 @@ CREATE TABLE IF NOT EXISTS settings (
 --   admin_pin       -> the 4-digit admin PIN (string)
 --   payment_modes   -> JSON array, e.g. [{"code":"cash","label":"Cash"}, ...]
 --                      Editable from Admin Panel -> Settings -> Payment Modes.
+--   chatbot_config  -> JSON object (chatbot final plan §5): mode ('off'|'shadow'|'live',
+--                      D19/D24), model, kb {entries, prices_verified_at}, locality_map,
+--                      canned replies, offer_stale_days, turn caps. Row is created on
+--                      first save from Admin -> Settings -> Chatbot; code merges defaults
+--                      when absent, so 'off' holds even before the row exists.
 
 -- Lead Hub — one row per prospective customer, scoped to a branch.
 CREATE TABLE IF NOT EXISTS leads (

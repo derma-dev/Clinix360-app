@@ -741,6 +741,45 @@
           </div>
         </div>
 
+        <!-- Chatbot (Instagram DM assistant) -->
+        <div class="section-card settings-card collapsed">
+          <div class="section-header settings-head">
+            <span class="section-icon"><svg class="icon"><use href="#i-bolt"/></svg></span>
+            <span class="section-title">Chatbot (Instagram DMs)</span>
+            <span class="settings-chevron">▾</span>
+          </div>
+          <div class="settings-body" style="padding:8px 18px 18px">
+            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">The Instagram DM assistant answers price and FAQ questions, qualifies leads and hands the conversation to staff. <b>Mode is the master switch</b> — Off does nothing, Shadow drafts replies but sends nothing (logged for review), Live replies to customers. Saved replies below are what the bot actually says.</p>
+            <div style="margin-bottom:12px">
+              <div style="font-weight:600;font-size:13px;margin-bottom:6px">Mode</div>
+              <div id="chatbot-mode-btns" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+            </div>
+            <div style="display:grid;gap:8px">
+              <div style="font-weight:600;font-size:13px">Model</div>
+              <input type="text" id="chatbot-model" class="text-input" placeholder="gemini-3.5-flash-lite" style="margin:0">
+              <div style="font-weight:600;font-size:13px;margin-top:6px">Canned replies</div>
+              <textarea id="chatbot-canned-collaboration" class="text-input" rows="2" placeholder="Reply to collaboration enquiries" style="margin:0;resize:vertical"></textarea>
+              <textarea id="chatbot-canned-sales_pitch" class="text-input" rows="2" placeholder="Reply to sales pitches" style="margin:0;resize:vertical"></textarea>
+              <textarea id="chatbot-canned-misc" class="text-input" rows="2" placeholder="Reply to other non-lead messages" style="margin:0;resize:vertical"></textarea>
+              <textarea id="chatbot-canned-kb_miss" class="text-input" rows="2" placeholder="Hold reply when the bot doesn't know the answer" style="margin:0;resize:vertical"></textarea>
+              <textarea id="chatbot-canned-llm_error" class="text-input" rows="2" placeholder="Hold reply when the bot errors out" style="margin:0;resize:vertical"></textarea>
+              <textarea id="chatbot-canned-disclosure" class="text-input" rows="2" placeholder="Prepended to the bot's first message — discloses it's an assistant" style="margin:0;resize:vertical"></textarea>
+              <textarea id="chatbot-canned-refusal_ok" class="text-input" rows="2" placeholder="Reply when the customer declines to share their WhatsApp number" style="margin:0;resize:vertical"></textarea>
+              <div style="font-weight:600;font-size:13px;margin-top:6px">Limits</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <input type="number" id="chatbot-offer-stale-days" class="text-input" placeholder="30" min="0" style="margin:0;width:130px" title="Days a shared-post offer price stays quotable before falling back to the KB range">
+                <input type="number" id="chatbot-turn-cap" class="text-input" placeholder="10" min="1" style="margin:0;width:130px" title="Max bot replies per conversation before handing off to staff">
+                <input type="number" id="chatbot-age-cap-days" class="text-input" placeholder="7" min="1" style="margin:0;width:130px" title="Hand off if the conversation is older than this many days">
+              </div>
+              <div style="font-size:11px;color:#9ca3af">Offer stale days · turn cap · conversation age cap (days)</div>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+                <span id="chatbot-kb-status" style="font-size:12px;color:#9ca3af"></span>
+                <button class="primary-btn" id="btn-save-chatbot-config">Save</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Payment Modes -->
         <div class="section-card settings-card collapsed">
           <div class="section-header settings-head">

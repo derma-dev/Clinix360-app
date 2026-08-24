@@ -122,7 +122,7 @@ function createSupabaseClient() {
     async findLeadByPlatformId(platform, userId) {
       const col = idColumnFor(platform);
       const res = await fetch(
-        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id&limit=1`,
+        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id,bot_active&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`leads lookup failed: ${res.status} ${await res.text()}`);
@@ -154,13 +154,19 @@ function createSupabaseClient() {
     async insertMessage(data) {
       const res = await fetch(`${url}/rest/v1/lead_messages`, {
         method:  'POST',
-        // resolution=ignore-duplicates → a redelivered webhook whose external_message_id
-        // already exists is a silent no-op instead of a duplicate row.
+        // resolution=ignore-duplicates is INTENDED to make a redelivered webhook a
+        // no-op — but PostgREST's ON CONFLICT can't target the PARTIAL unique index
+        // on external_message_id, so a redelivery actually surfaces as 23505
+        // (live-probed 2026-08-24). Catch that here: duplicate = nothing inserted.
         headers: { ...headers, Prefer: 'return=representation, resolution=ignore-duplicates' },
         body:    JSON.stringify(data),
       });
-      if (!res.ok) throw new Error(`lead_messages insert failed: ${res.status} ${await res.text()}`);
-      return res.json();
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (!Array.isArray(body) && body?.code === '23505') return [];   // already stored (redelivery)
+        throw new Error(`lead_messages insert failed: ${res.status} ${JSON.stringify(body)}`);
+      }
+      return body;
     },
 
     async getLeadById(id) {
@@ -295,7 +301,7 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
 
   // Insert incoming message. branch_id is set so the realtime inbox channel can
   // filter by branch server-side (see artifacts/REALTIME_INBOX.md).
-  await db.insertMessage({
+  const insertedRows = await db.insertMessage({
     lead_id:             lead.id,
     branch_id:           lead.branch_id,
     direction:           'incoming',
@@ -304,7 +310,10 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
     external_message_id: messageId || null,   // dedupes Meta webhook redeliveries (UNIQUE)
   });
   console.log(`[meta-service] Message inserted for lead_id=${lead.id}`);
-  return lead;
+  // `inserted` is false on a webhook REDelivery (insertMessage returned [] on the
+  // external_message_id dup) — the signal the bot turn needs so Meta's retries
+  // never produce a second bot reply (checklist Step 7 / open #10).
+  return { lead, inserted: insertedRows.length > 0 };
 }
 
 // ── Webhook verification (GET) ────────────────────────────────
@@ -569,10 +578,13 @@ async function handleWebhook(payload) {
     try {
       // messageText is only ever missing on a title-less button tap (see the guard
       // above) — the timeline still needs a body, so fall back to a readable label.
-      const lead = await processIncomingMessage(
+      const { lead, inserted } = await processIncomingMessage(
         ev.senderId, ev.messageText || '(button tap)', platform, ev.profileName, ev.messageId
       );
       await routeLeadFromReply(lead, ev.messageText, ev.payload);
+      // Chatbot turn (final plan §3.2) — added after routing, never blocks it, and
+      // only for a FRESH insert: a Meta redelivery gets no second bot reply (open #10).
+      if (inserted) await botReply(lead, ev, platform);
     } catch (err) {
       console.error(`[meta-service] Error processing ${platform} message from sender=${ev.senderId}:`, err.message);
     }
@@ -886,7 +898,7 @@ async function processComment(c) {
   // recipient_id from the send is the authoritative platform id (IGSID / PSID).
   // The comment's own from.id is a different id space — using it here would fork one
   // person into two leads and break DM dedupe permanently.
-  const lead = await processIncomingMessage(
+  const { lead } = await processIncomingMessage(
     sent.recipient_id,
     `[comment] ${c.text}`,
     c.platform,
@@ -949,6 +961,180 @@ async function routeLeadFromReply(lead, text, payload) {
   console.log(`[meta-service] Lead ${lead.id} routed to ${branch.name}`);
 }
 
+// ── Chatbot turn pipeline (final plan §3.2 · checklist Steps 5–7) ──
+
+// D7 layer 1: the free, local keyword net that runs BEFORE Gemini. A hit means
+// handoff — the bot never answers, whatever the model would have said. Mined
+// from real corpus phrasings (khujli, dawai, daag, ilaj, garbhvati…) plus their
+// English equivalents. Deliberately does NOT include risk-FAQ words (safe, pain,
+// side effect, PCOS, thyroid, diabetes) — "PCOS hai to laser safe?" is a
+// signed-off KB answer, not a handoff; those subtleties are layer 2 (is_medical).
+// A false positive only costs automation (safe); a false negative falls through
+// to layer 2. Tuned against the corpus by the Step 16 shadow replay.
+const EMERGENCY_NET = [
+  'emergency', 'urgent', 'right now', 'turant', 'abhi abhi',
+  'khoon', 'bleed',
+  'jal gaya', 'jala diya', 'jal gayi', 'burned', 'burns', 'blister',
+  'saans', 'breathless', 'difficulty breathing', 'shortness of breath',
+  'behosh', 'unconscious', 'fainted',
+  'bukhar', 'fever',
+  'allergic reaction', 'anaphyla', 'sujan',
+  'phail raha', 'spread ho raha', 'spreading',
+  'pus', 'infection', 'infected',
+  'unbearable', 'bardasht nahi', 'bahut zyada dard', 'severe pain',
+  'hospital',
+];
+
+const MEDICAL_NET = [
+  'khujli', 'khujali', 'kharish', 'itching', 'itchy',
+  'dawai', 'davai', 'dvaai', 'medicine', 'tablet', 'capsule', 'prescri',
+  'garbhvati', 'garbhavati', 'pregnan', 'breastfeed', 'nursing mother',
+  'ilaj', 'ilaaj', 'daag',
+  'rash', 'dane', 'danne',
+  'burning', 'jalan',
+  'dard ho rah', 'pain ho rah', 'dard kar rah', 'pain kar rah',
+  'allergy',
+];
+
+const REQUESTED_NET = [
+  'human', 'real person', 'insaan',
+  'agent', 'representative', 'customer care', 'manager', 'operator', 'helpline',
+  'staff se baat', 'baat karao', 'baat kara do',
+];
+
+// 'emergency' | 'medical' | 'requested' (→ handoffToStaff, Gemini never runs)
+// or null (→ continue to the LLM turn). Emergency outranks medical outranks
+// requested — evaluation order IS the priority (final plan §8.1).
+function classifyInbound(text) {
+  const t = ' ' + String(text || '').toLowerCase() + ' ';
+  if (EMERGENCY_NET.some(k => t.includes(k))) return 'emergency';
+  if (MEDICAL_NET.some(k => t.includes(k)))   return 'medical';
+  if (REQUESTED_NET.some(k => t.includes(k))) return 'requested';
+  return null;
+}
+
+// ── Gemini client (final plan §3.5 · checklist Step 6) ──
+// Raw fetch generateContent, no SDK. One call per turn, structured output only —
+// we never parse prose. Throws on any failure; the caller maps that to the
+// llm_error canned handoff (D13).
+const ASSISTANT_DECISION_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    category: { type: 'STRING', enum: ['lead', 'collaboration', 'sales_pitch', 'misc'] },
+    is_medical:   { type: 'BOOLEAN' },
+    reply:        { type: 'STRING' },
+    kb_covers:    { type: 'BOOLEAN' },
+    handoff:      { type: 'BOOLEAN' },
+    reason: { type: 'STRING', enum: ['wants_booking', 'declined_booking', 'qualified', 'medical',
+                                     'emergency', 'requested', 'kb_miss', 'llm_error', 'turn_cap', 'non_lead'] },
+    qualification: {
+      type: 'OBJECT',
+      properties: {
+        service:        { type: 'STRING' },
+        phone:          { type: 'STRING' },
+        location:       { type: 'STRING' },
+        branch:         { type: 'STRING' },
+        preferred_time: { type: 'STRING' },
+      },
+    },
+  },
+  required: ['category', 'is_medical', 'reply', 'kb_covers', 'handoff', 'reason'],
+};
+
+const ASSISTANT_SYSTEM_PROMPT = `You are the Instagram DM assistant for Derma Skin and Hair Solutions, a Delhi-NCR dermatology clinic (branches: Janakpuri main, Kirti Nagar, Dwarka Sec 12).
+
+HARD RULES — breaking any is a failure:
+- Answer ONLY from the KNOWLEDGE BASE below. If it does not answer the question, set kb_covers=false, reply="" and handoff=true.
+- NEVER diagnose, prescribe medicines, or interpret symptoms. A message describing active symptoms (pain, itching, bleeding, a reaction) is not yours to answer: set is_medical=true, reply="" and handoff=true.
+- "Is it safe / painful for my condition?" questions about a STABLE condition (e.g. "PCOS hai to laser safe?") are NOT medical — answer from the KB's safety entries, is_medical=false.
+- Quote a price ONLY from the KB entry for that exact service. Otherwise price is "shared after consultation" with a cue to the team. NEVER invent, estimate, or average prices.
+- NEVER guarantee results.
+- Do not announce that you are a bot or an assistant — the system handles disclosure.
+- Mirror the customer's language (Hinglish is fine and encouraged). Keep replies warm, 2–4 sentences.
+- When qualifying a lead, ask ONE question at a time, in order: service → branch/location → WhatsApp number → preferred time. Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one).
+- A deflected or partial answer always ends with a soft cue to the human team — never a dead end.
+
+Set handoff=true with the matching reason when: the customer wants to book now or declines, is fully qualified, asks for a human, the message is medical, or you cannot answer from the KB.`;
+
+// Whole-KB injection every turn (D20): no retrieval step can miss a medical
+// entry. ~40 entries stays tiny; upgrade path is pgvector top-k.
+function renderKbForPrompt(kb) {
+  const lines = (kb?.entries || []).map(e => e.type === 'service'
+    ? `- SERVICE ${e.key}${e.price ? `: ₹${e.price} per session (last quoted ${e.price_last_quoted || 'n/a'})` : ': price after consultation'}`
+    : `- FAQ [${(e.tags || []).join(', ')}]: ${e.a}`);
+  return `KNOWLEDGE BASE (the ONLY source for answers):\n${lines.join('\n')}`;
+}
+
+// One structured decision per inbound. `history` = [{role:'user'|'model', text}]
+// ordered oldest-first. Returns the parsed decision object; throws otherwise.
+async function callAssistant({ model, kb, history, inboundText }) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error('Missing GEMINI_API_KEY env var');
+
+  const contents = [
+    ...(history || []).map(h => ({ role: h.role === 'model' ? 'model' : 'user', parts: [{ text: String(h.text || '') }] })),
+    { role: 'user', parts: [{ text: `Customer's new message:\n${inboundText}` }] },
+  ];
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || 'gemini-3.5-flash-lite')}:generateContent`,
+    {
+      method:  'POST',
+      headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: ASSISTANT_SYSTEM_PROMPT }, { text: renderKbForPrompt(kb) }] },
+        contents,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema:   ASSISTANT_DECISION_SCHEMA,
+          temperature:      0.2,
+        },
+      }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`Gemini call failed: ${res.status} ${msg}`);
+  }
+  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+  const decision = JSON.parse(text);   // malformed/blocked → throws → llm_error path (D13)
+  if (!decision || typeof decision.category !== 'string') throw new Error('Gemini returned an unusable decision');
+  return decision;
+}
+
+// ── botReply: the turn entry point (final plan §3.2 · checklist Step 7) ──
+// Never throws — the inbound is already stored before this runs; a bot glitch
+// must never drop or delay a real message (D13). Off/inactive = strict no-op.
+// Steps 8–13 grow the branches (LLM reply, handoff summary, shadow, teach-loop).
+async function botReply(lead, ev, platform) {
+  try {
+    if (!lead?.bot_active) return { skipped: 'bot_inactive' };
+
+    const cfg  = (await getSettingJson('chatbot_config')) || {};
+    const mode = ['live', 'shadow'].includes(cfg.mode) ? cfg.mode : 'off';
+    if (mode === 'off') return { skipped: 'mode_off' };
+
+    // D7 layer 1 — safety net fires BEFORE Gemini ever runs.
+    const tier = classifyInbound(ev.messageText);
+    if (tier) {
+      const db = createSupabaseClient();
+      await db.updateLead(lead.id, { bot_active: false, status: 'qualified' });
+      console.log(`[meta-service] botReply: tier=${tier} on "${String(ev.messageText).slice(0, 60)}" → handoff, lead ${lead.id}`);
+      return { handoff: tier };
+    }
+
+    // LLM reply path lands with Step 8 (live reply + persist); until then a
+    // non-safety message just falls through untouched.
+    console.log('[meta-service] botReply: no safety tier — reply path not wired yet (Step 8)');
+    return { skipped: 'reply_path_pending' };
+  } catch (err) {
+    console.error('[meta-service] botReply error (inbound already stored):', err.message);
+    return { error: err.message };
+  }
+}
+
 module.exports = {
   verifyWebhook,
   verifyMetaSignature,
@@ -964,4 +1150,8 @@ module.exports = {
   matchCommentRule,
   matchBranch,
   idColumnFor,
+  // chatbot (final plan §3.2/§3.5)
+  classifyInbound,
+  callAssistant,
+  botReply,
 };

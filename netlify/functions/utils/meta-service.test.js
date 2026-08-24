@@ -10,6 +10,9 @@ const {
   matchBranch,
   idColumnFor,
   verifyMetaSignature,
+  classifyInbound,
+  callAssistant,
+  botReply,
 } = require('./meta-service');
 
 // ── idColumnFor: the silent-corruption guard ─────────────────
@@ -478,4 +481,163 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(pb.events[0].messageId, 'pb_1', 'a postback must carry its mid for dedup');
 }
 
-console.log('meta-service: all checks passed');
+// ── classifyInbound: the D7 layer-1 safety net (chatbot Step 5) ──
+{
+  // medical → corpus-mined symptom / medicine / pregnancy phrasings
+  assert.equal(classifyInbound('khujli ho rahi hai'), 'medical');
+  assert.equal(classifyInbound('skin pe khujali aa rahi hai'), 'medical');
+  assert.equal(classifyInbound('koi dawai lagni hai kya'), 'medical');
+  assert.equal(classifyInbound('can you prescribe any medicine?'), 'medical');
+  assert.equal(classifyInbound('main garbhvati hoon, laser karwa sakti hu?'), 'medical');
+  assert.equal(classifyInbound('I am pregnant — is laser safe?'), 'medical');
+  assert.equal(classifyInbound('after the facial I have burning and rash'), 'medical');
+  assert.equal(classifyInbound('pimple ka ilaj kaiese hota hai'), 'medical');
+  // emergency → outranks medical when both are present (§8.1)
+  assert.equal(classifyInbound('URGENT! khoon beh raha hai after laser'), 'emergency');
+  assert.equal(classifyInbound('bukhar aa gaya hai after the treatment'), 'emergency');
+  assert.equal(classifyInbound('skin jal gaya hai'), 'emergency');
+  assert.equal(classifyInbound('khujli ho rahi hai aur khoon bhi beh raha hai'), 'emergency',
+    'emergency must outrank medical');
+  // requested → wants a human
+  assert.equal(classifyInbound('talk to a human please'), 'requested');
+  assert.equal(classifyInbound('insaan se baat karo'), 'requested');
+  assert.equal(classifyInbound('can I speak to a real person?'), 'requested');
+  // FAQ / lead traffic passes through to the LLM (null = no safety tier)
+  assert.equal(classifyInbound('price of laser'), null);
+  assert.equal(classifyInbound('PCOS hai to laser safe?'), null, 'condition + risk-FAQ is NOT layer-1 medical');
+  assert.equal(classifyInbound('kya laser painful hai?'), null, '"is it painful" is the signed-off risk FAQ');
+  assert.equal(classifyInbound('hydra facial ka kitna price hai'), null);
+  assert.equal(classifyInbound('full body laser ke liye offer hai?'), null);
+  assert.equal(classifyInbound('we would love to collaborate'), null);
+  assert.equal(classifyInbound('fat freezing coolsculpt ka price'), null);
+  // attachment labels / junk never trip the net
+  assert.equal(classifyInbound('📷 image'), null);
+  assert.equal(classifyInbound('🔗 shared post: Laser offer'), null);
+  assert.equal(classifyInbound(''), null);
+  assert.equal(classifyInbound(undefined), null);
+}
+
+// ── callAssistant + botReply (chatbot Steps 6–7): async, mocked fetch ──
+(async () => {
+  const realFetch = global.fetch;
+
+  // callAssistant: happy path → parsed decision + correct request shape
+  {
+    process.env.GEMINI_API_KEY = 'test_key';
+    let captured;
+    global.fetch = async (url, opts = {}) => {
+      captured = { url, opts };
+      return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{
+        text: JSON.stringify({ category: 'lead', is_medical: false, reply: 'Full body laser is ₹35,000…',
+                               kb_covers: true, handoff: false, reason: 'wants_booking',
+                               qualification: { service: 'LHR FULL BODY P/S' } }),
+      }] } }] }) };
+    };
+    try {
+      const decision = await callAssistant({
+        model: 'gemini-3.5-flash-lite',
+        kb: { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 }] },
+        history: [{ role: 'user', text: 'hi' }, { role: 'model', text: 'hello!' }],
+        inboundText: 'price of laser',
+      });
+      assert.equal(decision.category, 'lead');
+      assert.equal(decision.qualification.service, 'LHR FULL BODY P/S');
+      // model in the URL, key in a header (never the query string)
+      assert.match(captured.url, /models\/gemini-3\.5-flash-lite:generateContent$/);
+      assert.ok(!captured.url.includes('test_key'), 'API key must not leak into the URL');
+      assert.equal(captured.opts.headers['x-goog-api-key'], 'test_key');
+      const body = JSON.parse(captured.opts.body);
+      assert.equal(body.generationConfig.responseMimeType, 'application/json');
+      assert.deepEqual(body.generationConfig.responseSchema.required,
+        ['category', 'is_medical', 'reply', 'kb_covers', 'handoff', 'reason']);
+      assert.ok(body.systemInstruction.parts.some(p => p.text.includes('LHR FULL BODY P/S')),
+        'whole KB injected into the prompt (D20)');
+      assert.ok(body.contents.at(-1).parts[0].text.includes('price of laser'));
+      assert.equal(body.contents.length, 3, 'history + current message');
+
+      // HTTP failure → throws (caller maps to llm_error, D13)
+      global.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: { message: 'quota' } }) });
+      await assert.rejects(() => callAssistant({ inboundText: 'x' }), /Gemini call failed: 429/);
+
+      // malformed output (prose instead of JSON) → throws, never parsed loosely
+      global.fetch = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: 'Sure! The price is…' }] } }] }) });
+      await assert.rejects(() => callAssistant({ inboundText: 'x' }));
+
+      // blocked / empty candidates → throws
+      global.fetch = async () => ({ ok: true, json: async () => ({ candidates: [] }) });
+      await assert.rejects(() => callAssistant({ inboundText: 'x' }));
+
+      // missing key → throws
+      delete process.env.GEMINI_API_KEY;
+      await assert.rejects(() => callAssistant({ inboundText: 'x' }), /GEMINI_API_KEY/);
+    } finally {
+      delete process.env.GEMINI_API_KEY;
+    }
+  }
+
+  // botReply: guard order + no-op invariants (§8.1)
+  {
+    // dummy creds so getSettingJson/createSupabaseClient actually fetch (mocked)
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    const EV = { messageText: 'price of laser' };
+    const fetchCalls = [];
+    const mockSupabase = (config) => async (url, opts = {}) => {
+      fetchCalls.push({ url, opts });
+      if (url.includes('settings?key=eq.chatbot_config')) {
+        return { ok: true, json: async () => [{ value: JSON.stringify(config) }] };
+      }
+      if (url.includes('/leads?id=eq.')) {
+        return { ok: true, json: async () => [] };
+      }
+      throw new Error('unexpected fetch: ' + url);
+    };
+
+    // 1) bot_active=false → strict no-op, zero network calls
+    fetchCalls.length = 0;
+    global.fetch = mockSupabase({ mode: 'live' });
+    let r = await botReply({ id: 'L1', bot_active: false }, EV, 'instagram');
+    assert.deepEqual(r, { skipped: 'bot_inactive' });
+    assert.equal(fetchCalls.length, 0, 'inactive lead must not touch the network');
+
+    // 2) mode='off' (or absent) → no-op after reading settings, no writes
+    global.fetch = mockSupabase({ mode: 'off' });
+    r = await botReply({ id: 'L1', bot_active: true }, EV, 'instagram');
+    assert.deepEqual(r, { skipped: 'mode_off' });
+    assert.equal(fetchCalls.filter(c => c.opts.method === 'PATCH').length, 0);
+    global.fetch = mockSupabase({});
+    r = await botReply({ id: 'L1', bot_active: true }, EV, 'instagram');
+    assert.deepEqual(r, { skipped: 'mode_off' }, 'missing mode defaults to off');
+
+    // 3) safety net fires before Gemini: medical text → handoff, never a model call
+    fetchCalls.length = 0;
+    global.fetch = mockSupabase({ mode: 'live' });
+    r = await botReply({ id: 'L1', bot_active: true }, { messageText: 'khujli ho rahi hai' }, 'instagram');
+    assert.deepEqual(r, { handoff: 'medical' });
+    const patch = fetchCalls.find(c => c.opts.method === 'PATCH');
+    assert.ok(patch && patch.url.includes('leads?id=eq.L1'), 'handoff must flip bot_active off');
+    assert.deepEqual(JSON.parse(patch.opts.body), { bot_active: false, status: 'qualified' });
+    assert.ok(!fetchCalls.some(c => c.url.includes('generativelanguage')),
+      'a safety-tier hit must NEVER reach Gemini (D7 layer 1)');
+
+    // 4) plain FAQ text in live mode → falls through until Step 8 wires the LLM path
+    fetchCalls.length = 0;
+    r = await botReply({ id: 'L1', bot_active: true }, EV, 'instagram');
+    assert.deepEqual(r, { skipped: 'reply_path_pending' });
+    assert.equal(fetchCalls.filter(c => c.opts.method === 'PATCH').length, 0);
+
+    // 5) a mid-turn crash is swallowed — returns {error}, never throws (D13).
+    //    (settings read succeeds, the lead PATCH fails)
+    global.fetch = async (url) => url.includes('settings')
+      ? { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live' }) }] }
+      : Promise.reject(new Error('network down'));
+    r = await botReply({ id: 'L1', bot_active: true }, { messageText: 'khujli ho rahi hai' }, 'instagram');
+    assert.match(r.error, /network down/);
+
+    delete process.env.SUPABASE_URL;
+    delete process.env.SUPABASE_ANON_KEY;
+  }
+
+  global.fetch = realFetch;
+  console.log('meta-service: all checks passed');
+})().catch(e => { console.error(e); process.exit(1); });

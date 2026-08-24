@@ -32,6 +32,7 @@ let state = {
   cameFromAdmin: false,
   autocompleteData: { products: [], staff: [], names: [] },
   commentRules: [],
+  chatbotConfig: null,
   staffList: [],
   existingSummaryId: null,
   lastCalculatedClosing: 0,
@@ -172,7 +173,7 @@ function switchAdminTab(tab) {
   if (tab === 'leads') loadAdminLeads();
   if (tab === 'reports') initReportsTab();
   if (tab === 'notifications') loadAdminAlerts();
-  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); loadCommentRules(); }
+  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); loadCommentRules(); loadChatbotConfig(); }
   setRoute('#/admin/' + tab);
 }
 
@@ -1153,6 +1154,142 @@ async function removeCommentRule(i) {
   await saveCommentRulesToDB();
   renderCommentRules();
   showToast('Rule removed ✓', 'success');
+}
+
+// ============================================================
+// CHATBOT (settings.chatbot_config) — final plan §5, D24
+// Stored as one JSON settings row; server-side meta-service reads the same
+// key (with the same defaults) once the bot is wired. Copy below is editable
+// here — clinician/client sign-off on wording happens before client go-live.
+// ============================================================
+const DEFAULT_CHATBOT_CONFIG = {
+  mode: 'off',                       // 'off' | 'shadow' | 'live' (D19) — the permanent throttle (D24)
+  model: 'gemini-3.5-flash-lite',    // D1
+  kb: { entries: [], prices_verified_at: null },   // seeded in checklist Step 4; learned entries join tagged learned:<YYYY-MM>
+  locality_map: {},                  // locality/pincode → branch id; empty = bot asks the customer
+  canned: {
+    collaboration: 'Thank you for reaching out! Our team will get back to you here about collaborations. 🙏',
+    sales_pitch:   'Thank you for the information. If you would like to book an appointment, our team is happy to help here!',
+    misc:          'Thanks for your message! Our team will get back to you here shortly. 🙏',
+    kb_miss:       'Let me check with our team and get back to you here shortly. 🙏',
+    llm_error:     'Let me connect you with our team right away — they will help you here. 🙏',
+    disclosure:    'Hi! I am the clinic’s assistant 🤖 — I can help with prices, services and bookings, and our team joins in whenever needed.',
+    refusal_ok:    'No problem at all — our team will continue here. 🙏',
+  },
+  offer_stale_days: 30,              // D10
+  turn_cap: 10,                      // pending open #17
+  conversation_age_cap_days: 7,
+};
+
+const CHATBOT_MODES = [
+  { key: 'off',    label: 'Off',    hint: 'does nothing' },
+  { key: 'shadow', label: 'Shadow', hint: 'drafts replies, sends nothing, logs for review' },
+  { key: 'live',   label: 'Live',   hint: 'replies to customers' },
+];
+
+function mergeChatbotConfig(saved) {
+  const s = saved || {};
+  return {
+    ...DEFAULT_CHATBOT_CONFIG, ...s,
+    kb:          { ...DEFAULT_CHATBOT_CONFIG.kb,          ...(s.kb || {}) },
+    locality_map:{ ...DEFAULT_CHATBOT_CONFIG.locality_map, ...(s.locality_map || {}) },
+    canned:      { ...DEFAULT_CHATBOT_CONFIG.canned,      ...(s.canned || {}) },
+  };
+}
+
+async function loadChatbotConfig() {
+  try {
+    const { data } = await db.from('settings').select('value').eq('key', 'chatbot_config').maybeSingle();
+    state.chatbotConfig = mergeChatbotConfig(data?.value ? JSON.parse(data.value) : null);
+  } catch (e) { state.chatbotConfig = mergeChatbotConfig(null); }
+  renderChatbotConfig();
+}
+
+function renderChatbotConfig() {
+  renderChatbotMode();
+  const cfg = state.chatbotConfig || mergeChatbotConfig(null);
+  const set = (id, v) => { const el = document.getElementById(id); if (el != null) el.value = v; };
+  set('chatbot-model', cfg.model || '');
+  Object.keys(DEFAULT_CHATBOT_CONFIG.canned).forEach(k =>
+    set('chatbot-canned-' + k, cfg.canned?.[k] ?? ''));
+  set('chatbot-offer-stale-days', cfg.offer_stale_days);
+  set('chatbot-turn-cap', cfg.turn_cap);
+  set('chatbot-age-cap-days', cfg.conversation_age_cap_days);
+
+  const kbN = (cfg.kb?.entries || []).length;
+  const locN = Object.keys(cfg.locality_map || {}).length;
+  const verified = cfg.kb?.prices_verified_at
+    ? new Date(cfg.kb.prices_verified_at).toLocaleDateString() : 'never';
+  const status = document.getElementById('chatbot-kb-status');
+  if (status) status.textContent = `KB: ${kbN} entries · prices verified: ${verified} · locality map: ${locN}`;
+}
+
+// Mode control only — a mode click re-renders just this, never the form fields
+// (they may hold unsaved edits; Save persists them).
+function renderChatbotMode() {
+  const btns = document.getElementById('chatbot-mode-btns');
+  if (!btns) return;
+  const mode = state.chatbotConfig?.mode || 'off';
+  btns.innerHTML = CHATBOT_MODES.map(m => {
+    const active = mode === m.key;
+    return `<button onclick="setChatbotMode('${m.key}')" title="${esc(m.hint)}"
+      style="padding:7px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:${active ? 'default' : 'pointer'};
+      border:1px solid ${active ? 'transparent' : 'var(--border)'};color:${active ? '#fff' : 'inherit'};
+      background:${active ? 'var(--accent, #e53935)' : 'transparent'}">${m.label}</button>`;
+  }).join('');
+}
+
+function collectChatbotConfigFromForm() {
+  const cfg = state.chatbotConfig || mergeChatbotConfig(null);
+  const val = id => document.getElementById(id)?.value;
+  const int = (id, min, dflt) => {
+    const n = parseInt(val(id), 10);
+    return Number.isFinite(n) ? Math.max(min, n) : dflt;
+  };
+  const canned = {};
+  Object.keys(DEFAULT_CHATBOT_CONFIG.canned).forEach(k =>
+    canned[k] = (val('chatbot-canned-' + k) || '').trim());
+  return {
+    ...cfg,                      // keeps kb / locality_map (edited elsewhere: Step 4 seed, Step 13 approvals)
+    model: (val('chatbot-model') || '').trim() || DEFAULT_CHATBOT_CONFIG.model,
+    canned,
+    offer_stale_days: int('chatbot-offer-stale-days', 0, DEFAULT_CHATBOT_CONFIG.offer_stale_days),
+    turn_cap:         int('chatbot-turn-cap', 1, DEFAULT_CHATBOT_CONFIG.turn_cap),
+    conversation_age_cap_days: int('chatbot-age-cap-days', 1, DEFAULT_CHATBOT_CONFIG.conversation_age_cap_days),
+  };
+}
+
+async function saveChatbotConfigToDB() {
+  const { error } = await db.from('settings').upsert(
+    { key: 'chatbot_config', value: JSON.stringify(state.chatbotConfig) },
+    { onConflict: 'key' }
+  );
+  return error;
+}
+
+async function saveChatbotConfigFromForm() {
+  state.chatbotConfig = collectChatbotConfigFromForm();
+  const error = await saveChatbotConfigToDB();
+  if (error) { showToast('Could not save — try again', 'error'); return; }
+  renderChatbotConfig();
+  showToast('Chatbot settings saved ✓', 'success');
+}
+
+// The master switch — applies immediately, no separate Save (mirrors the
+// integrations toggle): an operator must be able to kill the bot in one click.
+async function setChatbotMode(mode) {
+  const prev = state.chatbotConfig?.mode;
+  state.chatbotConfig = { ...(state.chatbotConfig || mergeChatbotConfig(null)), mode };
+  const error = await saveChatbotConfigToDB();
+  if (error) {
+    state.chatbotConfig = { ...state.chatbotConfig, mode: prev };
+    renderChatbotMode();
+    showToast('Could not update mode — try again', 'error');
+    return;
+  }
+  renderChatbotMode();
+  const m = CHATBOT_MODES.find(x => x.key === mode);
+  showToast(`Chatbot ${m ? m.label : mode} — ${m ? m.hint : ''}`);
 }
 
 // ============================================================
@@ -3818,6 +3955,9 @@ function bindGlobalEvents() {
 
   // Instagram comment automation (admin settings)
   document.getElementById('btn-add-comment-rule')?.addEventListener('click', addCommentRule);
+
+  // Chatbot config (admin settings)
+  document.getElementById('btn-save-chatbot-config')?.addEventListener('click', saveChatbotConfigFromForm);
 
   // Branch modal
   document.getElementById('btn-modal-cancel').addEventListener('click', () => {

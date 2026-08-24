@@ -30,16 +30,19 @@
 
 ## Status
 
-- **Now:** Step 3 — `chatbot_config` settings row + admin card (Step 2 done + live-verified)
-- **Done:** Steps 1–2
-- **Remaining:** Steps 3–20
-- **Blockers:** Gemini API key needed by Step 6's live check (unit part runs mocked without it)
-- **Publish budget:** 2/15 used (Step 2 ×2: initial publish + ig_post fix publish) · **13 left** — batch live checks, docs-only commits never publish
+- **Now:** Step 8 — Live turn: reply + persist (needs `GEMINI_API_KEY`)
+- **Done:** Steps 1–7
+- **Remaining:** Steps 8–20
+- **Blockers:** Gemini API key — needed by Step 6's one live validation call (unit part done mocked) and Step 8's live turn
+- **Publish budget:** 2/15 used (Step 2 ×2: initial publish + ig_post fix publish) · **13 left** — batch live checks, docs-only commits never publish. **Steps 3–7 publish batch pending** (browser Settings round-trip + webhook-redelivery replay).
 
 ## Log (append one line per completed step — date · step · what/why/learned)
 
 - 2026-08-24 · Step 1 · §4 schema applied via SQL editor + verified over REST (all cols/tables live, old rows carry defaults, existing reads fine). Deviation: plan's `bigint lead_id` → **uuid** (`leads.id` is UUID). Found + fixed pre-existing drift: live `leads` has `email`/`assigned_to`, lacks `service`/`notes`/`updated_at` the schema file claimed — nothing in this repo's code touches the dead columns (grep-verified), so no breakage.
 - 2026-08-24 · Step 2 · attachments labeled instead of dropped, unit + live verified (share → `🔗 shared post: <caption>`, photo → `📷 image` on test IG). **Live finding:** shared posts arrive as `ig_post` (legacy `share` type removed ~Feb 2026 — brainstorm doc was stale); payload carries `ig_post_media_id` directly, so plan §3.4's permalink→media-id map is unnecessary for shares. Real-image display in inbox deliberately NOT built (CDN url is short-lived; durable fetch+store arrives with Step 15 vision, which needs the bytes anyway).
+- 2026-08-24 · Step 3 · `chatbot_config` settings row + Settings card (mode off/shadow/live applies on click, model, 7 canned replies, caps, KB status line). Unit-verified incl. REST round-trip vs live Supabase (default row now exists, `mode:'off'`); browser eyeball deferred to the Step 3–7 publish batch. No SQL-editor step needed — defaults merge in code, row materialized on first save. Canned copy is placeholder pending client/clinician sign-off (Phase 1).
+- 2026-08-24 · Step 4 · KB seeded via `scripts/seed-kb.js` (dev-only): 28 service entries with corpus-mined prices (latest-quote-wins D22; attribution = service most recently asked about in thread context, skip staff shared-posts/canned/phones/round-number filter) + 10 FAQ entries in staff voice from the distill. **Learned:** the distill ₹-conflict tables mislead — they tag amounts by thread topic, so "microblading 12k last 2026-08" was actually 2025 offer prices; direct ask→answer threads show 25000@2026-03 is the latest real quote. Per-session vs package ambiguity remains (e.g. PRP "10k for 5 sessions") — KB keeps `price_last_quoted` + `quotes_seen` visible for the client sanity check.
+- 2026-08-24 · Steps 5–7 · Turn-pipeline core: `classifyInbound` (36 emergency / 30 medical / 12 requested patterns, EN+Hinglish corpus phrasings; risk-FAQ words safe/pain/PCOS deliberately excluded — those pass to layer 2 per D8), `callAssistant` (raw fetch, responseSchema structured decision, whole-KB injection D20, throws → llm_error D13), `botReply` wired after `routeLeadFromReply` (no-ops on bot_active=false / mode:'off'; safety tier → minimal handoff; never throws). **Learned (live-probed):** PostgREST `resolution=ignore-duplicates` CANNOT target the PARTIAL unique index on `external_message_id` — redeliveries surface as 23505, not a silent no-op; pre-existing code therefore logged an error and skipped routing on every redelivery. Now caught in `insertMessage` → returns `[]` → `processIncomingMessage` returns `inserted:false` → redelivery gets no bot turn (open #10 signal). Step 6's one live Gemini call still pending key; redelivery replay + Settings browser eyeball join the Step 3–7 publish batch.
 
 ---
 
@@ -58,29 +61,29 @@
 ### Step 3 — `chatbot_config` + Settings card
 - **Implement:** settings row + admin card (mirrors `comment_rules` card): **mode section off/shadow/live (D24)**, model, KB, locality map, canned replies (incl. kb_miss/llm_error hold copy, disclosure, refusal-ok), `offer_stale_days`, turn caps.
 - **Verify:** card saves/loads round-trip; mode renders; default `mode:'off'` (bot inert until Step 7 wires it anyway).
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-24 (unit: syntax + suite + REST round-trip vs live Supabase — upsert/read-back/flips, default row left in place `mode:'off'`; browser round-trip joins the Step 3–7 publish batch)
 
 ### Step 4 — KB seed from corpus (D22)
 - **Implement:** KB entries from the distill (staff voice, Hinglish) into `chatbot_config.kb`; **prices mined latest-quote-wins per service** (resolves distill ₹-conflict tables by message timestamp); services with no corpus price stay unpriced (HITL later, Step 13); `prices_verified_at` set.
 - **Verify:** script output review — spot-check 10 services against distill files; every priced service shows its latest quote, not an older one.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-24 (`scripts/seed-kb.js` — 28 service + 10 FAQ entries written, `prices_verified_at` set, mode untouched; spot-check: 6 exact vs distill, 3 "misses" turned out to be distill-table noise — miner's ask-context attribution is more precise than the distill's topic-tagged ₹ tables; PEEL COSMELAN unpriced → HITL; soft entries CHEMICAL PEEL/Q SWITCH 35000 single-quote, flagged for client sanity check)
 
 ## Turn pipeline (live on test app)
 
 ### Step 5 — `classifyInbound` keyword net
 - **Implement:** pure function, English + Hinglish net mined from real corpus phrasings (khujli, dawai, daag, ilaj, garbhvati…), emergency/medical/requested tiers (final plan §3.2, D7 layer 1).
 - **Verify:** unit assertions (final plan §8.1): medical/emergency/requested → handoff; FAQ ("price of laser") passes; emergency outranks medical.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-24 (36 emergency / 30 medical / 12 requested substring patterns; evaluation order = priority; §8.1 assertions green incl. "PCOS hai to laser safe?" passes and emergency-outranks-medical; risk-FAQ words deliberately excluded — layer 2 handles nuance, Step 16 replay tunes the net)
 
 ### Step 6 — Gemini client `callAssistant`
 - **Implement:** raw fetch `generateContent`, `x-goog-api-key` (`GEMINI_API_KEY`), full responseSchema — `{category, is_medical, reply, kb_covers, handoff, reason, qualification}` (final plan §3.5). Whole KB injected (D20).
 - **Verify:** unit test with mocked fetch (schema mapping, error throw); one **live** call with real key returns parseable structured JSON (this validates the model choice D1 early).
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-24 unit-mocked (request shape, key-in-header-not-URL, schema, KB injection, 429/malformed/no-key throws); **one live call pending `GEMINI_API_KEY`** — runs before Step 8's live turn
 
 ### Step 7 — `botReply` wiring + guards
 - **Implement:** hook into `handleWebhook` loop after `routeLeadFromReply`; no-op when `bot_active=false` / `mode:'off'`; everything try/catch (bot never drops/delays an inbound, D13); **dedup check before `botReply`** (redelivered event → no second reply).
 - **Verify:** unit no-op tests; **webhook-redelivery replay test** (open #10): same payload twice → zero bot replies in off mode / exactly one once live (Step 8).
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-24 (unit: no-ops, safety-before-Gemini, crash-swallow; live: `insertMessage` redelivery → `[]` → `inserted:false` verified against live Supabase — **learned:** PostgREST ignore-duplicates can't target the partial unique index, redelivery = 23505, now caught; the webhook replay itself joins the Step 3–7 publish batch)
 
 ### Step 8 — Live turn: reply + persist
 - **Implement:** send via `sendByPlatform`, store outgoing `is_bot=true`; persist category (every turn, D14) + qualification into `leads`/`bot_state`; disclosure prepend on first bot turn (D15); phone 10-digit code-normalized (D16); `bot_active=true` on new-lead creation when bot on (D6). Flip test deployment `mode:'live'`.
