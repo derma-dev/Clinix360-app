@@ -311,23 +311,49 @@ assert.equal(extractComments({}).length, 0);
 
 // ── Attachments: shares/images are labeled, not dropped (chatbot Step 2) ──
 {
-  // IG shared post — permalink in payload.url, no text
+  // IG shared post — current type `ig_post` (legacy `share` removed ~Feb 2026):
+  // caption as title, CDN url, and the media id directly (final plan §3.4).
   const { events } = extractEvents({
     object: 'instagram',
     entry: [{ messaging: [{
       sender:  { id: 'IGSID_1' },
       message: { mid: 'm_share', attachments: [{
-        type: 'share', payload: { url: 'https://www.instagram.com/reel/Cxyz/', share_type: 'media_share' },
+        type: 'ig_post',
+        payload: {
+          ig_post_media_id: '18139494541428835',
+          title: 'Full arms laser — special offer this month!',
+          url: 'https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18139494541428835',
+        },
       }] },
     }] }],
   });
   assert.equal(events.length, 1, 'a share must not be dropped');
-  assert.equal(events[0].messageText, '🔗 shared post: https://www.instagram.com/reel/Cxyz/');
-  assert.equal(events[0].attachment.type, 'share');
-  assert.equal(events[0].attachment.permalink, 'https://www.instagram.com/reel/Cxyz/');
-  assert.equal(events[0].attachment.shareType, 'media_share');
+  assert.equal(events[0].messageText, '🔗 shared post: Full arms laser — special offer this month!');
+  assert.equal(events[0].attachment.type, 'ig_post');
+  assert.equal(events[0].attachment.mediaId, '18139494541428835');
+  assert.equal(events[0].attachment.url, 'https://lookaside.fbsbx.com/ig_messaging_cdn/?asset_id=18139494541428835');
   assert.equal(events[0].messageId, 'm_share', 'share carries its mid for dedup');
   assert.equal(events[0].isEcho, false);
+
+  // ig_reel (shared reel) gets the same share label; no title → falls back to url
+  const reel = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{
+      sender:  { id: 'IGSID_1' },
+      message: { mid: 'm_reel', attachments: [{ type: 'ig_reel', payload: { ig_post_media_id: 'M2', url: 'https://cdn.example/x' } }] },
+    }] }],
+  });
+  assert.equal(reel.events[0].messageText, '🔗 shared post: https://cdn.example/x');
+
+  // Legacy `share` type (pre-Feb-2026 payloads) still labeled
+  const legacy = extractEvents({
+    object: 'instagram',
+    entry: [{ messaging: [{
+      sender:  { id: 'IGSID_1' },
+      message: { mid: 'm_leg', attachments: [{ type: 'share', payload: { url: 'https://instagram.com/p/OLD/' } }] },
+    }] }],
+  });
+  assert.equal(legacy.events[0].messageText, '🔗 shared post: https://instagram.com/p/OLD/');
 
   // IG image — often arrives URL-less; label needs no URL
   const img = extractEvents({
@@ -341,18 +367,18 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(img.events[0].messageText, '📷 image');
   assert.equal(img.events[0].attachment.type, 'image');
 
-  // Text + attachment together (captioned share): text wins, permalink still rides along
+  // Text + attachment together (captioned share): text wins, media id still rides along
   const both = extractEvents({
     object: 'instagram',
     entry: [{ messaging: [{
       sender:  { id: 'IGSID_1' },
       message: { mid: 'm_both', text: 'price of this?', attachments: [{
-        type: 'share', payload: { url: 'https://www.instagram.com/p/ABC/' },
+        type: 'ig_post', payload: { ig_post_media_id: '1813', title: 'Laser offer' },
       }] },
     }] }],
   });
   assert.equal(both.events[0].messageText, 'price of this?');
-  assert.equal(both.events[0].attachment.permalink, 'https://www.instagram.com/p/ABC/');
+  assert.equal(both.events[0].attachment.mediaId, '1813');
 
   // Unknown attachment type: still labeled, never dropped
   const odd = extractEvents({

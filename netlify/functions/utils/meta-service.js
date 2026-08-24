@@ -348,10 +348,15 @@ function platformFor(object) {
 
 // Non-text payloads → a display label so they reach the timeline instead of
 // being dropped at the no-content guard (chatbot Step 2; fixes inbox display —
-// shares/images used to vanish). IG shares carry the post permalink; image
-// attachments often arrive URL-less, so the label needs no URL.
+// shares/images used to vanish). Shared posts arrive as `ig_post` (the legacy
+// `share` type was removed ~Feb 2026) carrying the caption as `title`, a CDN
+// `url`, and — the gold for the offer-price flow — the post's media id directly.
 function attachmentLabel(type, payload) {
-  if (type === 'share') return `🔗 shared post: ${payload?.url || '(no link)'}`;
+  const p = payload || {};
+  if (type === 'ig_post' || type === 'ig_reel' || type === 'share') {
+    const text = (p.title || '').slice(0, 100) || p.url || '(no link)';
+    return `🔗 shared post: ${text}`;
+  }
   if (type === 'image') return '📷 image';
   return `📎 ${type || 'attachment'}`;
 }
@@ -381,9 +386,12 @@ function extractEvents(payload) {
         isEcho:      msg.message?.is_echo === true,
         // Set only when they TAPPED something: a postback button, or a quick reply.
         payload:     msg.postback?.payload ?? msg.message?.quick_reply?.payload,
-        // Set only for attachment messages — permalink feeds the share→offer-price
-        // flow (final plan §3.4); the label above is just the inbox display.
-        attachment:  att ? { type: att.type, permalink: att.payload?.url, shareType: att.payload?.share_type }
+        // Set only for attachment messages — mediaId/url/title feed the share→
+        // offer-price flow (final plan §3.4); the label above is just the display.
+        attachment:  att ? { type: att.type,
+                             mediaId: att.payload?.ig_post_media_id,
+                             title:   att.payload?.title,
+                             url:     att.payload?.url }
                          : undefined,
         shape:       'messaging',
       });
