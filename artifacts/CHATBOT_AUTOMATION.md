@@ -38,6 +38,15 @@
 > `--meta` pull with their token once their integration exists. `artifacts/data/` is
 > gitignored (customer PII).
 >
+> **Locked 2026-08-21 (follow-up — makes this spec's §4.4 "Low confidence / out-of-KB" trigger
+> concrete).** **Teach-the-bot loop:** new `kb_covers` field in the structured output →
+> `kb_miss` handoff (canned hold reply, summary card) → first staff reply on that thread
+> captured to a `kb_candidates` queue → one-click Approve/Edit/Discard joins the KB. Offer
+> `valid_until` parsing dropped (offers are ad-hoc ads; staleness = `last_seen` +
+> `offer_stale_days`). Fresh prices keyed to the exact Clinicea service names. Decisions
+> ledger: [CHATBOT_DESIGN_REVIEW_2026-08-20.md §5](CHATBOT_DESIGN_REVIEW_2026-08-20.md);
+> live tracker: [CHATBOT_CHECKLIST.md](../CHATBOT_CHECKLIST.md).
+>
 > **One-line summary:** an LLM-backed assistant that answers repetitive FAQs and pre-qualifies
 > leads on Instagram / Facebook / WhatsApp, so staff reply only to engaged, qualified
 > conversations. It plugs into the **one choke point every inbound message already flows

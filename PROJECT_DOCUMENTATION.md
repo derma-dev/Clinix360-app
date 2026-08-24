@@ -9,7 +9,7 @@
 >
 > Minimum update per change: the relevant section + a line in [§21 Change log](#21-change-log).
 >
-> Last updated: **2026-08-17** · Conversation-corpus export script (`scripts/export-conversations.js`, DB + `--meta` IG-history pull) — first step of the chatbot plan; corpus is dev test traffic only, see [§21](#21-change-log)
+> Last updated: **2026-08-24** · Chatbot schema migration (leads/lead_messages bot columns + `kb_candidates`/`bot_shadow_log` tables) applied live; bot code not built yet — see [§21](#21-change-log)
 
 ---
 
@@ -810,9 +810,11 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 | `cashup_feedback` | staff feedback | `feedback_text`, `submitted_by`, `is_read` |
 | `cashup_automations` | report automations | see [§13](#13-report-automations) |
 | `settings` | key/value app settings | `key` PK, `value` TEXT |
-| `leads` | one row per prospective customer | `branch_id`, `customer_name`, `phone`, `source`, `service`, `status`, `instagram_user_id`, `facebook_user_id`, `whatsapp_user_id` |
+| `leads` | one row per prospective customer | `branch_id`, `customer_name`, `phone`, `email`, `source`, `status`, `assigned_to`, `instagram_user_id`, `facebook_user_id`, `whatsapp_user_id`, `category`, `location`, `bot_active`, `bot_state` (last four: chatbot, 2026-08-24) |
 | `lead_notes` | notes on a lead | `lead_id`, `note` |
-| `lead_messages` | the chat timeline | `lead_id`, `direction`, `message`, `is_seen`, `seen_at`, `created_at` |
+| `lead_messages` | the chat timeline | `lead_id`, `branch_id`, `direction`, `message`, `is_seen`, `seen_at`, `external_message_id`, `created_at`, `is_bot` (chatbot, 2026-08-24) |
+| `kb_candidates` | teach-the-bot queue (chatbot) | `lead_id`, `question`, `answer`, `status` (pending/approved/discarded) |
+| `bot_shadow_log` | shadow-mode draft log (chatbot) | `lead_id`, `message_id`, `decision` JSONB, `model`, `latency_ms`, `error` |
 
 **`settings` keys in use:**
 
@@ -833,8 +835,8 @@ there is no migration framework in the repo.
 
 | Table | `SUPABASE_SCHEMA.sql` says | Live DB + code actually use |
 |---|---|---|
-| `leads` | `name` | **`customer_name`** |
 | `settings` | (no mention) | `integrations` key exists |
+| `leads` | (until 2026-08-24) `service`, `notes`, `updated_at` | **none of these exist live**; live instead has `email` + `assigned_to` (client UI update). File corrected 2026-08-24; types for the two unverified via REST — treated as TEXT. |
 
 The `lead_messages` drift is **fixed (2026-08-03)**: `SUPABASE_SCHEMA.sql` now
 documents `direction ('incoming'/'outgoing')`, `message`, `is_seen`, `seen_at` and
@@ -954,9 +956,11 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
   POST body on every webhook ([meta-webhook.js](netlify/functions/meta-webhook.js) →
   `verifyMetaSignature()`); a mismatch is rejected with 403. If `META_APP_SECRET` is unset,
   verification is SKIPPED with a loud warning (dev fallback) — set it in prod.
-  Base64-encoded bodies (`event.isBase64Encoded`) are decoded before HMAC, and a mismatch
-  logs whether the body was base64 — persistent failures after that point to a wrong/stale
-  `META_APP_SECRET`.
+  Base64-encoded bodies (`event.isBase64Encoded`) are decoded before HMAC. A mismatch logs a
+  `SIG-DEBUG` line (received vs expected digest prefix, body length, content-type — never body
+  content) to distinguish wrong secret / mangled body / missing header. **Note:** for Instagram
+  API with Instagram Login, `META_APP_SECRET` must be the **Instagram app secret**, not the
+  parent Meta app secret.
 - **Send endpoints are now auth-gated (2026-08-13).** `meta-send`, `send-automation-report`
   and `send-automation-webhook` require either a browser `x-staff-pin` header (the logged-in
   admin/branch PIN) or a server `x-internal-secret` (`INTERNAL_FUNCTION_SECRET`, used by the
@@ -993,6 +997,9 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-24 | — | **Chatbot schema migration (build Step 1, plan §4 — bot code not built yet, everything inert).** Applied by hand in the Supabase SQL editor (project convention, [§17](#17-database-schema)): `leads` +`category`/`location`/`bot_active` (default false)/`bot_state` JSONB; `lead_messages` +`is_bot` (default false); new tables `kb_candidates` (teach-the-bot queue, D17) and `bot_shadow_log` (shadow-mode drafts, D19), RLS off per project convention. All additive + idempotent; verified via REST (new columns/tables live, old rows carry defaults, existing reads unaffected). One deviation from the plan: `lead_id` FKs are **uuid**, not the plan's bigint — `leads.id` is UUID. Also fixed a `leads` drift found during verify: live has `email`/`assigned_to`, lacked `service`/`notes`/`updated_at` the SQL file claimed (§17 drift table). Design: [artifacts/CHATBOT_FINAL_PLAN_2026-08-24.md](artifacts/CHATBOT_FINAL_PLAN_2026-08-24.md); tracker: [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md). |
+| 2026-08-21 | — | **Teach-the-bot loop designed (chatbot Phase 3 scope) + pricing source locked.** Client-requested feature: when the bot can't answer, it asks the client, and the staff reply becomes KB for future asks. Locked (3 decisions, all one-click-approve/badge+email/canned-hold): `kb_covers` field in the Gemini structured output — the whole KB sits in the prompt, so "does the KB answer this?" is an open-book check; `false` → `kb_miss` handoff (canned hold reply reusing #11 copy, `bot_active=false`, summary card "Bot didn't know") → first staff reply on that thread captured to a `kb_candidates` queue → dashboard "Teach the bot" Approve/Edit/Discard → approved entries join `chatbot_config.kb` tagged `learned:<YYYY-MM>`. Approval-first because the KB is whole-injected every turn — an auto-learned negotiated price would repeat to everyone (price = #1 intent). `kb_miss` alert = dashboard badge + email, sharing the open #12 emergency-alert mechanism. Also: fresh service prices requested from the client keyed to [Clinicea_Service_Names.md](Clinicea_Service_Names.md) (canonical KB service keys, overrides corpus history; distill ₹-conflict tables demote to sanity check); offer validity is unknowable (ad-hoc ads) → open #4 closed **won't do**, offer cache drops `valid_until` for `last_seen` + `offer_stale_days` (default 30) staleness rule at quote time. Tracked in [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md) Phase 3. |
+| 2026-08-21 | — | **IG data-export corpus extractor (chatbot Phase 1 unblocked).** New dev-only [scripts/extract-ig-export.js](scripts/extract-ig-export.js): parses the client's Instagram "Download your information" export (`inbox/` — 2755 folders, 2015 with `message_1.json`, history to 2026-08-18) into `artifacts/data/ig_export_history.jsonl` in the `ig_history.jsonl` convention (oldest-first; `dir in/out` via `sender_name === "Derma skin and hair solutions"`). Shared-post captions kept as `[shared post: …]` text, the single saved greeting flagged `canned:true`, photos/calls dropped, cp1252→UTF-8 mojibake repair + fatal-decode assert on output (₹/emoji come out mangled from Meta otherwise). `inbox/` added to `.gitignore` (customer PII). Session findings + locked decisions: [artifacts/CHATBOT_CORPUS_EXPORT_SESSION_2026-08-21.md](artifacts/CHATBOT_CORPUS_EXPORT_SESSION_2026-08-21.md). **Distill pass:** dev-only [scripts/distill-corpus.js](scripts/distill-corpus.js) clusters the corpus into 17 topic review files in `artifacts/data/distill/` (customer phrasings, staff answers with dates, ₹-conflict tables, `offers.md`, `00_INDEX.md` coverage index; 57% substantive coverage via Hinglish keyword net). Found: a second canned template (641 canned total), staff quote prices as bare digits, price = #1 intent (580 threads), medical-condition questions ≈ absent in 3 y of DMs. |
 | 2026-08-17 | — | **Conversation-corpus export (chatbot Phase 1 prep).** New dev-only [scripts/export-conversations.js](scripts/export-conversations.js): default mode dumps `leads`+`lead_messages` to `artifacts/data/conversations.jsonl` (11 convos / 97 msgs); `--meta` pulls the **full IG DM history** from Meta via `GET /{IG_ID}/conversations` + per-thread `messages` paging → `artifacts/data/ig_history.jsonl` (5 threads / 85 msgs, incl. one pre-DB thread) — confirms the Instagram-Login flavour *can* read history. Finding: **all of it is dev test traffic**; the real corpus must come from the client's IG account (same pull, their token). `artifacts/data/` gitignored (customer PII). Client's clarified bot priorities + session plan: [artifacts/CHATBOT_BRAINSTORM_2026-08-17.md](artifacts/CHATBOT_BRAINSTORM_2026-08-17.md); recorded in [artifacts/CHATBOT_AUTOMATION.md](artifacts/CHATBOT_AUTOMATION.md) too. |
 | 2026-08-13 | — | **Security & correctness hardening (7 issues).** **(1) Webhook signature verification** — `verifyMetaSignature()` HMAC-checks `X-Hub-Signature-256` with `META_APP_SECRET` on every POST ([meta-webhook.js](netlify/functions/meta-webhook.js)); 403 on mismatch; GET verify-token compare now constant-time. **(2) Send endpoints auth-gated** — `meta-send`, `send-automation-report`, `send-automation-webhook` require `x-staff-pin` (browser, the logged-in PIN) or `x-internal-secret` (`INTERNAL_FUNCTION_SECRET`, the cron); new `authorizeRequest()` in [meta-service.js](netlify/functions/utils/meta-service.js); `check-automations` sends the secret. **(4) Inbound idempotency** — new `lead_messages.external_message_id` (UNIQUE, partial index) + `insertMessage` uses PostgREST `resolution=ignore-duplicates`, so Meta redeliveries no longer duplicate timeline rows; `extractEvents` now carries `messageId` (mid/wamid). **(5) Inbound realtime dedup** — message bubbles carry `data-msg-id`; the realtime appender skips a row already painted by the convo-load SELECT (closes the inbound side of the dup class `dddb8ce` fixed for outbound). **(9)** `esc()` now escapes `'`; branch Edit/Delete `onclick` JS-escape names (`Women's`/`O'Brien` no longer break the buttons). **(10)** `loadLeadMessages` re-checks `_activeLeadId` after the await — opening two convos quickly no longer paints the wrong thread. **(22)** Schema drift — `SUPABASE_SCHEMA.sql` `leads.name` → `customer_name` (matches code); legacy `supabase-schema.sql` marked DEPRECATED. Tests added for signature verification + message-id threading. New env var: `INTERNAL_FUNCTION_SECRET`. RLS/anon-key hardening (#3 in the audit) deliberately deferred — it needs Supabase Auth / service_role and would touch the client PIN model. |
 | 2026-08-03 | — | **Lead names: show the person's name, not their Instagram handle.** `buildDisplayName` ([meta-service.js](netlify/functions/utils/meta-service.js)) now returns just the real `name` ("Gaurav Soni") and drops the appended `(@username)`; the bare username is a fallback only when no name resolves. `processIncomingMessage` now tries the profile fetch *before* the passed `profileName`, so IG **comment** leads (whose webhook carries only a username) resolve a real name from the messaging IGSID instead of being stored as `@username`. `processComment` passes the bare username (no `@`). Client-side `leadDisplayName()` ([app.js](app.js)) strips any trailing ` (@handle)` at render — branch card, branch chat header, admin table, admin chat — so existing leads stored as `Name (@user)` also show just the name, with no DB backfill. |
@@ -1085,7 +1092,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
     **Gated on Instagram going live first** — FB inherits IG's answer to the two open button/postback
     assumptions. Procedure: [FACEBOOK_COMMENT_AUTOMATION.md §12](FACEBOOK_COMMENT_AUTOMATION.md).
     Also still needs the client's keyword list/DM copy before it can go live.
-12. **Chatbot automation — RESEARCH, not started.** An LLM assistant that deflects repetitive
+12. **Chatbot automation — IN PROGRESS (Phase 1 of the [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md) pipeline).** Corpus extract + distill are **done** (2026-08-21 — client's IG data export parsed into 17 topic review files); next: clinician review of `artifacts/data/distill/`, then KB assembly, then the build per the locked plan. An LLM assistant that deflects repetitive
     FAQs and pre-qualifies leads on Instagram / Facebook / WhatsApp, so staff reply only to
     engaged, qualified conversations and can focus on treatment. Plugs into the existing
     `processIncomingMessage` → `routeLeadFromReply` choke point and reuses the per-platform
@@ -1110,6 +1117,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 | [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md) | Comment → public reply → auto-DM that asks the branch question → routing + 24 h window. Build-vs-buy, Meta API mechanics, full implementation spec. Built, not yet switched on. |
 | [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md) | The Facebook counterpart, on shared `comment_rules`. FB `feed` webhook, `/messages` `recipient:{comment_id}` (PSID), `/comments` public reply, Page permissions. Built, not yet switched on; gated on IG going live. |
 | [artifacts/CHATBOT_AUTOMATION.md](artifacts/CHATBOT_AUTOMATION.md) | Chatbot — research + impl spec. LLM assistant that deflects FAQs and pre-qualifies leads, plugging into the existing message choke point. Hybrid model (constrained LLM + KB + guardrails + classifier-first medical handoff), minimal schema, build-vs-buy. Research, not started; gated on inbox stability + client decisions. |
+| **[CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md)** | **Chatbot — live implementation tracker.** Phase-by-phase checkboxes (corpus → review → KB → build → shadow → go-live); kept current as steps complete. Start here for "where are we". |
 | [artifacts/CHATBOT_BRAINSTORM_2026-08-17.md](artifacts/CHATBOT_BRAINSTORM_2026-08-17.md) | Chatbot planning session — the client's clarified priorities (IG bot first: FAQ + qualification + soft booking + locality→branch), the corpus-extraction findings (all test traffic; real history must come from the client's IG account via the `--meta` pull), and the resulting build order. |
 | [WHATSAPP_SETUP_RUNBOOK.md](WHATSAPP_SETUP_RUNBOOK.md) | Click-by-click Meta setup, test flow, client-handover replay, ranked gotchas |
 | [NETLIFY_CREDITS_WORKAROUND.md](NETLIFY_CREDITS_WORKAROUND.md) | Deploying/testing when production deploys are credit-blocked |

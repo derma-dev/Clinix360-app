@@ -1,5 +1,5 @@
 -- ============================================================
--- Clinix360 Cashup — CURRENT Supabase schema (as of 11 Jun 2026)
+-- Clinix360 Cashup — CURRENT Supabase schema (as of 24 Aug 2026)
 -- Project ref: plxhbtsncfkuvnywstgn  (https://plxhbtsncfkuvnywstgn.supabase.co)
 -- This reflects the LIVE database including all migrations since launch.
 -- (The original supabase-schema.sql is the day-1 version and is now out of date.)
@@ -204,6 +204,43 @@ CREATE UNIQUE INDEX IF NOT EXISTS lead_messages_external_message_id_key
 -- publication so the dashboard's Postgres-Changes channels can push new messages
 -- without a manual refresh. See artifacts/REALTIME_INBOX.md.
 
+-- ============================================================
+-- Chatbot (Instagram DM assistant) — additive migration, final plan §4
+-- (artifacts/CHATBOT_FINAL_PLAN_2026-08-24.md). Applied 24 Aug 2026.
+-- NOTE: the plan drafted lead_id as bigint; leads.id is UUID, so the
+-- foreign keys here use uuid instead (bigint references leads(id) errors).
+-- ============================================================
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS category   TEXT;                 -- null until classified
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS location   TEXT DEFAULT '';
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS bot_active BOOLEAN DEFAULT FALSE; -- true on new-lead creation when bot on (D6)
+ALTER TABLE leads ADD COLUMN IF NOT EXISTS bot_state  JSONB;                -- qualification, booking outcome, handoff_summary
+ALTER TABLE lead_messages ADD COLUMN IF NOT EXISTS is_bot BOOLEAN DEFAULT FALSE;
+
+-- Teach-the-bot queue (D17): kb_miss handoff → first staff reply captured here
+-- → dashboard Approve / Edit+Approve / Discard → approved joins chatbot_config.kb.
+CREATE TABLE IF NOT EXISTS kb_candidates (
+  id          bigint generated always as identity primary key,
+  lead_id     uuid REFERENCES leads(id),
+  question    text,
+  answer      text,                                -- first staff reply on a kb_miss thread
+  status      text DEFAULT 'pending',               -- pending | approved | discarded
+  created_at  timestamptz DEFAULT now()
+);
+
+-- Shadow mode (D19): one row per drafted turn; never sent, never mutates leads.
+-- Droppable after go-live.
+CREATE TABLE IF NOT EXISTS bot_shadow_log (
+  id         bigint generated always as identity primary key,
+  lead_id    uuid REFERENCES leads(id),
+  message_id text,        -- external_message_id of the inbound it drafted against
+  platform   text,
+  decision   jsonb,       -- full structured output + offer fields
+  model      text,
+  latency_ms int,
+  error      text,
+  created_at timestamptz DEFAULT now()
+);
+
 -- RLS disabled everywhere (PIN-based app security):
 ALTER TABLE branches            DISABLE ROW LEVEL SECURITY;
 ALTER TABLE cashup_entries      DISABLE ROW LEVEL SECURITY;
@@ -217,3 +254,5 @@ ALTER TABLE settings            DISABLE ROW LEVEL SECURITY;
 ALTER TABLE leads               DISABLE ROW LEVEL SECURITY;
 ALTER TABLE lead_notes          DISABLE ROW LEVEL SECURITY;
 ALTER TABLE lead_messages       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE kb_candidates       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE bot_shadow_log      DISABLE ROW LEVEL SECURITY;
