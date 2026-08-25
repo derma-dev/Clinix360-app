@@ -30,15 +30,20 @@
 
 ## Status
 
-- **Now:** Step 13 — Teach-the-bot loop (D17 + D22 price HITL)
-- **Done:** Steps 1–12
-- **Remaining:** Steps 13–20
-- **Blockers:** Gemini API key — needed by Step 6's one live validation call (unit part done mocked) and the Steps 8–12 live batch. Set it in Netlify env **before** the next publish.
-- **Publish budget:** 2/15 used · **13 left** — batch live checks, docs-only commits never publish.
-  **Steps 3–12 publish batch pending** (ONE publish covers all): browser Settings round-trip, webhook-redelivery replay, live Gemini call, live DM turn + DB rows, medical handoff summary card, llm_error canned path, takeover stickiness + button, non-lead filing + chips, shadow log row.
+- **Now:** Steps 13–15 code done (unit-verified) — **live verify batch pending one publish**, then Step 16
+- **Done:** Steps 1–12 (code + live — user confirmed the 8–12 batch on the published deploy 2026-08-25) · Steps 13–15 (code)
+- **Remaining:** 13–15 live batch → Steps 16–20
+- **Blockers:** none
+- **Publish budget:** 3/15 used · **12 left** — batch live checks, docs-only commits never publish.
+  **Live batch checklist for 13–15 (user, against the next publish):** DM an unknown question (expect hold reply + "Bot didn't know" card + ❓ badge) → staff reply from dashboard → candidate appears in Settings → Teach the Bot → Approve → re-ask (bot answers) · share an offer post + "price?" (expect offer price "as in the post") → set offer_stale_days=0 → same share again (KB range) → set back to 30 · send a service screenshot (expect service identified + KB price) · one `settings.offer_cache` row + `kb_candidates` row checkable from local REST.
 
 ## Log (append one line per completed step — date · step · what/why/learned)
 
+- 2026-08-25 · Steps 13–15 · **13 (teach-the-bot, D17/D22):** kb_miss summary now names the question + `bot_state.kb_miss_question` stashed; meta-send captures the FIRST staff reply on a kb_miss thread → one `kb_candidates` row (exactly-once flag on bot_state, best-effort, never 502s a send); admin Settings → **Teach the Bot** card (Approve/Edit+Approve/Discard) — approval does a freshest-config read-modify-write, then folds the Q/A into the KB: a price answer on a word-matched service updates that entry (newest quote = source of truth, D22), else a learned FAQ entry tagged `learned:<YYYY-MM>`; ❓/🔴 badges on branch lead cards (D18 dashboard half — email is Step 18). **14 (share→offer, D9/D10):** share caption (payload carries `ig_post_media_id` + title — the plan's permalink map stayed unnecessary) → one structured `parseOfferCaption` call matched to KB service keys → cached in `settings.offer_cache` keyed by media id (capped 50, one parse per post, cross-lead); ladder enforced in CODE at quote time (`isOfferFresh` ms-compare vs `offer_stale_days`, 0 = instantly stale) → prompt gets a LIVE OFFER (quotable, overrides KB) or STALE OFFER (never quote) block; the thread's latest offer rides in `bot_state.last_offer` so follow-up "price?" turns see it; shadow logs the offer in the decision row but writes nothing. **15 (vision):** IG image DM with CDN url → bytes fetched → `inline_data` on the turn's user content + KB-service-match addendum; fetch/parse failures degrade to a plain text turn (WA images carry no url — IG-first, D5). **Learned:** asserting on prompt-marker strings broke because the system prompt itself now names the LIVE/STALE blocks — tests key on the ladder block's distinctive phrases instead. Unit suite green (offer ladder a–h, capture, vision, freshness).
+
+- 2026-08-25 · Steps 8–12 live · user ran the whole live batch against the published deploy and confirmed all checks (live turn/disclosure, medical handoff card, takeover stickiness, non-lead filing + chips, shadow row). Steps 1–12 now fully live-verified.
+
+- 2026-08-25 · Publish 3/15 + Step 6 live · Steps 8–12 committed (ff69688) and **published**; `GEMINI_API_KEY` set in Netlify + validated by the one live Gemini call (`scripts/live-gemini-check.js`): 1.4 s, parseable structured JSON, Hinglish reply, KB service key extracted. Now the live verify batch (Status block) before Step 13.
 - 2026-08-25 · Steps 8–12 · Turn pipeline completed. **8:** live turn — context = last-10 messages minus the just-inserted inbound (`processIncomingMessage` now returns its row), one Gemini call, send via existing per-platform senders, outgoing persisted `is_bot=true`, category+qualification persisted every turn (D14), disclosure code-prepended on the first bot *send* (D15), phone digit-normalized in code (D16), `bot_active=true` on new-lead creation when mode live/shadow (D6 — comment-automation leads get it too, deliberately: the bot continuing qualification after "which branch?" is the intended flow). **9:** `handoffToStaff` — safety tiers send NOTHING; kb_miss/llm_error → canned hold copy; model handoffs → model's closing reply; `handoff_summary` built in code (no 2nd LLM call), medical/emergency carry verbatim customer words; `bot_active=false`+`status:'qualified'`; failed courtesy send never aborts the handoff. is_medical (layer 2) overrides the model's reply. Dashboard: summary card replaces thread, raw collapsible, raw expanded for medical, 🤖 marker on bot bubbles. **10:** meta-send flips `bot_active=false` on every successful staff send (best-effort, never 502s a delivered message); 🤖⏯ Take-over button in branch + admin chat headers (visible only while bot on); comment automation DM does NOT flip (it's not staff). **11:** non-lead → one canned reply → `category` filed + bot off, no status change; category toggle (All/Leads/Collab/Sales/Misc — "Leads" includes pre-bot null-category rows) + colored tags on lead cards. **12:** shadow branch after the decision — exactly ONE `bot_shadow_log` row per turn (success / Gemini error / safety tier), zero sends, zero lead mutations; dedup already gates it via the fresh-insert check. **Learned:** test-mock ordering bug caught by the suite — the API returns history newest-first and `listRecentMessages` reverses in place; a mock that fed oldest-first silently swapped prompt roles. Unit suite green (full §8.1 set). Live checks all deferred to the single publish batch (needs `GEMINI_API_KEY` in Netlify env).
 
 - 2026-08-24 · Step 1 · §4 schema applied via SQL editor + verified over REST (all cols/tables live, old rows carry defaults, existing reads fine). Deviation: plan's `bigint lead_id` → **uuid** (`leads.id` is UUID). Found + fixed pre-existing drift: live `leads` has `email`/`assigned_to`, lacks `service`/`notes`/`updated_at` the schema file claimed — nothing in this repo's code touches the dead columns (grep-verified), so no breakage.
@@ -81,7 +86,7 @@
 ### Step 6 — Gemini client `callAssistant`
 - **Implement:** raw fetch `generateContent`, `x-goog-api-key` (`GEMINI_API_KEY`), full responseSchema — `{category, is_medical, reply, kb_covers, handoff, reason, qualification}` (final plan §3.5). Whole KB injected (D20).
 - **Verify:** unit test with mocked fetch (schema mapping, error throw); one **live** call with real key returns parseable structured JSON (this validates the model choice D1 early).
-- **Status:** ✅ done 2026-08-24 unit-mocked (request shape, key-in-header-not-URL, schema, KB injection, 429/malformed/no-key throws); **one live call pending `GEMINI_API_KEY`** — runs before Step 8's live turn
+- **Status:** ✅ done 2026-08-24 unit-mocked; **live call ✅ 2026-08-25** (`scripts/live-gemini-check.js` — 1.4 s, valid structured JSON, Hinglish reply, correct KB service key. Note: model returned `reason:'kb_miss'` with `kb_covers:true/handoff:false` — inconsistent combo, harmless while live path keys off handoff/category; prompt nudge queued for Step 16 tuning)
 
 ### Step 7 — `botReply` wiring + guards
 - **Implement:** hook into `handleWebhook` loop after `routeLeadFromReply`; no-op when `bot_active=false` / `mode:'off'`; everything try/catch (bot never drops/delays an inbound, D13); **dedup check before `botReply`** (redelivered event → no second reply).
@@ -116,17 +121,17 @@
 ### Step 13 — Teach-the-bot loop (D17 + D22 price HITL)
 - **Implement:** `kb_covers:false` → `kb_miss` handoff (canned hold reply, summary "Bot didn't know: \<q\>"); first staff reply on that thread → `kb_candidates` row; dashboard **Teach-the-bot** list (Approve / Edit+Approve / Discard) → approved joins `chatbot_config.kb` tagged `learned:<YYYY-MM>`; `kb_miss`/emergency badge (D18).
 - **Verify:** live: ask an unpriced/unknown question → hold reply → staff reply from dashboard → candidate appears → Approve → **re-ask the same question → bot answers from the learned entry**.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (summary line + `bot_state.kb_miss_question`; meta-send captures first staff reply → `kb_candidates`, exactly-once, best-effort; Teach the Bot card — approval folds price answers into the word-matched service entry (D22 newest-quote-wins) else a `learned:` FAQ; ❓ kb_miss / 🔴 emergency badges on branch lead cards. Live teach-loop check joins the next publish batch)
 
 ### Step 14 — Share→offer price (D9/D10)
 - **Implement:** permalink → media id map (one-time `GET /{IG_ID}/media`, refresh on miss) → caption → Gemini parse → cache `{service, offer_price, last_seen, source_caption}`; offer ladder at quote time: fresh offer → quote it; stale (`offer_stale_days`) → KB range; no offer → KB range; no match → "after consultation".
 - **Verify:** live: share an offer post + "price?" → offer price quoted ("as in the post"); set `offer_stale_days=0` → same share now returns KB range.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (**deviation:** permalink map unnecessary — payload carries `ig_post_media_id` + caption directly, Step 2 live finding). Cache = `settings.offer_cache` keyed by media id (cap 50, cross-lead, one parse per post); freshness computed in code (ms compare — `offer_stale_days:0` = instantly stale) → LIVE/STALE prompt block; follow-up turns read `bot_state.last_offer`; no-match/parse-fail/share-sans-caption → plain KB ladder. Live ladder check joins the next publish batch)
 
 ### Step 15 — Raw-image vision fallback
 - **Implement:** image DM → Gemini vision (`inline_data`) + KB service list → "which service is this?" → answer normally (fallback model `gemini-3.7-flash` if Lite flaky, D1).
 - **Verify:** live: send a screenshot of a service post → correct service identified, KB price answered.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (IG image with CDN url → bytes → `inline_data` + KB-match addendum on the user turn; fetch failure degrades to a plain text turn; WA images carry no url in the webhook → no vision there yet, IG-first D5. Model fallback = config `model` field, nothing to build. Live screenshot check joins the next publish batch)
 
 ### Step 16 — Corpus replay harness
 - **Implement:** `scripts/replay-shadow.js` (feed `ig_export_history.jsonl` threads through the real pipeline → `bot_shadow_log`) + `scripts/review-shadow.js` (sample + stats: category/reason/malformed/is_medical rates, latency p50/p95).

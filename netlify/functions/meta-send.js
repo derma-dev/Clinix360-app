@@ -8,7 +8,7 @@
 // the client never passes the access token or recipient id.
 // ============================================================
 
-const { sendInstagramMessage, sendFacebookMessage, sendWhatsAppMessage, createSupabaseClient, authorizeRequest } = require('./utils/meta-service');
+const { sendInstagramMessage, sendFacebookMessage, sendWhatsAppMessage, createSupabaseClient, authorizeRequest, maybeCaptureKbCandidate } = require('./utils/meta-service');
 
 exports.handler = async (event) => {
   const headers = {
@@ -89,6 +89,15 @@ exports.handler = async (event) => {
       await db.updateLead(leadId, { bot_active: false });
     } catch (e) {
       console.error('[meta-send] bot_active takeover flip failed (message was sent):', e.message);
+    }
+
+    // 4) D17 teach-the-bot (checklist Step 13): the FIRST staff reply on a
+    // kb_miss thread becomes a pending kb_candidates row for admin review.
+    // Same best-effort rule — the send already succeeded.
+    try {
+      await maybeCaptureKbCandidate(db, lead, message);
+    } catch (e) {
+      console.error('[meta-send] kb_candidates capture failed (message was sent):', e.message);
     }
 
     return { statusCode: 200, headers, body: JSON.stringify({ ok: true, message: rows[0] || null }) };

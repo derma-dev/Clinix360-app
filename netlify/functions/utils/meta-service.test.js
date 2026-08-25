@@ -15,6 +15,10 @@ const {
   botReply,
   sendByPlatform,
   normalizePhone,
+  createSupabaseClient,
+  maybeCaptureKbCandidate,
+  parseOfferCaption,
+  isOfferFresh,
 } = require('./meta-service');
 
 // ── idColumnFor: the silent-corruption guard ─────────────────
@@ -577,6 +581,41 @@ assert.equal(extractComments({}).length, 0);
     }
   }
 
+  // ── parseOfferCaption + isOfferFresh (D9/D10, Step 14) ──
+  {
+    process.env.GEMINI_API_KEY = 'test_key';
+    const KEYS = ['LHR FULL BODY P/S', 'HYDRA FACIAL P/S'];
+    const okFetch = parsed => async () => ({ ok: true, json: async () => ({
+      candidates: [{ content: { parts: [{ text: JSON.stringify(parsed) }] } }] }) });
+
+    global.fetch = okFetch({ service: 'LHR FULL BODY P/S', offer_price: 9999 });
+    let r = await parseOfferCaption({ caption: 'Full body laser special 9999!', serviceKeys: KEYS });
+    assert.equal(r.service, 'LHR FULL BODY P/S');
+    assert.equal(r.offer_price, 9999);
+
+    // service not in the key list / no price / "" service → null (no offer)
+    global.fetch = okFetch({ service: 'Not A Service', offer_price: 5000 });
+    assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
+    global.fetch = okFetch({ service: 'HYDRA FACIAL P/S', offer_price: 0 });
+    assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
+    global.fetch = okFetch({ service: '', offer_price: 5000 });
+    assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
+
+    // HTTP failure → throws (caller degrades to "no offer")
+    global.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: { message: 'quota' } }) });
+    await assert.rejects(() => parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), /429/);
+    delete process.env.GEMINI_API_KEY;
+
+    // freshness: ms compare, 0 days = instantly stale, absent = 30-day default
+    assert.equal(isOfferFresh(new Date().toISOString(), 30), true);
+    assert.equal(isOfferFresh(new Date().toISOString(), 0), false);
+    assert.equal(isOfferFresh(new Date(Date.now() - 5 * 864e5).toISOString(), 30), true);
+    assert.equal(isOfferFresh(new Date(Date.now() - 40 * 864e5).toISOString(), 30), false);
+    assert.equal(isOfferFresh(new Date().toISOString(), null), true);
+    assert.equal(isOfferFresh(null, 30), false);
+    assert.equal(isOfferFresh('garbage', 30), false);
+  }
+
   // ── normalizePhone (D16): digit-normalized in CODE, 10-digit IN mobile only ──
   assert.equal(normalizePhone('+91 98765 43210'), '9876543210');
   assert.equal(normalizePhone('09876543210'), '9876543210');
@@ -624,15 +663,38 @@ assert.equal(extractComments({}).length, 0);
     // One mock that routes every URL botReply can touch, recording each call
     // kind. `history` = rows listRecentMessages returns (newest-first from the
     // API; the client reverses — pass oldest-first like the real helper returns).
-    const botMock = ({ config, history = [], decision, geminiError, sendFails = false } = {}) => {
-      const calls = { sends: [], msgInserts: [], patches: [], shadowLogs: [], gemini: [], historyFetches: 0 };
+    // `offerCache` seeds settings.offer_cache; `offerParse` is what a caption
+    // parse returns ('error' → HTTP failure; null → no service match).
+    const botMock = ({ config, history = [], decision, geminiError, sendFails = false,
+                       offerCache = null, offerParse, imageFails = false } = {}) => {
+      const calls = { sends: [], msgInserts: [], patches: [], shadowLogs: [], gemini: [],
+                      historyFetches: 0, settingUpserts: [], offerCacheReads: 0, imageFetches: 0 };
       global.fetch = async (url, opts = {}) => {
         if (url.includes('settings?key=eq.chatbot_config'))
           return { ok: true, json: async () => [{ value: JSON.stringify(config) }] };
+        if (url.includes('settings?key=eq.offer_cache')) {
+          calls.offerCacheReads++;
+          return { ok: true, json: async () => offerCache == null ? [] : [{ value: JSON.stringify(offerCache) }] };
+        }
+        if (url.includes('/settings') && opts.method === 'POST') {         // offer cache upsert
+          calls.settingUpserts.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => [] };
+        }
         if (url.includes('generativelanguage.googleapis.com')) {
           calls.gemini.push({ url, opts });
           if (geminiError) return { ok: false, status: 500, json: async () => ({ error: { message: geminiError } }) };
+          const b = JSON.parse(opts.body);
+          const isOfferParse = (b.systemInstruction?.parts?.[0]?.text || '').includes('offer-post');
+          if (isOfferParse) {
+            if (offerParse === 'error') return { ok: false, status: 429, json: async () => ({ error: { message: 'quota' } }) };
+            return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(offerParse || { service: '', offer_price: 0 }) }] } }] }) };
+          }
           return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(decision) }] } }] }) };
+        }
+        if (url.includes('cdn.example')) {                                 // image DM bytes
+          calls.imageFetches++;
+          if (imageFails) return { ok: false, status: 403, json: async () => ({}) };
+          return { ok: true, headers: { get: () => 'image/png' }, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
         }
         if (url.includes('graph.instagram.com')) {              // the bot's send
           if (sendFails) return { ok: false, status: 400, json: async () => ({ error: { message: 'window closed' } }) };
@@ -809,7 +871,8 @@ assert.equal(extractComments({}).length, 0);
       assert.match(b.bot_state.handoff_summary, /9876543210/);
     }
 
-    // 9) kb_miss → canned hold copy + handoff (D13/D17 wiring; teach-loop is Step 13)
+    // 9) kb_miss → canned hold copy + handoff; the missed question rides in the
+    //    summary + bot_state for the teach-the-bot capture (D13/D17, Step 13)
     {
       const calls = botMock({
         config: CFG('live'),
@@ -820,6 +883,11 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.sends[0].message.text,
         'Hi! I am the clinic’s assistant 🤖\n\nLet me check with our team.',
         'first bot turn: disclosure + canned hold copy (D13/D15)');
+      const b = calls.patches[0].body;
+      assert.match(b.bot_state.handoff_summary, /Bot didn't know: "price of laser"/,
+        'kb_miss summary names the question (D17)');
+      assert.equal(b.bot_state.kb_miss_question, 'price of laser',
+        'question stashed for the meta-send capture');
     }
 
     // 10) is_medical (D7 layer 2): the model's own flag overrides its reply
@@ -890,7 +958,155 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.patches.length, 0, 'a shadow safety hit must not flip the real lead');
     }
 
-    // 14) a mid-turn crash is swallowed — returns {error}, never throws (D13)
+    // 14) teach-the-bot capture (D17, Step 13): FIRST staff reply on a kb_miss
+    //     thread → one kb_candidates row + exactly-once flag on bot_state
+    {
+      const calls = [];
+      global.fetch = async (url, opts = {}) => {
+        calls.push({ url, method: opts.method, body: opts.body ? JSON.parse(opts.body) : null });
+        return { ok: true, json: async () => (url.includes('/kb_candidates') ? [{ id: 1 }] : []) };
+      };
+      const db   = createSupabaseClient();
+      const lead = { id: 'L1', bot_state: { handoff_reason: 'kb_miss', kb_miss_question: 'cosmelan peel ka price?' } };
+      assert.equal(await maybeCaptureKbCandidate(db, lead, 'It is 8000 per session 🙏'), true);
+      const post = calls.find(c => c.url.includes('/kb_candidates'));
+      assert.equal(post.body.lead_id, 'L1');
+      assert.equal(post.body.question, 'cosmelan peel ka price?');
+      assert.equal(post.body.answer, 'It is 8000 per session 🙏');
+      const patch = calls.find(c => c.url.includes('/leads?id=eq.') && c.method === 'PATCH');
+      assert.equal(patch.body.bot_state.kb_candidate_captured, true, 'exactly-once flag set');
+
+      // already captured / not a kb_miss thread → no-op
+      assert.equal(await maybeCaptureKbCandidate(db, { id: 'L1',
+        bot_state: { handoff_reason: 'kb_miss', kb_miss_question: 'q', kb_candidate_captured: true } }, 'again'), false);
+      assert.equal(await maybeCaptureKbCandidate(db, { id: 'L1', bot_state: { handoff_reason: 'medical' } }, 'x'), false);
+      assert.equal(calls.filter(c => c.url.includes('/kb_candidates')).length, 1, 'only ONE candidate per thread');
+    }
+
+    // 15) offer ladder (D9/D10, Step 14): fresh → LIVE OFFER block; stale →
+    //     STALE block; cache miss → one parse, cached, remembered on bot_state
+    {
+      const KB   = { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 }] };
+      const now  = new Date().toISOString();
+      const CASH = { service: 'LHR FULL BODY P/S', offer_price: 9999, last_seen: now, source_caption: 'Full body laser special!' };
+      const shareEv = (mediaId = 'M1', title = 'Full body laser special 9999!') =>
+        ({ ...EV, messageText: '🔗 shared post: ' + title, attachment: { type: 'ig_post', mediaId, title } });
+
+      // a) cache HIT + fresh → LIVE OFFER in the prompt, no parse call, no write
+      {
+        const calls = botMock({ config: CFG('live', { offer_stale_days: 30, kb: KB }),
+                                offerCache: { offers: { M1: CASH } }, decision: REPLY_DECISION });
+        const r = await botReply(LEAD, shareEv(), 'instagram');
+        assert.deepEqual(r, { sent: true });
+        assert.equal(calls.gemini.length, 1, 'cache hit must not re-parse the post');
+        const sys = JSON.parse(calls.gemini[0].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
+        assert.ok(sys.includes('looking at our post offering LHR FULL BODY P/S at ₹9999'),
+          'fresh offer is marked quotable');
+        assert.ok(!sys.includes('sighting is older'));
+        assert.equal(calls.settingUpserts.length, 0);
+        assert.equal(calls.patches[0].body.bot_state.last_offer.offer_price, 9999,
+          'the thread remembers its latest offer');
+      }
+
+      // b) same share, offer_stale_days=0 → STALE block (KB ladder instead)
+      {
+        const calls = botMock({ config: CFG('live', { offer_stale_days: 0, kb: KB }),
+                                offerCache: { offers: { M1: CASH } }, decision: REPLY_DECISION });
+        await botReply(LEAD, shareEv(), 'instagram');
+        const sys = JSON.parse(calls.gemini[0].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
+        assert.ok(sys.includes('sighting is older than the offer window'),
+          'stale_days=0 makes any sighting stale');
+        assert.ok(!sys.includes('looking at our post offering'));
+      }
+
+      // c) cache MISS → one caption parse, offer cached cross-lead, last_offer set
+      {
+        const calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION,
+                                offerParse: { service: 'LHR FULL BODY P/S', offer_price: 9999 } });
+        await botReply(LEAD, shareEv('NEW1'), 'instagram');
+        assert.equal(calls.gemini.length, 2, 'parse call + assistant call');
+        const sys = JSON.parse(calls.gemini[1].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
+        assert.ok(sys.includes('looking at our post offering LHR FULL BODY P/S at ₹9999'));
+        assert.equal(calls.settingUpserts.length, 1);
+        assert.equal(calls.settingUpserts[0].key, 'offer_cache');
+        const cached = JSON.parse(calls.settingUpserts[0].value).offers.NEW1;
+        assert.equal(cached.offer_price, 9999);
+        assert.equal(cached.source_caption, 'Full body laser special 9999!');
+        assert.equal(calls.patches[0].body.bot_state.last_offer.service, 'LHR FULL BODY P/S');
+      }
+
+      // d) parse finds no KB service → no offer at all, turn still replies
+      {
+        const calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION,
+                                offerParse: null });
+        const r = await botReply(LEAD, shareEv('M2', 'Mystery treatment 4999'), 'instagram');
+        assert.deepEqual(r, { sent: true });
+        const sys = JSON.parse(calls.gemini[1].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
+        assert.ok(!sys.includes('looking at our post offering') && !sys.includes('sighting is older'));
+        assert.equal(calls.settingUpserts.length, 0);
+      }
+
+      // e) parse API failure → degrade to a plain KB turn (never kills the reply)
+      {
+        const calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION,
+                                offerParse: 'error' });
+        assert.deepEqual(await botReply(LEAD, shareEv('M3'), 'instagram'), { sent: true });
+        const sys = JSON.parse(calls.gemini[1].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
+        assert.ok(!sys.includes('looking at our post offering') && !sys.includes('sighting is older'));
+      }
+
+      // f) follow-up "price?" (no attachment) → last_offer from bot_state
+      {
+        const calls = botMock({ config: CFG('live', { offer_stale_days: 30, kb: KB }), decision: REPLY_DECISION });
+        await botReply({ ...LEAD, bot_state: { last_offer: CASH } }, EV, 'instagram');
+        const sys = JSON.parse(calls.gemini[0].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
+        assert.ok(sys.includes('looking at our post offering'), 'a remembered offer feeds follow-up turns');
+        assert.equal(calls.offerCacheReads, 0, 'no cache read when there is no share');
+      }
+
+      // g) share with no caption → no offer resolution at all
+      {
+        const calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION });
+        await botReply(LEAD, shareEv('M4', ''), 'instagram');
+        assert.equal(calls.gemini.length, 1);
+        assert.equal(calls.offerCacheReads, 0);
+      }
+
+      // h) shadow logs the resolved offer but writes nothing (D19)
+      {
+        const calls = botMock({ config: CFG('shadow', { offer_stale_days: 30, kb: KB }),
+                                offerCache: { offers: { M1: CASH } }, decision: REPLY_DECISION });
+        assert.deepEqual(await botReply(LEAD, shareEv(), 'instagram'), { shadow: true });
+        assert.equal(calls.shadowLogs[0].decision.offer.offer_price, 9999, 'offer rides in the shadow row');
+        assert.equal(calls.settingUpserts.length, 0);
+        assert.equal(calls.patches.length, 0);
+      }
+    }
+
+    // 16) raw-image vision fallback (Step 15): image DM → inline_data on the
+    //     turn's user content; a fetch failure degrades to a plain text turn
+    {
+      const imgEv = { ...EV, messageText: '📷 image', attachment: { type: 'image', url: 'https://cdn.example/pic.png' } };
+      {
+        const calls = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+        assert.deepEqual(await botReply(LEAD, imgEv, 'instagram'), { sent: true });
+        assert.equal(calls.imageFetches, 1);
+        const last = JSON.parse(calls.gemini[0].opts.body).contents.at(-1);
+        assert.equal(last.parts.length, 2, 'image rides as a second part');
+        assert.equal(last.parts[1].inline_data.mime_type, 'image/png');
+        assert.equal(last.parts[1].inline_data.data, Buffer.from(new Uint8Array([1, 2, 3])).toString('base64'));
+        assert.ok(last.parts[0].text.includes('attached image'));
+      }
+      {
+        const calls = botMock({ config: CFG('live'), decision: REPLY_DECISION, imageFails: true });
+        assert.deepEqual(await botReply(LEAD, imgEv, 'instagram'), { sent: true },
+          'a dead CDN link must not kill the turn');
+        const last = JSON.parse(calls.gemini[0].opts.body).contents.at(-1);
+        assert.equal(last.parts.length, 1, 'no inline_data when the bytes could not be fetched');
+      }
+    }
+
+    // 17) a mid-turn crash is swallowed — returns {error}, never throws (D13)
     {
       global.fetch = async (url) => url.includes('settings')
         ? { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live' }) }] }

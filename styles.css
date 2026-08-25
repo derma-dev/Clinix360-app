@@ -1870,6 +1870,9 @@ html, body {
 .lead-cat-tag.cat-collaboration { background: #e9e5f9; color: #5b4fa8; }
 .lead-cat-tag.cat-sales_pitch  { background: #fdebd9; color: #a05a1f; }
 .lead-cat-tag.cat-misc         { background: #ececec; color: #6b6b6b; }
+/* Handoff alert badges (D18) — emergency + kb_miss need eyes now */
+.lead-cat-tag.cat-emergency    { background: #fdecea; color: #a3322b; }
+.lead-cat-tag.cat-kb_miss      { background: #fff3d6; color: #8a5a00; }
 
 /* Handoff summary card — replaces the raw thread on bot handoff (D11) */
 .bot-handoff-card {

@@ -173,7 +173,7 @@ function switchAdminTab(tab) {
   if (tab === 'leads') loadAdminLeads();
   if (tab === 'reports') initReportsTab();
   if (tab === 'notifications') loadAdminAlerts();
-  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); loadCommentRules(); loadChatbotConfig(); }
+  if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); loadCommentRules(); loadChatbotConfig(); loadKbCandidates(); }
   setRoute('#/admin/' + tab);
 }
 
@@ -285,6 +285,12 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
     const cat = lead.category && lead.category !== 'lead'
       ? `<span class="lead-cat-tag cat-${esc(lead.category)}">${esc(CATEGORY_LABELS[lead.category] || lead.category)}</span>`
       : '';
+    // Handoff alert badge (D18, Step 13 — the dashboard half; email is Step 18):
+    // emergency and kb_miss handoffs are the two reasons staff must look now.
+    const hr   = lead.bot_state?.handoff_reason;
+    const alertTag = hr === 'emergency' ? '<span class="lead-cat-tag cat-emergency">🔴 Emergency</span>'
+                   : hr === 'kb_miss'    ? '<span class="lead-cat-tag cat-kb_miss">❓ Bot didn’t know</span>'
+                   : '';
 
     return `
     <div class="lead-card ${count > 0 ? 'has-unread' : ''}" data-lead-id="${esc(lead.id)}" onclick="openLeadDetail('${esc(lead.id)}')">
@@ -293,6 +299,7 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
         <span class="conv-platform-icon sm ${esc(src)}">${sourceBadgeInner(src)}</span>
         <span class="lead-name-text">${esc(leadDisplayName(lead.customer_name) || 'Lead')}</span>
         ${cat}
+        ${alertTag}
         ${count > 0 ? '<span class="lead-unread-dot"></span>' : ''}
       </span>
       <span class="lead-cell lead-concern">${concern}</span>
@@ -1374,6 +1381,123 @@ async function setChatbotMode(mode) {
   renderChatbotMode();
   const m = CHATBOT_MODES.find(x => x.key === mode);
   showToast(`Chatbot ${m ? m.label : mode} — ${m ? m.hint : ''}`);
+}
+
+// ============================================================
+// TEACH THE BOT (kb_candidates — D17, checklist Step 13)
+// kb_miss handoff → first staff reply (captured server-side in
+// meta-send) → pending queue here → Approve joins the KB tagged
+// learned:<YYYY-MM>. Approval-first, never auto-learn: the KB is
+// whole-injected every turn, so an unreviewed negotiated price
+// would repeat to every future customer.
+// ============================================================
+let _kbCandidates = [];
+
+async function loadKbCandidates() {
+  const { data, error } = await db.from('kb_candidates')
+    .select('id, lead_id, question, answer, status, created_at')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true });
+  if (error) console.error('[kb_candidates]', error.message);
+  _kbCandidates = data || [];
+  renderKbCandidates();
+}
+
+function renderKbCandidates() {
+  const cnt = document.getElementById('kb-candidates-count');
+  if (cnt) cnt.textContent = _kbCandidates.length ? ` (${_kbCandidates.length})` : '';
+  const wrap = document.getElementById('kb-candidates-list');
+  if (!wrap) return;
+  if (!_kbCandidates.length) {
+    wrap.innerHTML = '<div style="font-size:13px;color:#9ca3af">Nothing pending — when the bot can’t answer a question, the staff reply lands here for approval.</div>';
+    return;
+  }
+  wrap.innerHTML = _kbCandidates.map(c => `
+    <div class="kb-cand" data-id="${c.id}" style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:10px 12px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:6px">❓ ${esc(c.question || '')}</div>
+      <textarea class="text-input kb-cand-answer" rows="2" style="margin:0;resize:vertical">${esc(c.answer || '')}</textarea>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="primary-btn" onclick="approveKbCandidate(${c.id})">✓ Approve</button>
+        <button class="ghost-btn" onclick="discardKbCandidate(${c.id})" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border,#e5e7eb);background:transparent;cursor:pointer;font-size:13px">Discard</button>
+      </div>
+    </div>`).join('');
+}
+
+// First plausible price in a staff answer (best-effort): digit-group commas
+// joined, phones and 6+ digit runs stripped first so a number's tail can't
+// pose as a price; 8k-style suffixes OK. Wrong detection just degrades the
+// approval to a learned FAQ entry — never a wrong auto-price.
+function firstPriceIn(text) {
+  const t = String(text || '').toLowerCase()
+    .replace(/(\d),(\d)/g, '$1$2')
+    .replace(/\d{6,}/g, ' ')
+    .replace(/\b\d{5}[\s-]\d{5}\b/g, ' ');
+  for (const m of t.matchAll(/(?:₹|rs\.?\s*|inr\s*)?(\d{1,5})(\s*k)?\b/g)) {
+    const n = parseInt(m[1], 10) * (m[2] ? 1000 : 1);
+    if (n >= 500 && n <= 60000) return n;
+  }
+  return null;
+}
+
+// Fold an approved Q/A into the KB (mutates kb in place). Best-effort: a price
+// answer on a recognizable service updates that service entry — being the
+// newest data point it becomes the source of truth (D22). Everything else
+// joins as a learned FAQ entry; a missed detection still carries the answer.
+const KB_TAG_STOPWORDS = new Set(['the','and','for','you','your','with','what','how','why','are','is','ka','ki','ke','hai','kya','mein','of','to','in','kitna','kitni','price','cost','charge']);
+
+function applyLearnedKbEntry(kb, question, answer) {
+  const month = new Date().toISOString().slice(0, 7);
+  kb.entries = kb.entries || [];
+  const q = (question || '').toLowerCase();
+  const keyWords = k => k.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+  const svc = kb.entries.find(e => e.type === 'service'
+    && keyWords(e.key).length > 0 && keyWords(e.key).every(w => q.includes(w)));
+  const price = firstPriceIn(answer);
+  if (svc && price) {
+    svc.price = price;
+    svc.price_last_quoted = month;
+    svc.quotes_seen = (svc.quotes_seen || 0) + 1;
+    svc.source = `learned:${month}`;
+  } else {
+    kb.entries.push({
+      type: 'faq',
+      id: `learned-${Date.now()}`,
+      tags: (question || '').toLowerCase().split(/[^a-z0-9]+/)
+        .filter(w => w.length > 2 && !KB_TAG_STOPWORDS.has(w)).slice(0, 6),
+      a: answer,
+      learned: month,
+    });
+  }
+}
+
+async function approveKbCandidate(id) {
+  const c = _kbCandidates.find(x => x.id === id);
+  if (!c) return;
+  const answer = (document.querySelector(`.kb-cand[data-id="${id}"] .kb-cand-answer`)?.value || '').trim();
+  if (!answer) { showToast('Answer cannot be empty', 'error'); return; }
+
+  // Read-modify-write on the FRESHEST stored config (another approval may have
+  // landed since this page loaded) so entries never clobber each other.
+  const { data, error: readErr } = await db.from('settings').select('value').eq('key', 'chatbot_config').maybeSingle();
+  if (readErr) { showToast('Could not read settings — try again', 'error'); return; }
+  const fresh = mergeChatbotConfig(data?.value ? JSON.parse(data.value) : null);
+  applyLearnedKbEntry(fresh.kb, c.question, answer);
+
+  const { error } = await db.from('settings').upsert(
+    { key: 'chatbot_config', value: JSON.stringify(fresh) }, { onConflict: 'key' });
+  if (error) { showToast('Could not save — try again', 'error'); return; }
+  await db.from('kb_candidates').update({ status: 'approved' }).eq('id', id);
+  state.chatbotConfig = fresh;                 // keep the Settings form in sync
+  renderChatbotConfig();
+  loadKbCandidates();
+  showToast('Added to the knowledge base ✓', 'success');
+}
+
+async function discardKbCandidate(id) {
+  const { error } = await db.from('kb_candidates').update({ status: 'discarded' }).eq('id', id);
+  if (error) { showToast('Could not discard — try again', 'error'); return; }
+  loadKbCandidates();
+  showToast('Discarded');
 }
 
 // ============================================================

@@ -171,7 +171,7 @@ function createSupabaseClient() {
 
     async getLeadById(id) {
       const res = await fetch(
-        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,branch_id,instagram_user_id,facebook_user_id,whatsapp_user_id,source&limit=1`,
+        `${url}/rest/v1/leads?id=eq.${encodeURIComponent(id)}&select=id,branch_id,instagram_user_id,facebook_user_id,whatsapp_user_id,source,bot_state&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`lead fetch failed: ${res.status} ${await res.text()}`);
@@ -199,6 +199,30 @@ function createSupabaseClient() {
         body:   JSON.stringify(row),
       });
       if (!res.ok) throw new Error(`bot_shadow_log insert failed: ${res.status} ${await res.text()}`);
+      return res.json();
+    },
+
+    // Teach-the-bot queue (D17): the first staff reply on a kb_miss thread.
+    async insertKbCandidate(row) {
+      const res = await fetch(`${url}/rest/v1/kb_candidates`, {
+        method: 'POST',
+        headers,
+        body:   JSON.stringify(row),
+      });
+      if (!res.ok) throw new Error(`kb_candidates insert failed: ${res.status} ${await res.text()}`);
+      return res.json();
+    },
+
+    // Settings-row upsert (value is the stringified JSON, same shape getSettingJson reads).
+    // ponytail: whole-row read-modify-write by callers — a concurrent write loses
+    // one update; fine for the offer cache / config at this volume.
+    async upsertSetting(key, value) {
+      const res = await fetch(`${url}/rest/v1/settings`, {
+        method: 'POST',
+        headers: { ...headers, Prefer: 'resolution=merge-duplicates' },
+        body:   JSON.stringify({ key, value }),
+      });
+      if (!res.ok) throw new Error(`settings upsert failed: ${res.status} ${await res.text()}`);
       return res.json();
     },
 
@@ -1080,7 +1104,7 @@ HARD RULES — breaking any is a failure:
 - Answer ONLY from the KNOWLEDGE BASE below. If it does not answer the question, set kb_covers=false, reply="" and handoff=true.
 - NEVER diagnose, prescribe medicines, or interpret symptoms. A message describing active symptoms (pain, itching, bleeding, a reaction) is not yours to answer: set is_medical=true, reply="" and handoff=true.
 - "Is it safe / painful for my condition?" questions about a STABLE condition (e.g. "PCOS hai to laser safe?") are NOT medical — answer from the KB's safety entries, is_medical=false.
-- Quote a price ONLY from the KB entry for that exact service. Otherwise price is "shared after consultation" with a cue to the team. NEVER invent, estimate, or average prices.
+- Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise price is "shared after consultation" with a cue to the team. NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted.
 - NEVER guarantee results.
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
 - Mirror the customer's language (Hinglish is fine and encouraged). Keep replies warm, 2–4 sentences.
@@ -1098,15 +1122,141 @@ function renderKbForPrompt(kb) {
   return `KNOWLEDGE BASE (the ONLY source for answers):\n${lines.join('\n')}`;
 }
 
-// One structured decision per inbound. `history` = [{role:'user'|'model', text}]
-// ordered oldest-first. Returns the parsed decision object; throws otherwise.
-async function callAssistant({ model, kb, history, inboundText }) {
+// ── Share→offer price (D9/D10 · checklist Step 14, final plan §3.4) ──
+// Shared posts arrive carrying ig_post_media_id + the caption as title (live
+// finding, Step 2) — so the plan's permalink→media-id map is unnecessary; the
+// caption is parsed straight. One cheap structured call per NEW post; results
+// cached in settings.offer_cache keyed by media id so each post parses once.
+const OFFER_PARSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    service:     { type: 'STRING' },
+    offer_price: { type: 'NUMBER' },
+  },
+  required: ['service', 'offer_price'],
+};
+
+// Caption → {service, offer_price} matched to a KB service key, or null when
+// the caption has no price / no recognizable service (→ no offer, KB ladder).
+// Throws on HTTP/parse failure — the caller treats that as "no offer".
+async function parseOfferCaption({ model, caption, serviceKeys }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('Missing GEMINI_API_KEY env var');
 
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || 'gemini-3.5-flash-lite')}:generateContent`,
+    {
+      method:  'POST',
+      headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text:
+          `You parse Instagram offer-post captions for a dermatology clinic. Match the caption to ONE service key from the list below, or "" when unsure. offer_price = the offer/session price in ₹ as a plain number; 0 when the caption has no clear single price.\nSERVICE KEYS:\n${(serviceKeys || []).join('\n')}` }] },
+        contents: [{ role: 'user', parts: [{ text: `Caption:\n"""${caption}"""` }] }],
+        generationConfig: { responseMimeType: 'application/json', responseSchema: OFFER_PARSE_SCHEMA, temperature: 0 },
+      }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = data?.error?.message || JSON.stringify(data);
+    throw new Error(`Gemini offer parse failed: ${res.status} ${msg}`);
+  }
+  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+  const d = JSON.parse(text);
+  if (!d?.service || !(d.offer_price > 0) || !(serviceKeys || []).includes(d.service)) return null;
+  return { service: d.service, offer_price: Math.round(d.offer_price) };
+}
+
+// D10 — freshness is checked in CODE at quote time, never by the model:
+// fresh = last_seen within offer_stale_days (ms compare, so 0 = instantly stale).
+function isOfferFresh(lastSeen, staleDays) {
+  const ms = Number(staleDays == null ? 30 : staleDays) * 86400000;
+  const t = Date.parse(lastSeen || '');
+  return Number.isFinite(t) && (Date.now() - t) < ms;
+}
+
+function isShareAttachment(att) {
+  return !!att && ['ig_post', 'ig_reel', 'share'].includes(att.type);
+}
+
+// Offer context for this turn: cache hit by media id, else parse the caption.
+// Returns the offer with a `fresh` flag, or null. Sets _new on a fresh parse.
+async function resolveOffer(cfg, attachment) {
+  const caption = String(attachment?.title || '').trim();
+  if (!caption) return null;                      // nothing parseable → KB ladder
+  const mediaId = attachment.mediaId || null;
+  const cache = (await getSettingJson('offer_cache')) || {};
+  const hit = mediaId && cache.offers?.[mediaId];
+  if (hit) return { ...hit, fresh: isOfferFresh(hit.last_seen, cfg.offer_stale_days) };   // ponytail: last_seen = first sighting; a re-share doesn't refresh — add write-back if offers go stale too early
+  const serviceKeys = (cfg.kb?.entries || []).filter(e => e.type === 'service').map(e => e.key);
+  const parsed = await parseOfferCaption({ model: cfg.model, caption, serviceKeys });
+  if (!parsed) return null;
+  return { ...parsed, last_seen: new Date().toISOString(), source_caption: caption.slice(0, 200),
+           mediaId, _new: true, fresh: true };
+}
+
+// Follow-up turns ("price?") carry no attachment — the thread's last offer
+// rides in bot_state.last_offer, freshness re-checked every turn.
+function offerFromBotState(botState, cfg) {
+  const o = botState?.last_offer;
+  if (!o?.service || !(o.offer_price > 0)) return null;
+  return { ...o, fresh: isOfferFresh(o.last_seen, cfg.offer_stale_days) };
+}
+
+// Persist a newly parsed offer into settings.offer_cache, capped at 50 newest.
+async function persistOfferCache(offer) {
+  if (!offer?._new || !offer.mediaId) return;
+  const db = createSupabaseClient();
+  const cur = (await getSettingJson('offer_cache')) || {};
+  const offers = { ...(cur.offers || {}), [offer.mediaId]: {
+    service: offer.service, offer_price: offer.offer_price,
+    last_seen: offer.last_seen, source_caption: offer.source_caption } };
+  const keys = Object.keys(offers)
+    .sort((a, b) => String(offers[a].last_seen).localeCompare(String(offers[b].last_seen)));
+  for (const k of keys.slice(0, Math.max(0, keys.length - 50))) delete offers[k];
+  await db.upsertSetting('offer_cache', JSON.stringify({ offers }));
+}
+
+// The D9/D10 ladder as a prompt block — the model can't misjudge freshness
+// because code already decided which block it gets.
+function renderOfferForPrompt(offer) {
+  const price = `₹${offer.offer_price}`;
+  return offer.fresh
+    ? `LIVE OFFER (quotable): the customer is looking at our post offering ${offer.service} at ${price}. When asked its price, quote ${price} as the offer price "as in the post" — this overrides the KB price for ${offer.service}.`
+    : `STALE OFFER (NOT quotable): a post offered ${offer.service} at ${price}, but that sighting is older than the offer window — do NOT quote it; use the KB price/range for ${offer.service}.`;
+}
+
+// ── Raw-image vision fallback (checklist Step 15, final plan §3.4) ──
+// IG image DMs carry a short-lived CDN url; fetch the bytes now → base64 →
+// inline_data on the turn's user content. WA images carry only a media id
+// (no url in the webhook) → no vision there yet (IG-first, D5).
+async function fetchImageBase64(url) {
+  if (!url) return null;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
+  const mime = res.headers.get('content-type') || 'image/jpeg';
+  if (!mime.startsWith('image/')) throw new Error(`not an image: ${mime}`);
+  return { mime, data: Buffer.from(await res.arrayBuffer()).toString('base64') };
+}
+
+const IMAGE_TURN_ADDENDUM = `\n(They sent the attached image. Match it to one SERVICE in the KNOWLEDGE BASE if recognizable — e.g. a price-list or treatment screenshot — then reply normally per the rules. If you cannot tell what it shows, ask which treatment they mean.)`;
+
+// One structured decision per inbound. `history` = [{role:'user'|'model', text}]
+// ordered oldest-first. `offer` (D9) injects the ladder block; `image` (Step 15)
+// attaches inline_data to the new message. Returns the parsed decision; throws otherwise.
+async function callAssistant({ model, kb, history, inboundText, offer, image }) {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error('Missing GEMINI_API_KEY env var');
+
+  const sysParts = [{ text: ASSISTANT_SYSTEM_PROMPT }, { text: renderKbForPrompt(kb) }];
+  if (offer) sysParts.push({ text: renderOfferForPrompt(offer) });
+  const parts = [{ text: `Customer's new message:\n${inboundText}${image ? IMAGE_TURN_ADDENDUM : ''}` }];
+  if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
+
   const contents = [
     ...(history || []).map(h => ({ role: h.role === 'model' ? 'model' : 'user', parts: [{ text: String(h.text || '') }] })),
-    { role: 'user', parts: [{ text: `Customer's new message:\n${inboundText}` }] },
+    { role: 'user', parts },
   ];
 
   const res = await fetch(
@@ -1115,7 +1265,7 @@ async function callAssistant({ model, kb, history, inboundText }) {
       method:  'POST',
       headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text: ASSISTANT_SYSTEM_PROMPT }, { text: renderKbForPrompt(kb) }] },
+        systemInstruction: { parts: sysParts },
         contents,
         generationConfig: {
           responseMimeType: 'application/json',
@@ -1181,7 +1331,8 @@ function mergeBotState(prev, decision) {
 }
 
 // The summary-card body (D11) — assembled in code from the structured decision,
-// no second LLM call. Medical/emergency carry the customer's verbatim words.
+// no second LLM call. Medical/emergency carry the customer's verbatim words;
+// kb_miss names the question the bot couldn't answer (D17).
 function buildHandoffSummary(reason, botState, ev) {
   const q    = botState?.qualification || {};
   const bits = [];
@@ -1193,6 +1344,9 @@ function buildHandoffSummary(reason, botState, ev) {
   const head = `Bot handed off (${reason})${bits.length ? ' — ' + bits.join(', ') : ''}`;
   if (reason === 'medical' || reason === 'emergency') {
     return `${head}\nCustomer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
+  }
+  if (reason === 'kb_miss') {
+    return `${head}\nBot didn't know: "${String(ev?.messageText || '').slice(0, 300)}"`;
   }
   return head;
 }
@@ -1228,10 +1382,33 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     status:     'qualified',
     category:   decision.category || lead.category || 'lead',
     bot_state:  { ...botState, handoff_summary: summary,
-                  handoff_reason: decision.reason, handoff_at: new Date().toISOString() },
+                  handoff_reason: decision.reason, handoff_at: new Date().toISOString(),
+                  // D17 — the question rides in bot_state so meta-send can capture
+                  // the staff answer to it without re-deriving anything.
+                  ...(decision.reason === 'kb_miss'
+                    ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500) } : {}) },
   });
   console.log(`[meta-service] handoffToStaff: lead ${lead.id} reason=${decision.reason} — "${summary.split('\n')[0]}"`);
   return { handoff: decision.reason, summary };
+}
+
+// D17 teach-the-bot capture — called by meta-send on EVERY staff send: the
+// FIRST reply on a kb_miss-handoff thread becomes a pending kb_candidates row
+// (question = what the bot missed, answer = what staff said). The flag on
+// bot_state makes it exactly-once. Admin Approve/Edit+Approve/Discard from the
+// dashboard; approval-first because the KB is whole-injected every turn — an
+// unreviewed negotiated price would repeat to every future customer.
+async function maybeCaptureKbCandidate(db, lead, message) {
+  const bs = lead?.bot_state || {};
+  if (bs.handoff_reason !== 'kb_miss' || bs.kb_candidate_captured || !bs.kb_miss_question) return false;
+  await db.insertKbCandidate({
+    lead_id: lead.id,
+    question: String(bs.kb_miss_question).slice(0, 500),
+    answer:   String(message || '').slice(0, 2000),
+  });
+  await db.updateLead(lead.id, { bot_state: { ...bs, kb_candidate_captured: true } });
+  console.log(`[meta-service] kb_candidate captured for lead ${lead.id}`);
+  return true;
 }
 
 // D19 — shadow mode: the full real pipeline ran above, but nothing was sent and
@@ -1263,7 +1440,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
 
     // D7 layer 1 — the keyword net fires BEFORE Gemini ever runs (both modes).
     // D7 layer 2 — is_medical on the model's own decision overrides its reply.
-    let decision, llmError = null, firstBotTurn = true;
+    let decision, llmError = null, firstBotTurn = true, offer = null, image = null;
     const tier = classifyInbound(ev.messageText);
     if (tier) {
       decision = { safety_net: tier, reason: tier, reply: '', handoff: true };
@@ -1277,8 +1454,19 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       // While the bot is active it replies to every turn, so an earlier bot
       // message is always inside the last 10 — that's the D15 disclosure check.
       firstBotTurn = !history.some(h => h.is_bot);
+      // Turn context beyond text (final plan §3.4): a shared post resolves its
+      // offer price (D9/D10 — cache by media id, one parse per post), otherwise
+      // a recent offer rides in bot_state; an image DM gets vision. Either
+      // failing degrades to a plain text turn, never kills it.
       try {
-        decision = await callAssistant({ model: cfg.model, kb: cfg.kb, history, inboundText: ev.messageText });
+        offer = isShareAttachment(ev.attachment) ? await resolveOffer(cfg, ev.attachment)
+                                                 : offerFromBotState(lead.bot_state, cfg);
+      } catch (e) { console.warn('[meta-service] offer resolution failed (continuing without):', e.message); }
+      try {
+        if (ev.attachment?.type === 'image') image = await fetchImageBase64(ev.attachment.url);
+      } catch (e) { console.warn('[meta-service] image fetch failed (continuing without vision):', e.message); }
+      try {
+        decision = await callAssistant({ model: cfg.model, kb: cfg.kb, history, inboundText: ev.messageText, offer, image });
       } catch (err) {
         // D13 — an LLM failure never silences the thread: canned handoff in live,
         // one error row in shadow.
@@ -1291,9 +1479,12 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     }
 
     // D19/D24 — shadow: log exactly one row, send nothing, mutate nothing.
+    // The resolved offer rides in the logged decision (plan §4: "decision +
+    // offer fields") so shadow review sees the ladder it would have used.
     if (mode === 'shadow') {
       try {
-        return await logShadowTurn(db, lead, ev, platform, decision, cfg.model, Date.now() - t0, llmError);
+        const logged = offer ? { ...decision, offer } : decision;
+        return await logShadowTurn(db, lead, ev, platform, logged, cfg.model, Date.now() - t0, llmError);
       } catch (e) {
         return { error: 'shadow log failed: ' + e.message };
       }
@@ -1301,6 +1492,16 @@ async function botReply(lead, ev, platform, inboundRow = null) {
 
     // ── live ──
     const botState = mergeBotState(lead.bot_state, decision);
+    if (offer) {
+      // The thread remembers its latest offer for follow-up "price?" turns;
+      // a newly parsed post joins the cross-lead cache (parse once per post).
+      // Best-effort — a cache write failure only costs a re-parse later.
+      botState.last_offer = { service: offer.service, offer_price: offer.offer_price,
+                              last_seen: offer.last_seen, source_caption: offer.source_caption };
+      try { await persistOfferCache(offer); } catch (e) {
+        console.warn('[meta-service] offer cache write failed:', e.message);
+      }
+    }
 
     // Non-lead (D2/D14): one canned reply, then filed under leads.category. No
     // status change — these are not qualified leads, staff see them filtered.
@@ -1362,4 +1563,8 @@ module.exports = {
   sendByPlatform,
   normalizePhone,
   handoffToStaff,
+  maybeCaptureKbCandidate,
+  parseOfferCaption,
+  resolveOffer,
+  isOfferFresh,
 };

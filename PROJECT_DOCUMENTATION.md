@@ -9,7 +9,7 @@
 >
 > Minimum update per change: the relevant section + a line in [§21 Change log](#21-change-log).
 >
-> Last updated: **2026-08-24** · Chatbot turn pipeline built (checklist Steps 5–12: classifier, Gemini client, live reply/handoff/shadow, takeover, category chips) — unit-verified, live batch pending publish — see [§21](#21-change-log)
+> Last updated: **2026-08-25** · Chatbot Steps 13–15 built (teach-the-bot loop, share→offer price, image vision) — unit-verified, live batch pending publish — see [§21](#21-change-log)
 
 ---
 
@@ -412,7 +412,11 @@ Five collapsible cards:
    ([app.js](app.js)) and merge over the stored row on load — no row ⇒ `mode:'off'`.
    `setChatbotMode` re-renders only the mode buttons so a mode click never clobbers unsaved
    form edits.
-6. **Change Admin PIN** (`saveAdminPIN`).
+6. **Teach the Bot** — `kb_candidates` queue (D17, chatbot Step 13): pending
+   question + staff-answer pairs captured automatically on kb_miss threads; Approve
+   (after optional edit) folds them into the KB, Discard drops them. Title shows the
+   pending count.
+7. **Change Admin PIN** (`saveAdminPIN`).
 
 **Staff feedback** is submitted from the cashup screen (`openFeedbackModal`,
 `submitFeedback`, [app.js:1119](app.js#L1119)) → writes `cashup_feedback` **and** emails
@@ -672,14 +676,47 @@ botReply
 - **handoffToStaff** (§3.3): safety-net tiers send nothing; kb_miss/llm_error send their
   canned hold copy; model-decided handoffs send the model's closing reply. Then
   `bot_state.handoff_summary` (built in code — qualification + reason, verbatim customer
-  words for medical/emergency), `updateLead({bot_active:false, status:'qualified', category})`.
+  words for medical/emergency, "Bot didn't know: \<q\>" for kb_miss),
+  `updateLead({bot_active:false, status:'qualified', category})`.
   A failed courtesy send never aborts the handoff.
 - **Takeover** (D12): any staff send via meta-send flips `bot_active=false`, sticky; the
   🤖⏯ Take-over button is the shortcut. The comment automation's DM deliberately does NOT
   flip it — the bot continuing qualification after "which branch?" is the intended flow.
+- **Teach-the-bot loop** (D17/D22, checklist Step 13): a `kb_miss` handoff stashes the
+  missed question in `bot_state.kb_miss_question`; **meta-send captures the FIRST staff
+  reply on that thread** into a pending `kb_candidates` row (exactly-once via a
+  `kb_candidate_captured` flag, best-effort — never fails the send). Admin → Settings →
+  **Teach the Bot** lists pending candidates with an editable answer; **Approve** does a
+  freshest-config read-modify-write and folds the Q/A into `chatbot_config.kb`: a price
+  answer on a word-matched service **updates that service entry** (newest quote = source
+  of truth, D22 — `source:'learned:<YYYY-MM>'`), anything else joins as a FAQ entry
+  tagged `learned:<YYYY-MM>`. Approval-first, never auto-learn — the KB is whole-injected
+  every turn, so an unreviewed negotiated price would repeat to every future customer.
+  Branch lead cards show ❓ *Bot didn't know* / 🔴 *Emergency* badges on those handoffs
+  (D18 dashboard half; the email alert is checklist Step 18).
+- **Share→offer price** (D9/D10, checklist Step 14): shared posts carry the caption and
+  `ig_post_media_id` directly (Step 2 live finding — the planned permalink→media-id map
+  was unnecessary). On a share turn, `resolveOffer` checks `settings.offer_cache`
+  (keyed by media id, capped at 50 newest, one parse per post cross-lead); on a miss one
+  cheap structured call (`parseOfferCaption`) matches the caption to a KB service key and
+  price. Freshness is decided **in code** at quote time (`isOfferFresh`, ms compare vs
+  `offer_stale_days` — `0` = instantly stale), never by the model: the prompt receives a
+  **LIVE OFFER (quotable)** block (the one price exception to the KB-only rule) or a
+  **STALE OFFER (not quotable)** block (KB ladder instead). The thread's latest offer
+  rides in `bot_state.last_offer` so a follow-up "price?" (no attachment) still sees it;
+  shadow mode logs the offer inside the `bot_shadow_log.decision` but writes nothing.
+  No match / parse failure / caption-less share → plain KB ladder, turn unaffected.
+- **Image vision fallback** (checklist Step 15): an IG image DM with a CDN url gets its
+  bytes fetched and attached to the turn's user content as `inline_data` plus a
+  match-it-to-a-KB-SERVICE addendum — same single Gemini call, multimodal. A dead/missing
+  url degrades to a plain text turn. WhatsApp images carry no url in the webhook → no
+  vision there yet (IG-first, D5). If Lite proves flaky on vision the `model` setting is
+  the promotion path (D1 — forward to `gemini-3.7-flash`, never configured in code).
 - Unit suite: `node netlify/functions/utils/meta-service.test.js` covers the §8.1
   invariants (guard order, classifier-first, phone, non-lead, handoff, shadow never-send /
-  never-mutate / one-row-even-on-error, disclosure, crash-swallow).
+  never-mutate / one-row-even-on-error, disclosure, crash-swallow) plus the offer ladder
+  (fresh/stale/miss/no-match/parse-failure/follow-up/shadow), the kb_candidates capture,
+  and the vision inline_data/failure paths.
 
 ### Instagram comment automation (comment → DM → branch routing)
 
@@ -892,6 +929,7 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 | `integrations` | JSON flags `{"instagram":true,"facebook":true,"whatsapp":true}` — only an explicit `false` disables |
 | `comment_rules` | JSON array `[{keyword, public, dm}, …]` — Instagram & Facebook comment automation ([§15](#instagram-comment-automation-comment--dm--branch-routing)) |
 | `chatbot_config` | JSON object — chatbot config (final plan §5): `mode` ('off'/'shadow'/'live'), `model`, `kb {entries, prices_verified_at}`, `locality_map`, `canned` (7 replies), `offer_stale_days`, `turn_cap`, `conversation_age_cap_days`. Created on first Settings save; absent row = code defaults with `mode:'off'`. |
+| `offer_cache` | JSON object — share→offer cache (D9/D10, Step 14): `{offers: {<media_id>: {service, offer_price, last_seen, source_caption}}}`, capped at 50 newest, written only by the webhook; humans never edit it. |
 
 **Indexes**: `idx_leads_branch`, `idx_leads_instagram_user`, `idx_leads_facebook_user`,
 `idx_leads_whatsapp_user`, `idx_lead_notes_lead`, `idx_lead_messages_lead`.
@@ -1065,6 +1103,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-08-25 | — | **Chatbot Steps 13–15: teach-the-bot loop + share→offer price + image vision (plan D17/D22/D9/D10 — unit-verified; live checks join the next publish batch; Steps 8–12 live-confirmed by the user on the published deploy same day).** (1) **Teach-the-bot (Step 13):** kb_miss handoffs now name the missed question in the summary card and stash `bot_state.kb_miss_question`; `meta-send` captures the **first staff reply** on a kb_miss thread into a pending `kb_candidates` row (exactly-once via a `kb_candidate_captured` flag, best-effort, never fails the send). New **Teach the Bot** card in Admin → Settings: editable answer + Approve/Discard; approval read-modify-writes the freshest `chatbot_config` and folds the Q/A into the KB — a price answer on a word-matched service updates that entry (`source:'learned:<YYYY-MM>'`, newest quote wins per D22), else a learned FAQ entry. Approval-first, never auto-learn. Branch lead cards gain ❓ kb_miss / 🔴 emergency badges (D18 dashboard half; email = Step 18). (2) **Share→offer (Step 14):** shared posts already carry caption + `ig_post_media_id`, so the plan's permalink→media-id map was skipped; `resolveOffer` checks a new `settings.offer_cache` row (media-id keyed, 50 newest) and on miss makes one structured `parseOfferCaption` call matched to KB service keys. Freshness is computed **in code** at quote time (ms compare vs `offer_stale_days`, 0 = instantly stale) and injected as a **LIVE OFFER (quotable)** / **STALE OFFER** prompt block — the model never judges validity; the thread's latest offer rides in `bot_state.last_offer` for follow-up "price?" turns; shadow logs the offer in the decision but writes nothing; any failure degrades to the plain KB ladder. (3) **Image vision (Step 15):** IG image DMs with a CDN url attach bytes as `inline_data` + a KB-service-match addendum on the same single Gemini call; a dead url degrades to a plain text turn (WA images carry no url — IG-first). Unit suite extended: offer ladder a–h (fresh/stale/miss-parse/cache/no-match/follow-up/no-caption/shadow-no-write), capture exactly-once, vision attach + failure, `isOfferFresh` edges, `parseOfferCaption` match/no-match/throw. Client-side approval helpers (`firstPriceIn`, service word-match) sanity-checked against price/phone cases — 8k/₹4,500/10k parse, phones and lakh totals rejected. |
 | 2026-08-25 | — | **Chatbot turn pipeline complete: live reply + handoff + takeover + non-lead + shadow (chatbot build Steps 8–12, plan §3.2/§3.3 — unit-verified; live checks join the publish batch, `mode:'off'` still holds in the DB).** (1) **Live turn (Step 8):** `botReply` now gathers context (`listRecentMessages` last 10, minus the inbound being answered — `processIncomingMessage` returns its row id for exactly that), calls Gemini, and on a normal decision sends via the same per-platform senders staff use (`sendByPlatform` dispatch), persists the outgoing `is_bot=true`, and persists `category:'lead'` + the cumulative `bot_state.qualification` every turn (D14). **Disclosure (D15)** is prepended in code on the first bot *send* of a thread (detected as "no `is_bot` message in recent history"), never improvised by the model. **Phone (D16)** digit-normalized in code (`normalizePhone`: +91/leading-0 stripped, valid 10-digit IN mobile only, else discarded). **D6:** new-lead creation sets `bot_active=true` when mode is live/shadow — existing leads keep their flag, so a takeover can never be re-enabled by the next inbound. (2) **Handoff (Step 9):** `handoffToStaff` — safety-net tiers (medical/emergency/requested) send **nothing** (D7: never answer a symptom/urgent message); kb_miss/llm_error send their canned hold copy (D13); model-decided handoffs send the model's closing reply. Writes `bot_state.handoff_summary` built **in code** (no second LLM call): reason + qualification bits, verbatim customer words for medical/emergency; then `bot_active=false, status='qualified', category`. A failed courtesy send never aborts the handoff. **is_medical layer 2 (D7):** the model's own flag overrides its reply → medical handoff, nothing sent. Dashboard: handoff renders as a **summary card** replacing the thread with the raw conversation collapsed behind one click — expanded by default for medical/emergency (D11); bot bubbles carry a 🤖 marker. (3) **Takeover (Step 10, D12):** a successful staff send via `meta-send` flips `bot_active=false` (best-effort — the message is already delivered), sticky; 🤖⏯ **Take over** button in the branch + admin chat headers (visible only while `bot_active`) is the shortcut; the comment automation's DM deliberately does NOT flip it. (4) **Non-lead (Step 11, D2):** collab/sales/misc → one canned reply → `category` filed + bot off, **no status change**; branch Leads page gains a category toggle (All/Leads/Collab/Sales/Misc — "Leads" = everything not filed non-lead, incl. pre-bot null-category rows) and lead cards show a colored category tag. (5) **Shadow (Step 12, D19):** after the decision (and after the safety net / llm_error mapping), `mode:'shadow'` writes exactly ONE `bot_shadow_log` row per turn (success, Gemini error, and safety-tier hit alike) and returns — zero sends, zero lead mutations; dedup already sits before `botReply` via the fresh-insert gate. Unit suite extended to the full §8.1 set (disclosure first-turn-only, non-lead one-reply-then-filed, handoff summary/qualified/flip, phone accepts/rejects, shadow never-send/never-mutate/one-row-on-error, send-failure-doesn't-abort-handoff, inbound-not-double-fed-to-prompt, history role mapping, crash-swallow) — all green. **Live checks pending one publish** (needs `GEMINI_API_KEY` env): Step 6's single live Gemini call, live DM turn, medical handoff card, takeover stickiness, non-lead filing, shadow row; the checklist tracks them. |
 | 2026-08-24 | — | **Chatbot turn pipeline core: safety net + Gemini client + wiring (chatbot build Steps 5–7, plan §3.2/§3.5 — bot reachable but every path no-ops until Step 8; live `mode:'off'` holds).** (1) `classifyInbound()` — D7 layer-1 keyword net, free/local, runs before Gemini: 36 emergency + 30 medical + 12 requested substring patterns mined from real corpus phrasings (khujli, dawai, daag, ilaj, garbhvati, khoon, bukhar, jal gaya…) + English equivalents; evaluation order = priority (emergency > medical > requested); risk-FAQ words (safe/painful/side effect/PCOS…) deliberately **excluded** — "PCOS hai to laser safe?" passes through to the LLM per D8, and the net gets tuned by the Step 16 corpus replay. (2) `callAssistant()` — raw-fetch `generateContent` (`x-goog-api-key` header, key never in the URL), full `responseSchema` structured decision `{category, is_medical, reply, kb_covers, handoff, reason, qualification}`, whole-KB injection every turn (D20), system prompt = persona + §3.6 hard rules; throws on HTTP failure / malformed JSON / missing key — the caller maps that to `llm_error` (D13). (3) `botReply(lead, ev, platform)` wired into `handleWebhook` after `routeLeadFromReply`: strict no-op on `bot_active=false`/`mode:'off'`; safety tier → handoff; never throws. **Dedup before bot (open #10):** `processIncomingMessage` returns `{lead, inserted}` — `insertMessage` catches the PostgREST **23505** (live-probed: `resolution=ignore-duplicates` cannot target the PARTIAL unique index on `external_message_id`) and returns `[]` → `inserted=false` → a redelivered webhook gets no second bot turn. Unit: classifier assertions + mocked-fetch tests (request shape, schema, KB injection, throws; botReply no-ops, safety-before-Gemini, crash-swallow). |
 | 2026-08-24 | — | **KB seeded from corpus (chatbot build Step 4, D22).** New dev-only [scripts/seed-kb.js](scripts/seed-kb.js): (a) 10 FAQ entries hand-authored from the distill files in staff voice (consultation free / 3 branches Janakpuri·Kirti Nagar·Dwarka / timings 11–8:30 / Soprano Titanium / laser 6–12 sessions 98–99% / PRP-GFC / safety / zero-cost EMI / offers / contact) — safety wording pending clinician sign-off (Phase 1); (b) 28 service entries keyed to canonical Clinicea names (D4) with prices mined from `ig_export_history.jsonl` **latest-quote-wins**: staff-quoted amounts attributed to the service the customer most recently asked about (8-message context), skipping canned greetings, staff re-shared posts, phone numbers (incl. space/hyphen-split), non-round amounts and >60k invoice totals; multi-amount messages take the headline (first) amount. `--write` merges `kb {entries, prices_verified_at}` into `settings.chatbot_config` (mode/canned untouched); dry-run default prints a review table with full quote history. Spot-check vs distill ₹-tables: 6 exact matches; 3 apparent misses (microblading/filler/coolsculpt) were distill-table noise — those tables tag amounts by thread topic, while the miner's ask-context is more precise (e.g. microblading's latest *direct* quote is ₹25,000 @2026-03, not the 2025 12k offers). PEEL COSMELAN unpriced → kb_miss HITL (Step 13); CHEMICAL PEEL / Q SWITCH carry single stale-ish quotes, flagged for the client price-sheet sanity check. Per-session vs package ambiguity (PRP "10k for 5 sessions") is inherent to chat text — entries expose `price_last_quoted` + `quotes_seen` so staleness is visible. |
