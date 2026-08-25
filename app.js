@@ -187,6 +187,7 @@ let _leadsTabBound = false;
 let _leadsLastMsg = {};
 let _leadsUnread  = {};
 let _leadsSourceFilter = 'all';
+let _leadsCategoryFilter = 'all';   // chatbot Step 11 (D2) — bot-filed categories
 
 async function loadLeadsTab() {
   const list = document.getElementById('leads-list');
@@ -199,6 +200,8 @@ async function loadLeadsTab() {
   if (!_leadsTabBound) {
     _leadsTabBound = true;
     bindLeadsToggle();
+    bindCategoryToggle();
+    document.getElementById('btn-takeover')?.addEventListener('click', () => takeoverConversation(_activeLeadId));
     document.getElementById('btn-lead-back')?.addEventListener('click', closeLeadDetail);
     document.getElementById('leads-backdrop')?.addEventListener('click', closeLeadDetail);
     document.getElementById('btn-convo-log')?.addEventListener('click', sendLeadMessage);
@@ -212,7 +215,7 @@ async function loadLeadsTab() {
 
   const { data: leads, error } = await db
     .from('leads')
-    .select('id, customer_name, source, status, created_at, branch_id')
+    .select('id, customer_name, source, status, created_at, branch_id, category, bot_active, bot_state')
     .eq('branch_id', state.currentBranch.id)
     .order('created_at', { ascending: false });
 
@@ -277,6 +280,11 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
     const concern = text
       ? `<span class="lead-concern-text">${esc(text.slice(0, 64))}${text.length > 64 ? '…' : ''}</span>`
       : `<span class="lead-concern-none">No messages yet</span>`;
+    // Bot-filed non-lead categories get a visible tag (chatbot Step 11, D2) —
+    // staff must see why a conversation is parked as collab/sales/misc.
+    const cat = lead.category && lead.category !== 'lead'
+      ? `<span class="lead-cat-tag cat-${esc(lead.category)}">${esc(CATEGORY_LABELS[lead.category] || lead.category)}</span>`
+      : '';
 
     return `
     <div class="lead-card ${count > 0 ? 'has-unread' : ''}" data-lead-id="${esc(lead.id)}" onclick="openLeadDetail('${esc(lead.id)}')">
@@ -284,6 +292,7 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
       <span class="lead-cell lead-name">
         <span class="conv-platform-icon sm ${esc(src)}">${sourceBadgeInner(src)}</span>
         <span class="lead-name-text">${esc(leadDisplayName(lead.customer_name) || 'Lead')}</span>
+        ${cat}
         ${count > 0 ? '<span class="lead-unread-dot"></span>' : ''}
       </span>
       <span class="lead-cell lead-concern">${concern}</span>
@@ -307,10 +316,35 @@ function bindLeadsToggle() {
 }
 
 function applyLeadsFilter() {
-  const filtered = _leadsSourceFilter === 'all'
-    ? _leads
-    : _leads.filter(l => (l.source || '').toLowerCase() === _leadsSourceFilter);
+  const filtered = _leads
+    .filter(l => _leadsSourceFilter === 'all' || (l.source || '').toLowerCase() === _leadsSourceFilter)
+    .filter(l => {
+      if (_leadsCategoryFilter === 'all') return true;
+      // 'Leads' = everything NOT filed as a non-lead category — this includes
+      // pre-bot rows where category is null.
+      if (_leadsCategoryFilter === 'lead') return !l.category || l.category === 'lead';
+      return l.category === _leadsCategoryFilter;
+    });
   renderConversationList(filtered, _leadsLastMsg, _leadsUnread);
+}
+
+// Category toggle (All / Leads / Collab / Sales / Misc) — chatbot Step 11 (D2):
+// the bot files collab/sales/misc conversations under leads.category after one
+// canned reply; staff filter them out of the lead flow here. Mirrors the
+// platform toggle's binder.
+const CATEGORY_LABELS = { collaboration: 'Collab', sales_pitch: 'Sales', misc: 'Misc' };
+
+function bindCategoryToggle() {
+  const tog = document.getElementById('leads-category-toggle');
+  if (!tog || tog.dataset.bound) return;
+  tog.dataset.bound = '1';
+  tog.addEventListener('click', e => {
+    const btn = e.target.closest('.plat-btn');
+    if (!btn) return;
+    tog.querySelectorAll('.plat-btn').forEach(b => b.classList.toggle('active', b === btn));
+    _leadsCategoryFilter = btn.dataset.cat;
+    applyLeadsFilter();
+  });
 }
 
 function openLeadDetail(leadId) {
@@ -331,6 +365,7 @@ function openLeadDetail(leadId) {
   if (platformLabel) platformLabel.textContent = lead.source || '';
 
   _activeLeadId = leadId;
+  refreshTakeoverButtons();
   markConversationSeen(leadId);
 
   document.getElementById('leads-convo-log').innerHTML = '';
@@ -369,7 +404,7 @@ async function loadLeadMessages(leadId) {
 
   const { data, error } = await db
     .from('lead_messages')
-    .select('id, direction, message, created_at')
+    .select('id, direction, message, created_at, is_bot')
     .eq('lead_id', leadId)
     .order('created_at', { ascending: true });
 
@@ -433,11 +468,39 @@ async function sendLeadMessage() {
 
     markBubbleSent(bubble);
     syncCardPreview(leadId, { message: body, direction: 'outgoing', created_at: new Date().toISOString() });
+    // A staff reply IS a takeover (D12 — meta-send flipped bot_active server-side);
+    // mirror it locally so the Take-over button hides immediately.
+    const l = _leads.find(x => x.id === leadId);
+    if (l) l.bot_active = false;
+    refreshTakeoverButtons();
   } catch (err) {
     console.error('Send message error:', err);
     markBubbleFailed(bubble);
     showToast(err.message || 'Could not send message.', 'error');
   }
+}
+
+// ── Chatbot takeover (D12, checklist Step 10) ──
+// Replying already takes over (the meta-send guard); this button is the
+// shortcut for "I'm about to reply, silence the bot now". Sticky server-side —
+// nothing ever flips bot_active back on for an existing lead.
+async function takeoverConversation(leadId) {
+  if (!leadId) return;
+  const { error } = await db.from('leads').update({ bot_active: false }).eq('id', leadId);
+  if (error) { showToast('Could not take over — try again', 'error'); return; }
+  const l = _leads.find(x => x.id === leadId) || _adminLeadsAll.find(x => x.id === leadId);
+  if (l) l.bot_active = false;
+  refreshTakeoverButtons();
+  showToast('Bot paused — you have this conversation');
+}
+
+// Show the Take-over button only where the open conversation has the bot on.
+function refreshTakeoverButtons() {
+  const lead = _leads.find(l => l.id === _activeLeadId)
+            || _adminLeadsAll.find(l => l.id === _adminChatLeadId);
+  const show = !!lead?.bot_active ? '' : 'none';
+  document.getElementById('btn-takeover')?.style.setProperty('display', show);
+  document.getElementById('btn-admin-takeover')?.style.setProperty('display', show);
 }
 
 // Append an outgoing bubble in a pending ("Sending…") state. Returns the node.
@@ -477,10 +540,12 @@ function markBubbleFailed(bubble) {
 // Build the chat thread HTML for a message list (pure). Shared by the branch
 // inbox (loadLeadMessages), the admin Leads chat modal (loadAdminChat), and the
 // realtime appender. Each bubble comes from _messageBubbleHtml; this wrapper
-// layers the date separators between bubbles.
+// layers the date separators between bubbles. When the bot handed the
+// conversation to staff, the summary card replaces the thread and the raw
+// messages collapse behind one click — expanded by default for medical (D11).
 function renderThreadHtml(data, lead) {
   let lastDate = null;
-  return data.map(m => {
+  const html = data.map(m => {
     const msgDate   = m.created_at.split('T')[0];
     const separator = msgDate !== lastDate
       ? `<div class="convo-date-sep"><span>${formatDateSeparator(msgDate)}</span></div>`
@@ -488,6 +553,19 @@ function renderThreadHtml(data, lead) {
     lastDate = msgDate;
     return separator + _messageBubbleHtml(m, lead);
   }).join('');
+
+  const bs = lead?.bot_state;
+  if (!bs?.handoff_summary) return html;
+  const urgent = ['medical', 'emergency'].includes(bs.handoff_reason);
+  return `
+    <div class="bot-handoff-card${urgent ? ' is-urgent' : ''}">
+      <div class="bot-handoff-head">🤖➜👩‍⚕️ Bot handed off to staff${bs.handoff_reason ? ` · <span class="bot-handoff-reason">${esc(bs.handoff_reason)}</span>` : ''}</div>
+      <div class="bot-handoff-body">${esc(bs.handoff_summary)}</div>
+    </div>
+    <details class="bot-raw-thread"${urgent ? ' open' : ''}>
+      <summary>Show full conversation</summary>
+      ${html}
+    </details>`;
 }
 
 // One message bubble (no date separator). renderThreadHtml layers separators on
@@ -502,7 +580,7 @@ function _messageBubbleHtml(m, lead) {
       ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${sourceBadgeInner(src)}</div>` : ''}
       <div class="convo-msg-body">
         <div class="leads-convo-msg-text">${esc(m.message)}</div>
-        <div class="leads-convo-msg-meta">${timeStr}</div>
+        <div class="leads-convo-msg-meta">${m.is_bot ? '<span class="bot-tag" title="Sent by the assistant">🤖</span>' : ''}${timeStr}</div>
       </div>
     </div>`;
 }
@@ -550,7 +628,7 @@ async function loadAdminLeads() {
   // Only columns proven present in the live DB (mirrors the branch inbox query).
   const { data, error } = await db
     .from('leads')
-    .select('id, customer_name, source, status, created_at, branch_id')
+    .select('id, customer_name, source, status, created_at, branch_id, category, bot_active, bot_state')
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -704,6 +782,7 @@ function openAdminChat(leadId) {
   document.getElementById('modal-lead-chat').style.display = 'flex';
 
   bindAdminChat();
+  refreshTakeoverButtons();
   loadAdminChat(leadId, lead);
   subscribeAdminChat();   // live updates while the modal is open
 }
@@ -712,6 +791,7 @@ function bindAdminChat() {
   if (_adminChatBound) return;
   _adminChatBound = true;
   document.getElementById('btn-admin-chat-close')?.addEventListener('click', closeAdminChat);
+  document.getElementById('btn-admin-takeover')?.addEventListener('click', () => takeoverConversation(_adminChatLeadId));
   document.getElementById('btn-admin-convo-send')?.addEventListener('click', sendAdminChatMessage);
   document.getElementById('admin-convo-input')?.addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendAdminChatMessage(); }
@@ -732,7 +812,7 @@ async function loadAdminChat(leadId, lead) {
   if (!log) return;
   const { data, error } = await db
     .from('lead_messages')
-    .select('id, direction, message, created_at')
+    .select('id, direction, message, created_at, is_bot')
     .eq('lead_id', leadId)
     .order('created_at', { ascending: true });
 
@@ -763,6 +843,10 @@ async function sendAdminChatMessage() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Could not send message.');
     markBubbleSent(bubble);
+    // D12 — the send flipped bot_active server-side; mirror locally (button hides).
+    const l = _adminLeadsAll.find(x => x.id === leadId);
+    if (l) l.bot_active = false;
+    refreshTakeoverButtons();
   } catch (err) {
     console.error('[admin send]', err);
     markBubbleFailed(bubble);

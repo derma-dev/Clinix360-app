@@ -13,6 +13,8 @@ const {
   classifyInbound,
   callAssistant,
   botReply,
+  sendByPlatform,
+  normalizePhone,
 } = require('./meta-service');
 
 // ── idColumnFor: the silent-corruption guard ─────────────────
@@ -517,7 +519,7 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(classifyInbound(undefined), null);
 }
 
-// ── callAssistant + botReply (chatbot Steps 6–7): async, mocked fetch ──
+// ── callAssistant + botReply (chatbot Steps 6–12): async, mocked fetch ──
 (async () => {
   const realFetch = global.fetch;
 
@@ -575,67 +577,332 @@ assert.equal(extractComments({}).length, 0);
     }
   }
 
-  // botReply: guard order + no-op invariants (§8.1)
+  // ── normalizePhone (D16): digit-normalized in CODE, 10-digit IN mobile only ──
+  assert.equal(normalizePhone('+91 98765 43210'), '9876543210');
+  assert.equal(normalizePhone('09876543210'), '9876543210');
+  assert.equal(normalizePhone('9876543210'), '9876543210');
+  assert.equal(normalizePhone('my number is 9876543210 ok?'), '9876543210');
+  assert.equal(normalizePhone('1234567890'), null, 'must start 6–9 (IN mobile)');
+  assert.equal(normalizePhone('987654321'), null, '9 digits rejected');
+  assert.equal(normalizePhone('+1 555 123 4567'), null, 'US number rejected');
+  assert.equal(normalizePhone(''), null);
+  assert.equal(normalizePhone(undefined), null);
+
+  // ── sendByPlatform dispatch ──
+  {
+    const hit = [];
+    // sendByPlatform closes over the module-local sender fns — verify dispatch
+    // via its observable effect: stub global.fetch per platform endpoint.
+    global.fetch = async (url, opts = {}) => {
+      // WA shares graph.facebook.com with FB — its body is the tell.
+      const body = JSON.parse(opts.body || '{}');
+      hit.push(body.messaging_product === 'whatsapp' ? 'wa'
+        : url.includes('graph.facebook') ? 'fb' : 'ig');
+      return { ok: true, json: async () => ({}) };
+    };
+    process.env.META_ACCESS_TOKEN = 't'; process.env.META_PAGE_ACCESS_TOKEN = 't';
+    process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'p';
+    await sendByPlatform('facebook', 'P', 'hi');
+    await sendByPlatform('whatsapp', 'W', 'hi');
+    await sendByPlatform('instagram', 'I', 'hi');
+    assert.deepEqual(hit, ['fb', 'wa', 'ig'], 'each platform hits its own sender endpoint');
+    delete process.env.META_PAGE_ACCESS_TOKEN; delete process.env.WHATSAPP_ACCESS_TOKEN;
+    delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+  }
+
+  // ── botReply: the full turn pipeline (§8.1 — Steps 8–12) ──
   {
     // dummy creds so getSettingJson/createSupabaseClient actually fetch (mocked)
     process.env.SUPABASE_URL = 'http://supabase.test';
     process.env.SUPABASE_ANON_KEY = 'test_anon';
-    const EV = { messageText: 'price of laser' };
-    const fetchCalls = [];
-    const mockSupabase = (config) => async (url, opts = {}) => {
-      fetchCalls.push({ url, opts });
-      if (url.includes('settings?key=eq.chatbot_config')) {
-        return { ok: true, json: async () => [{ value: JSON.stringify(config) }] };
-      }
-      if (url.includes('/leads?id=eq.')) {
-        return { ok: true, json: async () => [] };
-      }
-      throw new Error('unexpected fetch: ' + url);
+    process.env.GEMINI_API_KEY = 'test_key';
+    process.env.META_ACCESS_TOKEN = 'ig_token';
+
+    const EV = { messageText: 'price of laser', senderId: 'IGSID_9', messageId: 'mid_1' };
+    const LEAD = { id: 'L1', branch_id: 'B1', bot_active: true };
+
+    // One mock that routes every URL botReply can touch, recording each call
+    // kind. `history` = rows listRecentMessages returns (newest-first from the
+    // API; the client reverses — pass oldest-first like the real helper returns).
+    const botMock = ({ config, history = [], decision, geminiError, sendFails = false } = {}) => {
+      const calls = { sends: [], msgInserts: [], patches: [], shadowLogs: [], gemini: [], historyFetches: 0 };
+      global.fetch = async (url, opts = {}) => {
+        if (url.includes('settings?key=eq.chatbot_config'))
+          return { ok: true, json: async () => [{ value: JSON.stringify(config) }] };
+        if (url.includes('generativelanguage.googleapis.com')) {
+          calls.gemini.push({ url, opts });
+          if (geminiError) return { ok: false, status: 500, json: async () => ({ error: { message: geminiError } }) };
+          return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(decision) }] } }] }) };
+        }
+        if (url.includes('graph.instagram.com')) {              // the bot's send
+          if (sendFails) return { ok: false, status: 400, json: async () => ({ error: { message: 'window closed' } }) };
+          calls.sends.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => ({ recipient_id: 'IGSID_9', message_id: 'm_bot' }) };
+        }
+        if (url.includes('/lead_messages') && (opts.method === 'POST')) {   // bot outgoing persist
+          calls.msgInserts.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => [{ id: 'out_' + calls.msgInserts.length }] };
+        }
+        if (url.includes('lead_messages?lead_id=eq.')) {        // history GET
+          calls.historyFetches++;
+          // The real API returns newest-first; listRecentMessages reverses it.
+          // Spread so the client's in-place reverse() can't mutate the fixture.
+          return { ok: true, json: async () => [...history].reverse() };
+        }
+        if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') {
+          calls.patches.push({ url, body: JSON.parse(opts.body) });
+          return { ok: true, json: async () => [] };
+        }
+        if (url.includes('/bot_shadow_log')) {
+          calls.shadowLogs.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => [{ id: 1 }] };
+        }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      return calls;
+    };
+
+    const CFG = (mode, over = {}) => ({
+      mode,
+      model: 'gemini-3.5-flash-lite',
+      kb: { entries: [] },
+      canned: {
+        collaboration: 'Thanks for reaching out about collaborations!',
+        sales_pitch:   'Thank you for the information.',
+        misc:          'Thanks for your message!',
+        kb_miss:       'Let me check with our team.',
+        llm_error:     'Let me connect you with our team.',
+        disclosure:    'Hi! I am the clinic’s assistant 🤖',
+        refusal_ok:    'No problem at all.',
+      },
+      ...over,
+    });
+
+    const REPLY_DECISION = {
+      category: 'lead', is_medical: false,
+      reply: 'Full body laser is ₹35,000 per session. Which branch is closest to you?',
+      kb_covers: true, handoff: false, reason: 'wants_booking',
+      qualification: { service: 'LHR FULL BODY P/S', phone: '+91 98765 43210' },
     };
 
     // 1) bot_active=false → strict no-op, zero network calls
-    fetchCalls.length = 0;
-    global.fetch = mockSupabase({ mode: 'live' });
-    let r = await botReply({ id: 'L1', bot_active: false }, EV, 'instagram');
-    assert.deepEqual(r, { skipped: 'bot_inactive' });
-    assert.equal(fetchCalls.length, 0, 'inactive lead must not touch the network');
+    {
+      const calls = botMock({ config: CFG('live') });
+      const r = await botReply({ ...LEAD, bot_active: false }, EV, 'instagram');
+      assert.deepEqual(r, { skipped: 'bot_inactive' });
+      assert.equal(calls.sends.length + calls.patches.length + calls.gemini.length, 0,
+        'inactive lead must not touch the network');
+    }
 
     // 2) mode='off' (or absent) → no-op after reading settings, no writes
-    global.fetch = mockSupabase({ mode: 'off' });
-    r = await botReply({ id: 'L1', bot_active: true }, EV, 'instagram');
-    assert.deepEqual(r, { skipped: 'mode_off' });
-    assert.equal(fetchCalls.filter(c => c.opts.method === 'PATCH').length, 0);
-    global.fetch = mockSupabase({});
-    r = await botReply({ id: 'L1', bot_active: true }, EV, 'instagram');
-    assert.deepEqual(r, { skipped: 'mode_off' }, 'missing mode defaults to off');
+    {
+      const calls = botMock({ config: CFG('off') });
+      assert.deepEqual(await botReply(LEAD, EV, 'instagram'), { skipped: 'mode_off' });
+      assert.equal(calls.patches.length, 0);
+      botMock({ config: {} });
+      assert.deepEqual(await botReply(LEAD, EV, 'instagram'), { skipped: 'mode_off' },
+        'missing mode defaults to off');
+    }
 
-    // 3) safety net fires before Gemini: medical text → handoff, never a model call
-    fetchCalls.length = 0;
-    global.fetch = mockSupabase({ mode: 'live' });
-    r = await botReply({ id: 'L1', bot_active: true }, { messageText: 'khujli ho rahi hai' }, 'instagram');
-    assert.deepEqual(r, { handoff: 'medical' });
-    const patch = fetchCalls.find(c => c.opts.method === 'PATCH');
-    assert.ok(patch && patch.url.includes('leads?id=eq.L1'), 'handoff must flip bot_active off');
-    assert.deepEqual(JSON.parse(patch.opts.body), { bot_active: false, status: 'qualified' });
-    assert.ok(!fetchCalls.some(c => c.url.includes('generativelanguage')),
-      'a safety-tier hit must NEVER reach Gemini (D7 layer 1)');
+    // 3) safety net fires BEFORE Gemini: medical text → handoff, NO reply sent (D7)
+    {
+      const calls = botMock({ config: CFG('live') });
+      const r = await botReply(LEAD, { ...EV, messageText: 'khujli ho rahi hai' }, 'instagram');
+      assert.equal(r.handoff, 'medical');
+      assert.equal(calls.gemini.length, 0, 'a safety-tier hit must NEVER reach Gemini (D7 layer 1)');
+      assert.equal(calls.sends.length, 0, 'a medical handoff sends NOTHING — no answer, no courtesy line');
+      assert.equal(calls.patches.length, 1);
+      assert.equal(calls.patches[0].url.includes('leads?id=eq.L1'), true);
+      const b = calls.patches[0].body;
+      assert.equal(b.bot_active, false, 'handoff must flip bot_active off');
+      assert.equal(b.status, 'qualified');
+      assert.match(b.bot_state.handoff_summary, /medical/);
+      assert.match(b.bot_state.handoff_summary, /khujli ho rahi hai/,
+        'medical summary carries the customer verbatim (D11)');
+      assert.equal(b.bot_state.handoff_reason, 'medical');
+    }
 
-    // 4) plain FAQ text in live mode → falls through until Step 8 wires the LLM path
-    fetchCalls.length = 0;
-    r = await botReply({ id: 'L1', bot_active: true }, EV, 'instagram');
-    assert.deepEqual(r, { skipped: 'reply_path_pending' });
-    assert.equal(fetchCalls.filter(c => c.opts.method === 'PATCH').length, 0);
+    // 4) live happy path, FIRST bot turn: disclosure prepend (D15), reply sent
+    //    via the platform sender, outgoing persisted is_bot=true, category +
+    //    normalized qualification persisted (D14/D16)
+    {
+      const calls = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      const r = await botReply(LEAD, EV, 'instagram', { id: 'inbound_row' });
+      assert.deepEqual(r, { sent: true });
+      assert.equal(calls.gemini.length, 1);
+      assert.equal(calls.sends.length, 1);
+      const sent = calls.sends[0].message.text;
+      assert.ok(sent.startsWith('Hi! I am the clinic’s assistant 🤖\n\n'), 'disclosure prepends the first bot turn');
+      assert.ok(sent.includes('₹35,000'));
+      assert.equal(calls.msgInserts.length, 1);
+      assert.equal(calls.msgInserts[0].is_bot, true);
+      assert.equal(calls.msgInserts[0].direction, 'outgoing');
+      assert.equal(calls.patches.length, 1);
+      assert.equal(calls.patches[0].body.category, 'lead');
+      assert.equal(calls.patches[0].body.bot_state.qualification.phone, '9876543210',
+        'phone digit-normalized in code (D16)');
+      assert.equal(calls.patches[0].body.bot_state.qualification.service, 'LHR FULL BODY P/S');
+      assert.equal(calls.patches[0].body.bot_active, undefined, 'a normal turn never flips the bot off');
+    }
 
-    // 5) a mid-turn crash is swallowed — returns {error}, never throws (D13).
-    //    (settings read succeeds, the lead PATCH fails)
-    global.fetch = async (url) => url.includes('settings')
-      ? { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live' }) }] }
-      : Promise.reject(new Error('network down'));
-    r = await botReply({ id: 'L1', bot_active: true }, { messageText: 'khujli ho rahi hai' }, 'instagram');
-    assert.match(r.error, /network down/);
+    // 5) NOT the first bot turn: no disclosure; bot messages map to model role
+    {
+      const history = [
+        { id: 'h0', direction: 'incoming', message: 'hi', is_bot: false, created_at: '2026-08-24T10:00:00Z' },
+        { id: 'h1', direction: 'outgoing', message: 'hello! I can help', is_bot: true, created_at: '2026-08-24T10:00:05Z' },
+      ];
+      const calls = botMock({ config: CFG('live'), history, decision: REPLY_DECISION });
+      const r = await botReply(LEAD, EV, 'instagram');
+      assert.deepEqual(r, { sent: true });
+      assert.equal(calls.sends[0].message.text, REPLY_DECISION.reply, 'no disclosure after the first bot turn');
+      const body = JSON.parse(calls.gemini[0].opts.body);
+      assert.equal(body.contents.length, 3, 'history + current message');
+      assert.equal(body.contents[0].role, 'user');
+      assert.equal(body.contents[1].role, 'model');
+      assert.ok(body.contents.at(-1).parts[0].text.includes('price of laser'));
+    }
+
+    // 6) the inbound row is excluded from prompt history (no double-fed inbound)
+    {
+      const history = [{ id: 'm_current', direction: 'incoming', message: 'price of laser', is_bot: false, created_at: '2026-08-24T10:00:00Z' }];
+      const calls = botMock({ config: CFG('live'), history, decision: REPLY_DECISION });
+      await botReply(LEAD, EV, 'instagram', { id: 'm_current' });
+      const body = JSON.parse(calls.gemini[0].opts.body);
+      assert.equal(body.contents.length, 1, 'the just-stored inbound must not appear twice in the prompt');
+    }
+
+    // 7) non-lead (D2): ONE canned reply, filed, bot off, no status change
+    {
+      const calls = botMock({
+        config: CFG('live'),
+        decision: { ...REPLY_DECISION, category: 'collaboration', reply: '', handoff: false, reason: 'non_lead' },
+      });
+      const r = await botReply(LEAD, { ...EV, messageText: 'we would love to collaborate' }, 'instagram');
+      assert.deepEqual(r, { non_lead: 'collaboration' });
+      assert.equal(calls.sends.length, 1);
+      assert.ok(calls.sends[0].message.text.includes('collaborations'), 'canned collaboration copy sent');
+      assert.equal(calls.msgInserts[0].is_bot, true);
+      const b = calls.patches[0].body;
+      assert.equal(b.category, 'collaboration');
+      assert.equal(b.bot_active, false, 'bot goes silent after the one canned reply');
+      assert.equal(b.status, undefined, 'non-leads are not marked qualified');
+    }
+
+    // 8) model-decided handoff: model's closing reply sent, summary + qualified
+    {
+      const calls = botMock({
+        config: CFG('live'),
+        decision: { ...REPLY_DECISION, handoff: true, reason: 'qualified',
+                    reply: 'Wonderful! Our team will confirm your slot shortly 🙏' },
+      });
+      const r = await botReply(LEAD, EV, 'instagram');
+      assert.equal(r.handoff, 'qualified');
+      assert.equal(calls.sends.length, 1);
+      // First bot turn → disclosure prepends even a handoff closing reply (D15)
+      assert.equal(calls.sends[0].message.text,
+        'Hi! I am the clinic’s assistant 🤖\n\nWonderful! Our team will confirm your slot shortly 🙏');
+      const b = calls.patches[0].body;
+      assert.equal(b.bot_active, false);
+      assert.equal(b.status, 'qualified');
+      assert.match(b.bot_state.handoff_summary, /qualified/);
+      assert.match(b.bot_state.handoff_summary, /LHR FULL BODY P\/S/);
+      assert.match(b.bot_state.handoff_summary, /9876543210/);
+    }
+
+    // 9) kb_miss → canned hold copy + handoff (D13/D17 wiring; teach-loop is Step 13)
+    {
+      const calls = botMock({
+        config: CFG('live'),
+        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' },
+      });
+      const r = await botReply(LEAD, EV, 'instagram');
+      assert.equal(r.handoff, 'kb_miss');
+      assert.equal(calls.sends[0].message.text,
+        'Hi! I am the clinic’s assistant 🤖\n\nLet me check with our team.',
+        'first bot turn: disclosure + canned hold copy (D13/D15)');
+    }
+
+    // 10) is_medical (D7 layer 2): the model's own flag overrides its reply
+    {
+      const calls = botMock({
+        config: CFG('live'),
+        decision: { ...REPLY_DECISION, is_medical: true, reply: 'here is what the rash could be…' },
+      });
+      const r = await botReply(LEAD, EV, 'instagram');
+      assert.equal(r.handoff, 'medical');
+      assert.equal(calls.sends.length, 0, 'an is_medical reply must NEVER be sent');
+      assert.equal(calls.patches[0].body.bot_state.handoff_reason, 'medical');
+    }
+
+    // 11) llm_error (D13): Gemini fails → canned "connect you" + handoff; the
+    //     inbound (stored earlier) is untouched and the thread is never silent
+    {
+      const calls = botMock({ config: CFG('live'), geminiError: 'quota exceeded' });
+      const r = await botReply(LEAD, EV, 'instagram');
+      assert.equal(r.handoff, 'llm_error');
+      assert.equal(calls.sends[0].message.text,
+        'Hi! I am the clinic’s assistant 🤖\n\nLet me connect you with our team.');
+      assert.equal(calls.patches[0].body.bot_active, false);
+      assert.equal(calls.patches[0].body.status, 'qualified');
+    }
+
+    // 12) handoff survives a failed SEND: message delivery is not the handoff
+    {
+      const calls = botMock({ config: CFG('live'), geminiError: 'boom', sendFails: true });
+      const r = await botReply(LEAD, EV, 'instagram');
+      assert.equal(r.handoff, 'llm_error', 'handoff completes even when the courtesy reply cannot send');
+      assert.equal(calls.patches.length, 1);
+      assert.equal(calls.patches[0].body.bot_active, false);
+    }
+
+    // 13) shadow invariants (D19): one log row per turn, zero sends, zero lead
+    //     mutations — on success, on Gemini error, AND on a safety-tier hit
+    {
+      // success
+      let calls = botMock({ config: CFG('shadow'), decision: REPLY_DECISION });
+      let r = await botReply(LEAD, EV, 'instagram', { id: 'm1' });
+      assert.deepEqual(r, { shadow: true });
+      assert.equal(calls.shadowLogs.length, 1, 'exactly one bot_shadow_log row per turn');
+      assert.equal(calls.sends.length, 0, 'shadow NEVER sends');
+      assert.equal(calls.patches.length, 0, 'shadow NEVER mutates leads');
+      assert.equal(calls.msgInserts.length, 0, 'shadow persists no outgoing message');
+      assert.equal(calls.shadowLogs[0].message_id, 'mid_1');
+      assert.equal(calls.shadowLogs[0].platform, 'instagram');
+      assert.equal(calls.shadowLogs[0].decision.reason, 'wants_booking');
+      assert.ok(Number.isFinite(calls.shadowLogs[0].latency_ms));
+
+      // Gemini error → still exactly one row, error recorded
+      calls = botMock({ config: CFG('shadow'), geminiError: '429' });
+      r = await botReply(LEAD, EV, 'instagram');
+      assert.deepEqual(r, { shadow: true });
+      assert.equal(calls.shadowLogs.length, 1, 'an error turn still logs exactly one row');
+      assert.match(calls.shadowLogs[0].error, /429/);
+      assert.equal(calls.shadowLogs[0].decision.reason, 'llm_error');
+      assert.equal(calls.sends.length + calls.patches.length, 0);
+
+      // safety tier in shadow: no Gemini call, no mutation — just the row
+      calls = botMock({ config: CFG('shadow') });
+      r = await botReply(LEAD, { ...EV, messageText: 'khujli ho rahi hai' }, 'instagram');
+      assert.deepEqual(r, { shadow: true });
+      assert.equal(calls.gemini.length, 0, 'keyword net still runs before Gemini in shadow');
+      assert.equal(calls.shadowLogs.length, 1);
+      assert.equal(calls.shadowLogs[0].decision.reason, 'medical');
+      assert.equal(calls.patches.length, 0, 'a shadow safety hit must not flip the real lead');
+    }
+
+    // 14) a mid-turn crash is swallowed — returns {error}, never throws (D13)
+    {
+      global.fetch = async (url) => url.includes('settings')
+        ? { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live' }) }] }
+        : Promise.reject(new Error('network down'));
+      const r = await botReply(LEAD, { ...EV, messageText: 'khujli ho rahi hai' }, 'instagram');
+      assert.match(r.error, /network down/);
+    }
 
     delete process.env.SUPABASE_URL;
     delete process.env.SUPABASE_ANON_KEY;
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.META_ACCESS_TOKEN;
   }
 
   global.fetch = realFetch;

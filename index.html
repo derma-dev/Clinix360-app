@@ -214,6 +214,15 @@
              <button class="plat-btn" data-src="facebook">Facebook</button>
              <button class="plat-btn" data-src="whatsapp">WhatsApp</button>
            </div>
+           <!-- Bot-filed categories (chatbot Step 11, D2): 'Leads' shows everything
+                not filed as collab/sales/misc (incl. pre-bot leads with no category). -->
+           <div class="leads-category-toggle" id="leads-category-toggle">
+             <button class="plat-btn active" data-cat="all">All</button>
+             <button class="plat-btn" data-cat="lead">Leads</button>
+             <button class="plat-btn" data-cat="collaboration">Collab</button>
+             <button class="plat-btn" data-cat="sales_pitch">Sales</button>
+             <button class="plat-btn" data-cat="misc">Misc</button>
+           </div>
          </div>
 
          <div class="leads-table">
@@ -251,6 +260,9 @@
                <div class="conv-header-name" id="lead-detail-name"></div>
                <div class="conv-header-platform" id="lead-platform-label"></div>
              </div>
+             <!-- Chatbot Step 10 (D12): shortcut for what a staff reply does anyway -->
+             <button class="takeover-btn" id="btn-takeover" style="display:none"
+               title="Pause the bot on this conversation and reply as staff">🤖⏯ Take over</button>
            </div>
 
            <div class="leads-convo-log" id="leads-convo-log">
@@ -854,6 +866,8 @@
         <div class="conv-header-name" id="admin-chat-name"></div>
         <div class="conv-header-platform" id="admin-chat-platform"></div>
       </div>
+      <button class="takeover-btn" id="btn-admin-takeover" style="display:none"
+        title="Pause the bot on this conversation and reply as staff">🤖⏯ Take over</button>
       <button class="lead-chat-close" id="btn-admin-chat-close" aria-label="Close">&times;</button>
     </div>
     <div class="leads-convo-log" id="admin-convo-log">

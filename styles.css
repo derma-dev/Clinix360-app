@@ -1843,6 +1843,85 @@ html, body {
 .plat-btn:hover { color: #4a4032; }
 .plat-btn.active { background: var(--primary); color: #fff; }
 
+/* ── Chatbot UI (checklist Steps 9–11) ─────────────────────── */
+
+/* Category chips — same pill row as the platform toggle (Step 11, D2) */
+.leads-category-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #e7ddc9;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+}
+
+/* Bot-filed category tag on a lead card */
+.lead-cat-tag {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f3eee2;
+  color: #6b6356;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.lead-cat-tag.cat-collaboration { background: #e9e5f9; color: #5b4fa8; }
+.lead-cat-tag.cat-sales_pitch  { background: #fdebd9; color: #a05a1f; }
+.lead-cat-tag.cat-misc         { background: #ececec; color: #6b6b6b; }
+
+/* Handoff summary card — replaces the raw thread on bot handoff (D11) */
+.bot-handoff-card {
+  margin: 14px 16px 8px;
+  padding: 12px 14px;
+  background: #fff8ec;
+  border: 1px solid #eadfc6;
+  border-radius: 12px;
+}
+.bot-handoff-card.is-urgent { background: #fdecea; border-color: #f2c7c3; }
+.bot-handoff-head {
+  font-size: 12px;
+  font-weight: 700;
+  color: #8a5a00;
+  margin-bottom: 4px;
+}
+.is-urgent .bot-handoff-head { color: #a3322b; }
+.bot-handoff-reason { text-transform: capitalize; }
+.bot-handoff-body {
+  font-size: 13px;
+  color: #4a4032;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+.bot-raw-thread { margin: 0 16px 12px; }
+.bot-raw-thread summary {
+  font-size: 12px;
+  font-weight: 600;
+  color: #9a8f7b;
+  cursor: pointer;
+  padding: 6px 0;
+  user-select: none;
+}
+
+/* Bot marker on the bubble meta line */
+.bot-tag { margin-right: 4px; }
+
+/* Take-over button — shortcut for the D12 rule (staff reply = takeover) */
+.takeover-btn {
+  border: 1px solid #e0d5bd;
+  background: #fff;
+  color: #6b5b3e;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 7px 12px;
+  border-radius: 9px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.takeover-btn:hover { background: #fbf7ef; color: #4a4032; }
+
 /* Table card */
 .leads-table {
   flex: 1;
@@ -2251,6 +2330,7 @@ html, body {
   .leads-detail-col { top: 14px; bottom: 14px; width: min(880px, calc(100% - 20px)); }
   .leads-toolbar { flex-direction: column; align-items: stretch; gap: 10px; }
   .leads-platform-toggle { align-self: flex-start; max-width: 100%; overflow-x: auto; }
+  .leads-category-toggle { align-self: flex-start; max-width: 100%; overflow-x: auto; }
   .leads-table-head,
   .lead-card { grid-template-columns: 72px 1fr; padding: 12px 14px; gap: 10px; }
   .leads-table-head span:nth-child(3),

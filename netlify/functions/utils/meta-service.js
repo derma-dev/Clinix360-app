@@ -122,7 +122,7 @@ function createSupabaseClient() {
     async findLeadByPlatformId(platform, userId) {
       const col = idColumnFor(platform);
       const res = await fetch(
-        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id,bot_active&limit=1`,
+        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id,bot_active,category,bot_state&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`leads lookup failed: ${res.status} ${await res.text()}`);
@@ -177,6 +177,29 @@ function createSupabaseClient() {
       if (!res.ok) throw new Error(`lead fetch failed: ${res.status} ${await res.text()}`);
       const rows = await res.json();
       return rows[0] || null;
+    },
+
+    // Bot-turn context: the last few messages, oldest-first (final plan §3.2).
+    async listRecentMessages(leadId, limit = 10) {
+      const res = await fetch(
+        `${url}/rest/v1/lead_messages?lead_id=eq.${encodeURIComponent(leadId)}` +
+        `&select=id,direction,message,is_bot,created_at&order=created_at.desc&limit=${limit}`,
+        { headers }
+      );
+      if (!res.ok) throw new Error(`lead_messages fetch failed: ${res.status} ${await res.text()}`);
+      const rows = await res.json();
+      return rows.reverse();
+    },
+
+    // Shadow mode (D19): exactly one row per drafted turn.
+    async insertShadowLog(row) {
+      const res = await fetch(`${url}/rest/v1/bot_shadow_log`, {
+        method: 'POST',
+        headers,
+        body:   JSON.stringify(row),
+      });
+      if (!res.ok) throw new Error(`bot_shadow_log insert failed: ${res.status} ${await res.text()}`);
+      return res.json();
     },
 
     // Used to build the branch buttons on the comment DM, and to match the
@@ -289,14 +312,19 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
   } else {
     // Fetch the sender's real profile for the new lead's name.
     const displayName = buildDisplayName(await fetchProfile(platform, senderId)) || profileName || placeholder;
+    // D6 — the bot auto-engages brand-new conversations the moment it is on
+    // (live or shadow). Existing leads keep their bot_active as-is, so a staff
+    // takeover (D12) can never be re-enabled by the next inbound.
+    const botCfg = await getSettingJson('chatbot_config');
     lead = await db.createLead({
       branch_id:     branchId,
       source:        platform,
       customer_name: displayName,
       [idColumn]:    senderId,
       status:        'new',
+      bot_active:    ['live', 'shadow'].includes(botCfg?.mode),
     });
-    console.log(`[meta-service] Lead created: id=${lead.id} name="${displayName}" for ${platform} sender=${senderId}`);
+    console.log(`[meta-service] Lead created: id=${lead.id} name="${displayName}" for ${platform} sender=${senderId} bot_active=${lead.bot_active}`);
   }
 
   // Insert incoming message. branch_id is set so the realtime inbox channel can
@@ -312,8 +340,10 @@ async function processIncomingMessage(senderId, messageText, platform = 'instagr
   console.log(`[meta-service] Message inserted for lead_id=${lead.id}`);
   // `inserted` is false on a webhook REDelivery (insertMessage returned [] on the
   // external_message_id dup) — the signal the bot turn needs so Meta's retries
-  // never produce a second bot reply (checklist Step 7 / open #10).
-  return { lead, inserted: insertedRows.length > 0 };
+  // never produce a second bot reply (checklist Step 7 / open #10). The row id
+  // rides along so botReply can drop it from the history it fetches (it would
+  // otherwise answer a prompt that already contains the inbound twice).
+  return { lead, inserted: insertedRows.length > 0, inboundRow: insertedRows[0] || null };
 }
 
 // ── Webhook verification (GET) ────────────────────────────────
@@ -578,13 +608,13 @@ async function handleWebhook(payload) {
     try {
       // messageText is only ever missing on a title-less button tap (see the guard
       // above) — the timeline still needs a body, so fall back to a readable label.
-      const { lead, inserted } = await processIncomingMessage(
+      const { lead, inserted, inboundRow } = await processIncomingMessage(
         ev.senderId, ev.messageText || '(button tap)', platform, ev.profileName, ev.messageId
       );
       await routeLeadFromReply(lead, ev.messageText, ev.payload);
       // Chatbot turn (final plan §3.2) — added after routing, never blocks it, and
       // only for a FRESH insert: a Meta redelivery gets no second bot reply (open #10).
-      if (inserted) await botReply(lead, ev, platform);
+      if (inserted) await botReply(lead, ev, platform, inboundRow);
     } catch (err) {
       console.error(`[meta-service] Error processing ${platform} message from sender=${ev.senderId}:`, err.message);
     }
@@ -910,6 +940,9 @@ async function processComment(c) {
     direction: 'outgoing',
     message:   rule.dm,
     is_seen:   true,
+    // Deliberately does NOT flip bot_active (D12 covers HUMAN sends via
+    // meta-send): this is the comment automation, and the bot continuing the
+    // qualification right after "which branch?" is the intended flow.
   });
 }
 
@@ -1104,11 +1137,121 @@ async function callAssistant({ model, kb, history, inboundText }) {
   return decision;
 }
 
-// ── botReply: the turn entry point (final plan §3.2 · checklist Step 7) ──
+// ── botReply: the turn entry point (final plan §3.2 · checklist Steps 7–12) ──
 // Never throws — the inbound is already stored before this runs; a bot glitch
 // must never drop or delay a real message (D13). Off/inactive = strict no-op.
-// Steps 8–13 grow the branches (LLM reply, handoff summary, shadow, teach-loop).
-async function botReply(lead, ev, platform) {
+
+// The bot sends through the SAME per-platform senders staff use — an automated
+// team member typing into the same thread (final plan §3.1), no new send path.
+function sendByPlatform(platform, recipientId, text) {
+  if (platform === 'facebook') return sendFacebookMessage(recipientId, text);
+  if (platform === 'whatsapp') return sendWhatsAppMessage(recipientId, text);
+  return sendInstagramMessage(recipientId, text);
+}
+
+// D16 — WhatsApp-number capture is digit-normalized in CODE, never by the LLM:
+// strip non-digits, drop the +91 / leading-0 forms, accept only a valid 10-digit
+// IN mobile (starts 6–9). Anything else is discarded — the bot keeps asking.
+function normalizePhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2);
+  if (d.length === 11 && d.startsWith('0'))  d = d.slice(1);
+  return /^[6-9]\d{9}$/.test(d) ? d : null;
+}
+
+// One canned-copy lookup that tolerates a missing/truncated config row.
+function cannedCopy(cfg, key) {
+  return String(cfg?.canned?.[key] || '').trim();
+}
+
+// Fold this turn's qualification into the lead's cumulative bot_state. Empty
+// values never clobber what an earlier turn learned (D14); phone is code-checked.
+function mergeBotState(prev, decision) {
+  const q    = decision?.qualification || {};
+  const next = { ...((prev || {}).qualification || {}) };
+  for (const k of ['service', 'phone', 'location', 'branch', 'preferred_time']) {
+    if (k === 'phone') {
+      const p = normalizePhone(q.phone);
+      if (p) next.phone = p;
+    } else if (q[k]) {
+      next[k] = String(q[k]).slice(0, 120);
+    }
+  }
+  return { ...(prev || {}), qualification: next };
+}
+
+// The summary-card body (D11) — assembled in code from the structured decision,
+// no second LLM call. Medical/emergency carry the customer's verbatim words.
+function buildHandoffSummary(reason, botState, ev) {
+  const q    = botState?.qualification || {};
+  const bits = [];
+  if (q.service)        bits.push(`service ${q.service}`);
+  if (q.branch)         bits.push(`branch ${q.branch}`);
+  else if (q.location)  bits.push(`area ${q.location}`);
+  if (q.phone)          bits.push(`WhatsApp ${q.phone}`);
+  if (q.preferred_time) bits.push(`preferred ${q.preferred_time}`);
+  const head = `Bot handed off (${reason})${bits.length ? ' — ' + bits.join(', ') : ''}`;
+  if (reason === 'medical' || reason === 'emergency') {
+    return `${head}\nCustomer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
+  }
+  return head;
+}
+
+// Final plan §3.3 — every handoff trigger lands here: safety net, is_medical,
+// model-decided, kb_miss, llm_error. Safety-net tiers send NOTHING (D7 — the
+// bot never answers a symptom/urgent message, not even a courtesy line);
+// kb_miss/llm_error send their canned hold copy (D13); model-decided handoffs
+// send the model's own closing reply when it wrote one. A failed send never
+// aborts the handoff — staff still get the summary and the lead.
+async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, firstBotTurn) {
+  let text = null;
+  if (!decision.safety_net) {
+    if (decision.reason === 'kb_miss')   text = cannedCopy(cfg, 'kb_miss');
+    if (decision.reason === 'llm_error') text = cannedCopy(cfg, 'llm_error');
+    if (!text) text = String(decision.reply || '').trim() || null;
+  }
+  if (firstBotTurn && text) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
+  if (text) {
+    try {
+      await sendByPlatform(platform, ev.senderId, text);
+      await db.insertMessage({
+        lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
+        message: text, is_seen: true, is_bot: true,
+      });
+    } catch (e) {
+      console.error(`[meta-service] handoff courtesy reply failed on lead ${lead.id} (handoff continues):`, e.message);
+    }
+  }
+  const summary = buildHandoffSummary(decision.reason, botState, ev);
+  await db.updateLead(lead.id, {
+    bot_active: false,
+    status:     'qualified',
+    category:   decision.category || lead.category || 'lead',
+    bot_state:  { ...botState, handoff_summary: summary,
+                  handoff_reason: decision.reason, handoff_at: new Date().toISOString() },
+  });
+  console.log(`[meta-service] handoffToStaff: lead ${lead.id} reason=${decision.reason} — "${summary.split('\n')[0]}"`);
+  return { handoff: decision.reason, summary };
+}
+
+// D19 — shadow mode: the full real pipeline ran above, but nothing was sent and
+// no lead row was touched. Exactly ONE bot_shadow_log row per turn, success or
+// error (the error case still logs, with decision=null + error set).
+async function logShadowTurn(db, lead, ev, platform, decision, model, latencyMs, error) {
+  await db.insertShadowLog({
+    lead_id:    lead.id,
+    message_id: ev.messageId || null,
+    platform,
+    decision:   decision || null,
+    model:      model || null,
+    latency_ms: latencyMs == null ? null : Math.round(latencyMs),
+    error:      error || null,
+  });
+  return { shadow: true };
+}
+
+async function botReply(lead, ev, platform, inboundRow = null) {
+  const t0 = Date.now();
   try {
     if (!lead?.bot_active) return { skipped: 'bot_inactive' };
 
@@ -1116,19 +1259,81 @@ async function botReply(lead, ev, platform) {
     const mode = ['live', 'shadow'].includes(cfg.mode) ? cfg.mode : 'off';
     if (mode === 'off') return { skipped: 'mode_off' };
 
-    // D7 layer 1 — safety net fires BEFORE Gemini ever runs.
+    const db = createSupabaseClient();
+
+    // D7 layer 1 — the keyword net fires BEFORE Gemini ever runs (both modes).
+    // D7 layer 2 — is_medical on the model's own decision overrides its reply.
+    let decision, llmError = null, firstBotTurn = true;
     const tier = classifyInbound(ev.messageText);
     if (tier) {
-      const db = createSupabaseClient();
-      await db.updateLead(lead.id, { bot_active: false, status: 'qualified' });
-      console.log(`[meta-service] botReply: tier=${tier} on "${String(ev.messageText).slice(0, 60)}" → handoff, lead ${lead.id}`);
-      return { handoff: tier };
+      decision = { safety_net: tier, reason: tier, reply: '', handoff: true };
+    } else {
+      // Context: last ~10 turns, minus the inbound this call is answering.
+      const rows = await db.listRecentMessages(lead.id, 10);
+      const history = rows
+        .filter(m => !inboundRow?.id || m.id !== inboundRow.id)
+        .map(m => ({ role: ['in', 'incoming'].includes(m.direction) ? 'user' : 'model',
+                     text: m.message, is_bot: !!m.is_bot }));
+      // While the bot is active it replies to every turn, so an earlier bot
+      // message is always inside the last 10 — that's the D15 disclosure check.
+      firstBotTurn = !history.some(h => h.is_bot);
+      try {
+        decision = await callAssistant({ model: cfg.model, kb: cfg.kb, history, inboundText: ev.messageText });
+      } catch (err) {
+        // D13 — an LLM failure never silences the thread: canned handoff in live,
+        // one error row in shadow.
+        llmError = err.message;
+        decision = { reason: 'llm_error', reply: '', kb_covers: false, handoff: true, category: 'lead' };
+      }
+      if (decision.is_medical) {
+        decision = { safety_net: 'medical', reason: 'medical', reply: '', handoff: true };
+      }
     }
 
-    // LLM reply path lands with Step 8 (live reply + persist); until then a
-    // non-safety message just falls through untouched.
-    console.log('[meta-service] botReply: no safety tier — reply path not wired yet (Step 8)');
-    return { skipped: 'reply_path_pending' };
+    // D19/D24 — shadow: log exactly one row, send nothing, mutate nothing.
+    if (mode === 'shadow') {
+      try {
+        return await logShadowTurn(db, lead, ev, platform, decision, cfg.model, Date.now() - t0, llmError);
+      } catch (e) {
+        return { error: 'shadow log failed: ' + e.message };
+      }
+    }
+
+    // ── live ──
+    const botState = mergeBotState(lead.bot_state, decision);
+
+    // Non-lead (D2/D14): one canned reply, then filed under leads.category. No
+    // status change — these are not qualified leads, staff see them filtered.
+    if (decision.category && decision.category !== 'lead') {
+      let text = cannedCopy(cfg, decision.category) || cannedCopy(cfg, 'misc');
+      if (firstBotTurn) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
+      await sendByPlatform(platform, ev.senderId, text);
+      await db.insertMessage({
+        lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
+        message: text, is_seen: true, is_bot: true,
+      });
+      await db.updateLead(lead.id, { category: decision.category, bot_active: false, bot_state: botState });
+      console.log(`[meta-service] botReply: non-lead (${decision.category}) on lead ${lead.id} — canned reply, filed, bot off`);
+      return { non_lead: decision.category };
+    }
+
+    if (decision.handoff) {
+      return await handoffToStaff(db, lead, ev, platform, cfg, decision, botState, firstBotTurn);
+    }
+
+    // Normal turn: disclosure prepend on the FIRST bot turn only (D15), then the
+    // model's reply. Qualification/category persist every turn (D14).
+    let text = String(decision.reply || '').trim();
+    if (firstBotTurn && text) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
+    if (!text) return { skipped: 'empty_reply' };
+    await sendByPlatform(platform, ev.senderId, text);
+    await db.insertMessage({
+      lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
+      message: text, is_seen: true, is_bot: true,
+    });
+    await db.updateLead(lead.id, { category: 'lead', bot_state: botState });
+    console.log(`[meta-service] botReply: replied on lead ${lead.id} (${Math.round(Date.now() - t0)}ms)`);
+    return { sent: true };
   } catch (err) {
     console.error('[meta-service] botReply error (inbound already stored):', err.message);
     return { error: err.message };
@@ -1154,4 +1359,7 @@ module.exports = {
   classifyInbound,
   callAssistant,
   botReply,
+  sendByPlatform,
+  normalizePhone,
+  handoffToStaff,
 };

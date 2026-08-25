@@ -82,6 +82,15 @@ exports.handler = async (event) => {
       is_seen:   true,
     });
 
+    // 3) D12 — a human outgoing message IS a takeover: flip bot_active off,
+    // sticky (only a brand-new conversation re-engages the bot). Best-effort —
+    // the message is already delivered, so a failure here is logged, never a 502.
+    try {
+      await db.updateLead(leadId, { bot_active: false });
+    } catch (e) {
+      console.error('[meta-send] bot_active takeover flip failed (message was sent):', e.message);
+    }
+
     return { statusCode: 200, headers, body: JSON.stringify({ ok: true, message: rows[0] || null }) };
   } catch (err) {
     console.error('[meta-send] Error:', err.message);

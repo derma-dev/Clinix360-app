@@ -30,13 +30,16 @@
 
 ## Status
 
-- **Now:** Step 8 — Live turn: reply + persist (needs `GEMINI_API_KEY`)
-- **Done:** Steps 1–7
-- **Remaining:** Steps 8–20
-- **Blockers:** Gemini API key — needed by Step 6's one live validation call (unit part done mocked) and Step 8's live turn
-- **Publish budget:** 2/15 used (Step 2 ×2: initial publish + ig_post fix publish) · **13 left** — batch live checks, docs-only commits never publish. **Steps 3–7 publish batch pending** (browser Settings round-trip + webhook-redelivery replay).
+- **Now:** Step 13 — Teach-the-bot loop (D17 + D22 price HITL)
+- **Done:** Steps 1–12
+- **Remaining:** Steps 13–20
+- **Blockers:** Gemini API key — needed by Step 6's one live validation call (unit part done mocked) and the Steps 8–12 live batch. Set it in Netlify env **before** the next publish.
+- **Publish budget:** 2/15 used · **13 left** — batch live checks, docs-only commits never publish.
+  **Steps 3–12 publish batch pending** (ONE publish covers all): browser Settings round-trip, webhook-redelivery replay, live Gemini call, live DM turn + DB rows, medical handoff summary card, llm_error canned path, takeover stickiness + button, non-lead filing + chips, shadow log row.
 
 ## Log (append one line per completed step — date · step · what/why/learned)
+
+- 2026-08-25 · Steps 8–12 · Turn pipeline completed. **8:** live turn — context = last-10 messages minus the just-inserted inbound (`processIncomingMessage` now returns its row), one Gemini call, send via existing per-platform senders, outgoing persisted `is_bot=true`, category+qualification persisted every turn (D14), disclosure code-prepended on the first bot *send* (D15), phone digit-normalized in code (D16), `bot_active=true` on new-lead creation when mode live/shadow (D6 — comment-automation leads get it too, deliberately: the bot continuing qualification after "which branch?" is the intended flow). **9:** `handoffToStaff` — safety tiers send NOTHING; kb_miss/llm_error → canned hold copy; model handoffs → model's closing reply; `handoff_summary` built in code (no 2nd LLM call), medical/emergency carry verbatim customer words; `bot_active=false`+`status:'qualified'`; failed courtesy send never aborts the handoff. is_medical (layer 2) overrides the model's reply. Dashboard: summary card replaces thread, raw collapsible, raw expanded for medical, 🤖 marker on bot bubbles. **10:** meta-send flips `bot_active=false` on every successful staff send (best-effort, never 502s a delivered message); 🤖⏯ Take-over button in branch + admin chat headers (visible only while bot on); comment automation DM does NOT flip (it's not staff). **11:** non-lead → one canned reply → `category` filed + bot off, no status change; category toggle (All/Leads/Collab/Sales/Misc — "Leads" includes pre-bot null-category rows) + colored tags on lead cards. **12:** shadow branch after the decision — exactly ONE `bot_shadow_log` row per turn (success / Gemini error / safety tier), zero sends, zero lead mutations; dedup already gates it via the fresh-insert check. **Learned:** test-mock ordering bug caught by the suite — the API returns history newest-first and `listRecentMessages` reverses in place; a mock that fed oldest-first silently swapped prompt roles. Unit suite green (full §8.1 set). Live checks all deferred to the single publish batch (needs `GEMINI_API_KEY` in Netlify env).
 
 - 2026-08-24 · Step 1 · §4 schema applied via SQL editor + verified over REST (all cols/tables live, old rows carry defaults, existing reads fine). Deviation: plan's `bigint lead_id` → **uuid** (`leads.id` is UUID). Found + fixed pre-existing drift: live `leads` has `email`/`assigned_to`, lacks `service`/`notes`/`updated_at` the schema file claimed — nothing in this repo's code touches the dead columns (grep-verified), so no breakage.
 - 2026-08-24 · Step 2 · attachments labeled instead of dropped, unit + live verified (share → `🔗 shared post: <caption>`, photo → `📷 image` on test IG). **Live finding:** shared posts arrive as `ig_post` (legacy `share` type removed ~Feb 2026 — brainstorm doc was stale); payload carries `ig_post_media_id` directly, so plan §3.4's permalink→media-id map is unnecessary for shares. Real-image display in inbox deliberately NOT built (CDN url is short-lived; durable fetch+store arrives with Step 15 vision, which needs the bytes anyway).
@@ -88,27 +91,27 @@
 ### Step 8 — Live turn: reply + persist
 - **Implement:** send via `sendByPlatform`, store outgoing `is_bot=true`; persist category (every turn, D14) + qualification into `leads`/`bot_state`; disclosure prepend on first bot turn (D15); phone 10-digit code-normalized (D16); `bot_active=true` on new-lead creation when bot on (D6). Flip test deployment `mode:'live'`.
 - **Verify:** live DM "price of laser" to test IG → KB-range reply + next qualification question lands in thread; DB rows correct (`is_bot`, category, bot_state).
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (send→persist, disclosure, phone, D6, is_bot, category/bot_state every turn; live DM turn joins the publish batch — needs `GEMINI_API_KEY` in Netlify env + `mode:'live'` flip)
 
 ### Step 9 — Handoff paths + summary card
 - **Implement:** `handoffToStaff` — medical/emergency/requested/qualified/llm_error/turn_cap; `bot_state.handoff_summary`; `bot_active=false`, `status='qualified'`; **summary card UI replaces thread, raw collapsible, raw expanded for medical (D11)**; `llm_error` catch → canned handoff (D13).
 - **Verify:** live "khujli ho rahi hai" → NO answer, handoff, summary card in dashboard; simulate LLM failure (bad key) → canned "let me connect you" + handoff, inbound still stored.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (safety tiers send nothing; kb_miss/llm_error canned; summary in code w/ verbatim medical words; qualified flip; send-failure doesn't abort handoff; summary card + 🤖 marker shipped. turn_cap reason exists — the cap itself is Step 18/#17. Live card eyeball joins the publish batch)
 
 ### Step 10 — Auto-takeover + Take-over button
 - **Implement:** any staff outgoing message flips `bot_active=false`, sticky (D12) — guard in existing staff send path; Take-over button as shortcut.
 - **Verify:** live: staff replies from dashboard → subsequent customer DMs get no bot reply; button does the same instantly.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 (meta-send guard: best-effort flip after persist, never 502s a delivered message; 🤖⏯ button in branch + admin headers, visible only while bot on; comment-automation DM deliberately does NOT flip. Live stickiness check joins the publish batch)
 
 ### Step 11 — Non-lead handling + category chips
 - **Implement:** collab/sales/misc → 1 canned reply (config copy) → `bot_active=false`, filed under `leads.category` (D2/D14); category filter chips in leads list.
 - **Verify:** live collab-style DM ("we'd love to collaborate") → one canned reply, filed, bot silent after; chips filter correctly.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (one canned reply w/ disclosure on first turn → category filed, bot off, NO status change; branch Leads category toggle + colored card tags; "Leads" chip includes pre-bot null-category rows. Live filing + chips check joins the publish batch)
 
 ### Step 12 — Shadow mode wiring
 - **Implement:** mode branch after Gemini decision; `logShadowTurn` → one `bot_shadow_log` row/turn; invariants: never send, never mutate leads, one row even on error, dedup first (D19).
 - **Verify:** unit invariant tests; live: flip `mode:'shadow'`, DM → log row exists, **no reply sent, no lead mutation**; flip back to live.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (shadow = one row on success/Gemini-error/safety-tier, zero sends, zero lead mutations, no Gemini on safety tier, latency_ms recorded; dedup = the fresh-insert gate already before botReply. Live shadow row check joins the publish batch)
 
 ### Step 13 — Teach-the-bot loop (D17 + D22 price HITL)
 - **Implement:** `kb_covers:false` → `kb_miss` handoff (canned hold reply, summary "Bot didn't know: \<q\>"); first staff reply on that thread → `kb_candidates` row; dashboard **Teach-the-bot** list (Approve / Edit+Approve / Discard) → approved joins `chatbot_config.kb` tagged `learned:<YYYY-MM>`; `kb_miss`/emergency badge (D18).
