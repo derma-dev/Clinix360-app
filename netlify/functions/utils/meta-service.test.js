@@ -656,9 +656,12 @@ assert.equal(extractComments({}).length, 0);
     process.env.SUPABASE_ANON_KEY = 'test_anon';
     process.env.GEMINI_API_KEY = 'test_key';
     process.env.META_ACCESS_TOKEN = 'ig_token';
+    process.env.RESEND_API_KEY = 'test_resend';
 
     const EV = { messageText: 'price of laser', senderId: 'IGSID_9', messageId: 'mid_1' };
-    const LEAD = { id: 'L1', branch_id: 'B1', bot_active: true };
+    // created_at fresh so the conversation-age cap (#17) never fires unless a test wants it
+    const LEAD = { id: 'L1', branch_id: 'B1', bot_active: true, customer_name: 'Priya Sharma',
+                   created_at: new Date().toISOString() };
 
     // One mock that routes every URL botReply can touch, recording each call
     // kind. `history` = rows listRecentMessages returns (newest-first from the
@@ -666,10 +669,16 @@ assert.equal(extractComments({}).length, 0);
     // `offerCache` seeds settings.offer_cache; `offerParse` is what a caption
     // parse returns ('error' → HTTP failure; null → no service match).
     const botMock = ({ config, history = [], decision, geminiError, sendFails = false,
-                       offerCache = null, offerParse, imageFails = false } = {}) => {
+                       offerCache = null, offerParse, imageFails = false, alertFails = false } = {}) => {
       const calls = { sends: [], msgInserts: [], patches: [], shadowLogs: [], gemini: [],
-                      historyFetches: 0, settingUpserts: [], offerCacheReads: 0, imageFetches: 0 };
+                      historyFetches: 0, settingUpserts: [], offerCacheReads: 0, imageFetches: 0,
+                      alerts: [] };
       global.fetch = async (url, opts = {}) => {
+        if (url.includes('api.resend.com')) {                              // D18 alert email
+          if (alertFails) return { ok: false, status: 500, text: async () => 'smtp down' };
+          calls.alerts.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => ({}) };
+        }
         if (url.includes('settings?key=eq.chatbot_config'))
           return { ok: true, json: async () => [{ value: JSON.stringify(config) }] };
         if (url.includes('settings?key=eq.offer_cache')) {
@@ -1106,7 +1115,128 @@ assert.equal(extractComments({}).length, 0);
       }
     }
 
-    // 17) a mid-turn crash is swallowed — returns {error}, never throws (D13)
+    // 17) soft booking (Step 17, D3): the prompt drives toward a preferred
+    //     day/time; a booking handoff carries it on the summary
+    {
+      const calls = botMock({
+        config: CFG('live'),
+        decision: { ...REPLY_DECISION, handoff: true, reason: 'wants_booking',
+                    reply: 'Noted! Our team will confirm shortly 🙏',
+                    qualification: { service: 'LHR FULL BODY P/S', branch: 'Dwarka Sec 12',
+                                     preferred_time: 'Saturday evening' } },
+      });
+      const r = await botReply(LEAD, { ...EV, messageText: 'haan book kar do saturday evening' }, 'instagram');
+      assert.equal(r.handoff, 'wants_booking');
+      const b = calls.patches[0].body;
+      assert.match(b.bot_state.handoff_summary, /branch Dwarka Sec 12/);
+      assert.match(b.bot_state.handoff_summary, /preferred Saturday evening/,
+        'the summary carries the soft-booking day/time (D3)');
+      assert.equal(b.bot_state.qualification.preferred_time, 'Saturday evening');
+
+      // the prompt itself names the soft-booking rule + never-confirm guard
+      const calls2 = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      await botReply(LEAD, EV, 'instagram');
+      const sys = JSON.parse(calls2.gemini[0].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
+      assert.ok(sys.includes('Soft booking') && sys.includes('NEVER confirm a slot'),
+        'prompt drives the soft-booking collection (D3)');
+    }
+
+    // 18) turn + conversation-age caps (Step 18, open #17): checked after the
+    //     safety net, before Gemini; the counter ticks on normal live turns
+    {
+      // at the cap (10 bot replies sent) → the 11th inbound hands off, no Gemini
+      let calls = botMock({ config: CFG('live', { turn_cap: 10 }) });
+      let r = await botReply({ ...LEAD, bot_state: { turn_count: 10 } }, EV, 'instagram');
+      assert.equal(r.handoff, 'turn_cap');
+      assert.equal(calls.gemini.length, 0, 'a capped thread spends no Gemini call');
+      assert.equal(calls.sends.length, 1, 'a capped thread gets the hold copy, not silence');
+      assert.ok(calls.sends[0].message.text.includes('connect you with our team'),
+        'turn_cap reuses the llm_error hold copy (dedicated canned.turn_cap wins if set)');
+      assert.ok(!calls.sends[0].message.text.includes('assistant'),
+        'no disclosure prepend — a turn-capped thread disclosed long ago');
+      let b = calls.patches[0].body;
+      assert.equal(b.bot_active, false);
+      assert.match(b.bot_state.handoff_summary, /turn_cap/);
+
+      // one under the cap → normal reply, counter ticks to 10
+      calls = botMock({ config: CFG('live', { turn_cap: 10 }), decision: REPLY_DECISION });
+      assert.deepEqual(await botReply({ ...LEAD, bot_state: { turn_count: 9 } }, EV, 'instagram'), { sent: true });
+      assert.equal(calls.patches[0].body.bot_state.turn_count, 10);
+
+      // missing config → code defaults (cap 10 / age 7 d): 9 turns still fine
+      calls = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      assert.deepEqual(await botReply({ ...LEAD, bot_state: { turn_count: 9 } }, EV, 'instagram'), { sent: true });
+
+      // conversation-age cap: an 8-day-old lead with cap 7 → same turn_cap handoff
+      calls = botMock({ config: CFG('live', { conversation_age_cap_days: 7 }) });
+      const old = { ...LEAD, created_at: new Date(Date.now() - 8 * 864e5).toISOString() };
+      assert.equal((await botReply(old, EV, 'instagram')).handoff, 'turn_cap');
+      assert.equal(calls.gemini.length, 0);
+      // …and an age-capped FIRST-EVER turn still discloses (nothing was sent before)
+      assert.ok(calls.sends[0].message.text.startsWith('Hi! I am the clinic’s assistant'),
+        'age-cap-only thread keeps the disclosure prepend');
+
+      // safety outranks the cap: a medical inbound on a capped thread is MEDICAL
+      calls = botMock({ config: CFG('live') });
+      assert.equal((await botReply({ ...LEAD, bot_state: { turn_count: 99 } },
+        { ...EV, messageText: 'khujli ho rahi hai' }, 'instagram')).handoff, 'medical');
+
+      // shadow mirrors the cap: one row, no send, no mutation (D19)
+      calls = botMock({ config: CFG('shadow') });
+      assert.deepEqual(await botReply({ ...LEAD, bot_state: { turn_count: 10 } }, EV, 'instagram'), { shadow: true });
+      assert.equal(calls.shadowLogs[0].decision.reason, 'turn_cap');
+      assert.equal(calls.sends.length + calls.patches.length, 0);
+    }
+
+    // 19) D18 email alerts (Step 18): emergency + kb_miss handoffs fire ONE Resend
+    //     email each; other handoffs none; a failed alert never breaks the handoff
+    {
+      // kb_miss → alert with the missed question in the body, cfg.alert_email honoured
+      let calls = botMock({
+        config: CFG('live', { alert_email: 'owner@clinic.example' }),
+        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' },
+      });
+      await botReply(LEAD, EV, 'instagram');
+      assert.equal(calls.alerts.length, 1, 'kb_miss fires the D18 email');
+      assert.equal(calls.alerts[0].to[0], 'owner@clinic.example');
+      assert.match(calls.alerts[0].subject, /kb_miss/);
+      assert.match(calls.alerts[0].subject, /Priya Sharma/);
+      assert.match(calls.alerts[0].html, /Bot didn&#39;t know: &quot;price of laser&quot;/,
+        'the missed question rides in the alert body (HTML-escaped — it is verbatim customer text)');
+
+      // emergency → alert fires even though NOTHING was sent to the customer
+      calls = botMock({ config: CFG('live') });
+      await botReply(LEAD, { ...EV, messageText: 'emergency! khoon beh raha hai' }, 'instagram');
+      assert.equal(calls.sends.length, 0);
+      assert.equal(calls.alerts.length, 1, 'emergency fires the D18 email');
+      assert.match(calls.alerts[0].subject, /emergency/);
+
+      // plain medical handoff + qualified handoff + normal turn → no email
+      calls = botMock({ config: CFG('live') });
+      await botReply(LEAD, { ...EV, messageText: 'khujli ho rahi hai' }, 'instagram');
+      calls = botMock({ config: CFG('live'),
+        decision: { ...REPLY_DECISION, handoff: true, reason: 'qualified', reply: 'Team will confirm 🙏' } });
+      await botReply(LEAD, EV, 'instagram');
+      calls = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      await botReply(LEAD, EV, 'instagram');
+      assert.equal(calls.alerts.length, 0, 'only emergency/kb_miss alert (D18 two triggers)');
+
+      // Resend outage → handoff still completes
+      calls = botMock({ config: CFG('live'), alertFails: true,
+        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' } });
+      assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'kb_miss',
+        'a failed alert email must not break the handoff');
+
+      // no RESEND_API_KEY → alert skipped silently, handoff unaffected
+      delete process.env.RESEND_API_KEY;
+      calls = botMock({ config: CFG('live'),
+        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' } });
+      assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'kb_miss');
+      assert.equal(calls.alerts.length, 0);
+      process.env.RESEND_API_KEY = 'test_resend';
+    }
+
+    // 20) a mid-turn crash is swallowed — returns {error}, never throws (D13)
     {
       global.fetch = async (url) => url.includes('settings')
         ? { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live' }) }] }
@@ -1119,6 +1249,7 @@ assert.equal(extractComments({}).length, 0);
     delete process.env.SUPABASE_ANON_KEY;
     delete process.env.GEMINI_API_KEY;
     delete process.env.META_ACCESS_TOKEN;
+    delete process.env.RESEND_API_KEY;
   }
 
   global.fetch = realFetch;

@@ -122,7 +122,7 @@ function createSupabaseClient() {
     async findLeadByPlatformId(platform, userId) {
       const col = idColumnFor(platform);
       const res = await fetch(
-        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id,bot_active,category,bot_state&limit=1`,
+        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id,bot_active,category,bot_state,created_at&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`leads lookup failed: ${res.status} ${await res.text()}`);
@@ -1109,6 +1109,7 @@ HARD RULES — breaking any is a failure:
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
 - Mirror the customer's language (Hinglish is fine and encouraged). Keep replies warm, 2–4 sentences.
 - When qualifying a lead, ask ONE question at a time, in order: service → branch/location → WhatsApp number → preferred time. Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one).
+- Soft booking: once a lead is engaged, work toward their preferred day/time for a visit. When they want to book, confirm what you have (service, branch, preferred time), thank them, and hand off with reason 'wants_booking' — the human team locks the appointment in the clinic system. NEVER confirm a slot or appointment yourself.
 - A deflected or partial answer always ends with a soft cue to the human team — never a dead end.
 
 Set handoff=true with the matching reason when: the customer wants to book now or declines, is fully qualified, asks for a human, the message is medical, or you cannot answer from the KB.`;
@@ -1362,6 +1363,9 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   if (!decision.safety_net) {
     if (decision.reason === 'kb_miss')   text = cannedCopy(cfg, 'kb_miss');
     if (decision.reason === 'llm_error') text = cannedCopy(cfg, 'llm_error');
+    // A capped thread gets the same hold copy — going silent after 10 bot turns
+    // would be a dead end (D13 spirit). A dedicated canned.turn_cap wins if set.
+    if (decision.reason === 'turn_cap')  text = cannedCopy(cfg, 'turn_cap') || cannedCopy(cfg, 'llm_error');
     if (!text) text = String(decision.reply || '').trim() || null;
   }
   if (firstBotTurn && text) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
@@ -1389,7 +1393,48 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
                     ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500) } : {}) },
   });
   console.log(`[meta-service] handoffToStaff: lead ${lead.id} reason=${decision.reason} — "${summary.split('\n')[0]}"`);
+  // D18 — email alert on emergency/kb_miss handoffs (one mechanism, two triggers;
+  // the dashboard ❓/🔴 badges shipped with Step 13). Best-effort: never throws,
+  // never delays the handoff result. Shadow mode never reaches here.
+  if (decision.reason === 'emergency' || decision.reason === 'kb_miss') {
+    await sendBotAlert(cfg, lead, decision.reason, summary);
+  }
   return { handoff: decision.reason, summary };
+}
+
+const escHtml = (s) => String(s).replace(/[&<>"']/g, c => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// D18 — the email half of the alert. Same provider as send-variance-alert
+// (Resend); `cfg.alert_email` overrides the default admin address. A missing key
+// or failed send logs a warning and moves on — the handoff is already complete
+// and the dashboard badge still marks the lead.
+async function sendBotAlert(cfg, lead, reason, summary) {
+  const key = process.env.RESEND_API_KEY;
+  if (!key) {
+    console.warn('[meta-service] RESEND_API_KEY not set — bot alert email skipped');
+    return;
+  }
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'DSkin Bot <onboarding@resend.dev>',
+        to:   [String(cfg?.alert_email || 'hospitalitybee@gmail.com').trim()],
+        subject: `${reason === 'emergency' ? '🔴' : '❓'} Bot alert — ${reason} handoff (${lead.customer_name || lead.id})`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1f2937">
+<div style="font-size:17px;font-weight:700;color:#8B6508;margin-bottom:12px">DSkin DM Assistant</div>
+<p style="margin:0 0 12px"><strong>${reason === 'emergency' ? 'Emergency handoff' : 'Bot didn’t know the answer'} — ${escHtml(lead.customer_name || lead.id)}</strong></p>
+<pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font-family:inherit;margin:0">${escHtml(summary)}</pre>
+<p style="margin:16px 0 0;color:#6b7280;font-size:13px">Open the dashboard to reply — the lead is waiting in the branch inbox.</p>
+</div>`,
+      }),
+    });
+    if (!res.ok) console.warn('[meta-service] bot alert email failed:', res.status, await res.text());
+  } catch (e) {
+    console.warn('[meta-service] bot alert email error:', e.message);
+  }
 }
 
 // D17 teach-the-bot capture — called by meta-send on EVERY staff send: the
@@ -1442,8 +1487,24 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // D7 layer 2 — is_medical on the model's own decision overrides its reply.
     let decision, llmError = null, firstBotTurn = true, offer = null, image = null;
     const tier = classifyInbound(ev.messageText);
+    // Open #17 caps — checked after the safety net (a medical/urgent inbound on a
+    // capped thread still hands off as medical, which outranks the cap) and before
+    // Gemini, so a capped thread spends no call. turn_count ticks on each normal
+    // live bot turn; conversation age = the lead row's age.
+    const turns   = Number(lead.bot_state?.turn_count || 0);
+    const turnCap = Number(cfg.turn_cap ?? 10);
+    const ageCap  = Number(cfg.conversation_age_cap_days ?? 7) * 86400000;
+    const created = Date.parse(lead.created_at || '');
+    const overCap = turns >= turnCap
+                 || (ageCap > 0 && Number.isFinite(created) && Date.now() - created > ageCap);
     if (tier) {
       decision = { safety_net: tier, reason: tier, reply: '', handoff: true };
+    } else if (overCap) {
+      // History isn't fetched on this path; a turn-capped thread has prior bot
+      // replies (the counter only ticks on sends), so disclosure was already
+      // sent. An age-cap-only thread may genuinely still need it.
+      firstBotTurn = turns < turnCap;
+      decision = { reason: 'turn_cap', reply: '', kb_covers: false, handoff: true, category: 'lead' };
     } else {
       // Context: last ~10 turns, minus the inbound this call is answering.
       const rows = await db.listRecentMessages(lead.id, 10);
@@ -1532,6 +1593,9 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
       message: text, is_seen: true, is_bot: true,
     });
+    // Open #17 — the cap counter ticks only on a delivered normal turn (a failed
+    // send throws above and never persists; handoff/non-lead replies are terminal).
+    botState.turn_count = turns + 1;
     await db.updateLead(lead.id, { category: 'lead', bot_state: botState });
     console.log(`[meta-service] botReply: replied on lead ${lead.id} (${Math.round(Date.now() - t0)}ms)`);
     return { sent: true };

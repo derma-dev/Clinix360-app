@@ -4,8 +4,9 @@
 > 1. Read the **Status** block + **Log** below — that's where the last session left off.
 > 2. Design and all locked decisions: [artifacts/CHATBOT_FINAL_PLAN_2026-08-24.md](artifacts/CHATBOT_FINAL_PLAN_2026-08-24.md)
 >    (ledger **D1–D24**, turn pipeline §3, schema §4, tests §8). Don't re-litigate — build.
-> 3. Next work = **first unchecked step**. Before starting it, confirm the previous step's
->    Verify still holds (unit suite: `node netlify/functions/utils/meta-service.test.js`).
+> 3. Next work = **first unchecked step in the Status block's agreed order** — execution
+>    order ≠ step number (currently 17 → 18 → 16 → 19–20, see Status). Before starting it,
+>    confirm the previous step's Verify still holds (unit suite: `node netlify/functions/utils/meta-service.test.js`).
 > 4. After each step: tick it, append one line to the **Log**, update **Status** — then **propose**
 >    the commit (one-line message + what's in it) and **wait for the user's go-ahead. Never
 >    auto-commit.** [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) updates belong in the
@@ -30,14 +31,19 @@
 
 ## Status
 
-- **Now:** Steps 13–15 code done (unit-verified) — **live verify batch pending one publish**, then Step 16
-- **Done:** Steps 1–12 (code + live — user confirmed the 8–12 batch on the published deploy 2026-08-25) · Steps 13–15 (code)
-- **Remaining:** 13–15 live batch → Steps 16–20
+- **Now:** commit + publish Steps 17–18, run their live batch, then Step 16 (local replay scripts — zero publishes)
+- **Done:** Steps 1–15 (code + live — user confirmed the 8–12 and 13–15 batches on published deploys 2026-08-25) · Steps 17–18 (code, unit-verified)
+- **Remaining:** commit + **ONE publish** (17–18) → run the 17–18 live batch → **Step 16** (local scripts, zero publishes: ~300-stratified-thread sample for the tuning loop, full corpus once for the §8.3 numbers; the harness must inject a synthetic `bot_state.turn_count` per replayed turn or the turn cap never fires in replay) → any prompt tweaks from tuning fold into the pre-19 publish → **metrics-email build** (locked 2026-08-25, see Step 19) → Steps 19–20
+- **Why 17→18 before 16 (done as decided):** replay measures the FINAL prompt — booking collection (17) and turn cap (18) changed what drafts look like.
 - **Blockers:** none
-- **Publish budget:** 3/15 used · **12 left** — batch live checks, docs-only commits never publish.
-  **Live batch checklist for 13–15 (user, against the next publish):** DM an unknown question (expect hold reply + "Bot didn't know" card + ❓ badge) → staff reply from dashboard → candidate appears in Settings → Teach the Bot → Approve → re-ask (bot answers) · share an offer post + "price?" (expect offer price "as in the post") → set offer_stale_days=0 → same share again (KB range) → set back to 30 · send a service screenshot (expect service identified + KB price) · one `settings.offer_cache` row + `kb_candidates` row checkable from local REST.
+- **Publish budget:** 4/15 used · **11 left** — batch live checks, docs-only commits never publish.
+  **Live batch checklist for 17–18 (user, against the next publish):** run a qualify→agree flow ("price of laser" … "book kar do Saturday evening") → handoff summary must contain service + branch + preferred day/time · DM an emergency phrasing → alert EMAIL arrives (bot sends the customer nothing) · trigger a kb_miss → alert email arrives (an unknown-question DM covers the 13 teach-loop too) · send 11 quick DMs on a throwaway thread → bot replies to #1–10 then hands off `turn_cap` on #11 with the "connect you" copy · paste [scripts/bot-metrics.sql](scripts/bot-metrics.sql) in the Supabase SQL editor → real numbers return (missed_medical=0).
 
 ## Log (append one line per completed step — date · step · what/why/learned)
+
+- 2026-08-25 · Steps 13–15 live · user ran the whole live batch against the published deploy (teach-the-bot loop end-to-end incl. re-ask after Approve, offer ladder fresh + stale-days=0 flip, service screenshot vision) and confirmed all checks. Steps 1–15 now fully live-verified. Publish 4/15.
+
+- 2026-08-25 · Steps 17–18 · **17 (soft booking, D3):** prompt-side only by design — the system prompt now drives toward a preferred day/time once a lead is engaged and hands off `wants_booking` on a booking intent ("NEVER confirm a slot yourself"); `preferred_time` plumbing (schema → mergeBotState → summary "preferred \<time\>") already existed from Steps 8–9, so no new runtime code. **18 (caps + alerts + metrics):** caps checked after the safety net / before Gemini — `bot_state.turn_count` (ticks only on delivered normal live turns) ≥ `turn_cap` (10) → `turn_cap` handoff with the hold copy (`canned.turn_cap` else llm_error copy — never silence after 10 turns); lead age > `conversation_age_cap_days` (7) → same; safety outranks the cap; turn-capped threads skip the disclosure re-prepend, age-cap-only first turns keep it. `sendBotAlert`: one Resend email on emergency/kb_miss handoffs (D18's two triggers; badge was Step 13), best-effort, `cfg.alert_email` override, customer text HTML-escaped. `scripts/bot-metrics.sql`: weekly #18 query (≥60% complete-handoff target, missed-medical=0 invariant computed as "no is_bot message newer than the last inbound on a safety-handoff thread"). **Learned:** (a) shadow mode never ticks `turn_count` (no mutation) — the Step 16 replay harness must inject a synthetic count per replayed turn or the cap is invisible in replay; (b) the alert body had to HTML-escape the verbatim question — asserting on the raw string caught it immediately. Unit suite green (soft-booking summary/prompt, cap boundary both sides, age cap, safety-outranks-cap, shadow cap row, all D18 trigger/negative/failure cases).
 
 - 2026-08-25 · Steps 13–15 · **13 (teach-the-bot, D17/D22):** kb_miss summary now names the question + `bot_state.kb_miss_question` stashed; meta-send captures the FIRST staff reply on a kb_miss thread → one `kb_candidates` row (exactly-once flag on bot_state, best-effort, never 502s a send); admin Settings → **Teach the Bot** card (Approve/Edit+Approve/Discard) — approval does a freshest-config read-modify-write, then folds the Q/A into the KB: a price answer on a word-matched service updates that entry (newest quote = source of truth, D22), else a learned FAQ entry tagged `learned:<YYYY-MM>`; ❓/🔴 badges on branch lead cards (D18 dashboard half — email is Step 18). **14 (share→offer, D9/D10):** share caption (payload carries `ig_post_media_id` + title — the plan's permalink map stayed unnecessary) → one structured `parseOfferCaption` call matched to KB service keys → cached in `settings.offer_cache` keyed by media id (capped 50, one parse per post, cross-lead); ladder enforced in CODE at quote time (`isOfferFresh` ms-compare vs `offer_stale_days`, 0 = instantly stale) → prompt gets a LIVE OFFER (quotable, overrides KB) or STALE OFFER (never quote) block; the thread's latest offer rides in `bot_state.last_offer` so follow-up "price?" turns see it; shadow logs the offer in the decision row but writes nothing. **15 (vision):** IG image DM with CDN url → bytes fetched → `inline_data` on the turn's user content + KB-service-match addendum; fetch/parse failures degrade to a plain text turn (WA images carry no url — IG-first, D5). **Learned:** asserting on prompt-marker strings broke because the system prompt itself now names the LIVE/STALE blocks — tests key on the ladder block's distinctive phrases instead. Unit suite green (offer ladder a–h, capture, vision, freshness).
 
@@ -134,6 +140,7 @@
 - **Status:** ✅ done 2026-08-25 unit-verified (IG image with CDN url → bytes → `inline_data` + KB-match addendum on the user turn; fetch failure degrades to a plain text turn; WA images carry no url in the webhook → no vision there yet, IG-first D5. Model fallback = config `model` field, nothing to build. Live screenshot check joins the next publish batch)
 
 ### Step 16 — Corpus replay harness
+- **Order note (2026-08-25):** runs AFTER 17–18 (user decision) so replay measures the final prompt — see Status. Tuning loop on a fixed ~300-stratified-thread sample (price / offers / collab / safety / long threads); full corpus once at the end for §8.3. Local scripts — zero publishes. Script needs throttle + 429 backoff (free-tier viable on the sample; full pass ≈ $4 paid or a throttled week free).
 - **Implement:** `scripts/replay-shadow.js` (feed `ig_export_history.jsonl` threads through the real pipeline → `bot_shadow_log`) + `scripts/review-shadow.js` (sample + stats: category/reason/malformed/is_medical rates, latency p50/p95).
 - **Verify:** run over the 1,970-thread corpus end-to-end; review output readable; **tune KB/prompt until drafts are acceptable vs actual staff replies** (this is the cheap iteration loop before relying on live traffic).
 - **Status:** ☐ not started
@@ -141,17 +148,18 @@
 ### Step 17 — Soft booking (D3)
 - **Implement:** prompt-side — collect preferred day/time once lead is engaged; `qualification.preferred_time` → carried on handoff summary; staff lock in Clinicea. No calendar.
 - **Verify:** live: run a qualify→agree flow → handoff summary contains service + branch + preferred day/time.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (prompt now names the soft-booking drive explicitly — work toward preferred day/time once engaged, confirm + hand off `wants_booking` on a booking intent, NEVER confirm a slot yourself; `preferred_time` already flowed schema → `bot_state` → summary ("preferred \<time\>") from Steps 8–9, so the only new plumbing is the wording. Unit: summary carries `branch` + `preferred`, prompt contains the Soft-booking rule. Live qualify→agree check joins the publish batch)
 
 ### Step 18 — Alerts + caps + metrics
 - **Implement:** email alert on `emergency` + `kb_miss` (one mechanism, two triggers, D18 — badge exists from Step 13); turn cap 10 + 7-day conversation-age cap (#17 — confirm finals); success-metric weekly SQL (#18: ≥60% handoffs phone+service+location, zero missed medical).
 - **Verify:** trigger kb_miss → email arrives; cap: send 11 DMs → turn_cap handoff on #11; metrics query returns real numbers.
-- **Status:** ☐ not started
+- **Status:** ✅ done 2026-08-25 unit-verified (**caps (#17 finals = 10 turns / 7 days, both already Settings-card fields):** checked in `botReply` after the safety net, before Gemini — `bot_state.turn_count` (ticked on each delivered normal live turn) ≥ `turn_cap` → the 11th inbound hands off; lead older than `conversation_age_cap_days` → same; `turn_cap` handoff sends the hold copy (`canned.turn_cap` if set, else llm_error copy); safety outranks the cap; no disclosure re-prepend on a turn-capped thread; shadow logs the cap row but never ticks the counter (replay must inject a synthetic count — noted in Status). `findLeadByPlatformId` now selects `created_at`. **Alerts (D18):** `sendBotAlert` — Resend email on emergency/kb_miss handoffs only, best-effort (missing key/failure logs + moves on), `cfg.alert_email` override, verbatim text HTML-escaped; medical/qualified/normal → no email; no alerts in shadow. **Metrics (#18):** `scripts/bot-metrics.sql` — weekly SQL-editor run: % complete handoffs (≥60% target), safety/kb_miss/turn_cap counts, missed-medical invariant (0), volume. Live email/cap/SQL checks join the publish batch)
 
 ## Client rollout (plan Phase 5/6)
 
 ### Step 19 — Client shadow-first rollout
 - **Implement:** deliver same code + [final plan](artifacts/CHATBOT_FINAL_PLAN_2026-08-24.md) to client; client KB gets Phase 1 sign-offs (clinician risk/guardrail wording, offers.md, canned #2); flip client `mode:'shadow'` on real traffic; seeded scenarios re-run on their app.
+- **Pre-19 build — scheduled metrics email (client wants DAILY analytics; approach locked 2026-08-25):** NO new settings card/section — `chatbot_config.report_frequency: 'off' | 'daily' | 'weekly'` dropdown in the **existing Chatbot card** (recipient = `alert_email`). ONE daily scheduled function decides at runtime (daily → send every run · weekly → Mondays only · off → skip) — the `check-automations` pattern, not a second cron. Content = the same numbers as [scripts/bot-metrics.sql](scripts/bot-metrics.sql) computed over Supabase REST, emailed via Resend; the SQL file stays for ad-hoc runs. Deliberately NOT the `cashup_automations` per-report config model — one fixed digest, one config field.
 - **Verify:** **exit criteria** (final plan §8.3): ≥30 leads/≥100 turns · ≥10 seeded Hinglish medical = 0 drafted answers · malformed <2% · offer extraction ≥90% · 20-draft sign-off. Not met → fix, extend shadow.
 - **Status:** ☐ not started
 
@@ -164,7 +172,7 @@
 
 ## Client-side items pending (gate Step 19, not the test build)
 
-- [ ] Price sheet (sanity check only — D22, corpus latest-wins is the source)
+- [x] ~~Price sheet~~ — **resolved 2026-08-25, client declined to provide one:** "Learn the pricing from previous conversations as they must be provided there; if any isn't provided should push to human in the loop to fetch the pricing" — i.e. D22 confirmed verbatim (corpus latest-wins + kb_miss HITL, Steps 4 + 13 already shipped). No sheet will arrive; sanity-check banner (open #5) stays corpus-based.
 - [ ] offers.md confirmation; 2nd canned template approved copy
 - [ ] Clinician sign-off on risk-FAQ + guardrail wording
 - [ ] Gemini API key (needed at Step 6 live check)
