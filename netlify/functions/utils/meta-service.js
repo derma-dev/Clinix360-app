@@ -1028,8 +1028,10 @@ async function routeLeadFromReply(lead, text, payload) {
 // signed-off KB answer, not a handoff; those subtleties are layer 2 (is_medical).
 // A false positive only costs automation (safe); a false negative falls through
 // to layer 2. Tuned against the corpus by the Step 16 shadow replay.
+// 'right now' dropped (Step 16 replay): 10/10 corpus hits were false positives
+// ("is this offer av right now") — a time phrase, not a symptom.
 const EMERGENCY_NET = [
-  'emergency', 'urgent', 'right now', 'turant', 'abhi abhi',
+  'emergency', 'urgent', 'turant', 'abhi abhi',
   'khoon', 'bleed',
   'jal gaya', 'jala diya', 'jal gayi', 'burned', 'burns', 'blister',
   'saans', 'breathless', 'difficulty breathing', 'shortness of breath',
@@ -1104,21 +1106,24 @@ HARD RULES — breaking any is a failure:
 - Answer ONLY from the KNOWLEDGE BASE below. If it does not answer the question, set kb_covers=false, reply="" and handoff=true.
 - NEVER diagnose, prescribe medicines, or interpret symptoms. A message describing active symptoms (pain, itching, bleeding, a reaction) is not yours to answer: set is_medical=true, reply="" and handoff=true.
 - "Is it safe / painful for my condition?" questions about a STABLE condition (e.g. "PCOS hai to laser safe?") are NOT medical — answer from the KB's safety entries, is_medical=false.
-- Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise price is "shared after consultation" with a cue to the team. NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted.
+- Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise price is "shared after consultation" with a cue to the team. NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. KB prices are the last price staff quoted and often cover a package of sessions — NEVER say "per session" or state a session count; say it starts from that price and the team confirms the exact plan. Never reuse one service's price for a different service.
 - NEVER guarantee results.
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
 - Mirror the customer's language (Hinglish is fine and encouraged). Keep replies warm, 2–4 sentences.
-- When qualifying a lead, ask ONE question at a time, in order: service → branch/location → WhatsApp number → preferred time. Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one).
-- Soft booking: once a lead is engaged, work toward their preferred day/time for a visit. When they want to book, confirm what you have (service, branch, preferred time), thank them, and hand off with reason 'wants_booking' — the human team locks the appointment in the clinic system. NEVER confirm a slot or appointment yourself.
+- When qualifying a lead, ask ONE question at a time, in order: service → branch/location → WhatsApp number → preferred time. Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one). Never re-ask something the conversation already answered — if they named a branch or area (even two), note it and move on to the next question. Ask any one question at most twice in the whole chat — the WhatsApp number included; if it is still unanswered, move on.
+- Soft booking: once a lead is engaged, work toward their preferred day/time for a visit. When they want to book, confirm what you have (service, branch, preferred time), ask for their WhatsApp number if you don't have it yet, thank them, and hand off with reason 'wants_booking' — the human team locks the appointment in the clinic system. NEVER confirm a slot or appointment yourself.
 - A deflected or partial answer always ends with a soft cue to the human team — never a dead end.
+- Keep the conversation going yourself: do NOT hand off merely because the basics are answered. "Fully qualified" means you have asked for their WhatsApp number and they gave it or clearly refused it — never hand off with the number still unasked. If they wind down ("okay", "I'll think", "thanks") and you have not yet asked for their WhatsApp number, ask for it now so the team can share details there — never let the chat end with the number unasked. Staff take over only at a real closing point.
 
-Set handoff=true with the matching reason when: the customer wants to book now or declines, is fully qualified, asks for a human, the message is medical, or you cannot answer from the KB.`;
+Set handoff=true with the matching reason when: the customer wants to book now or declines, is fully qualified (WhatsApp number asked — given or refused), asks for a human, the message is medical, or you cannot answer from the KB.`;
 
 // Whole-KB injection every turn (D20): no retrieval step can miss a medical
 // entry. ~40 entries stays tiny; upgrade path is pgvector top-k.
 function renderKbForPrompt(kb) {
   const lines = (kb?.entries || []).map(e => e.type === 'service'
-    ? `- SERVICE ${e.key}${e.price ? `: ₹${e.price} per session (last quoted ${e.price_last_quoted || 'n/a'})` : ': price after consultation'}`
+    // Corpus-mined prices are what staff last quoted — often a multi-session
+    // package, so no "per session" claim here (the P/S in keys is the clinic's billing name).
+    ? `- SERVICE ${e.key}${e.price ? `: ₹${e.price} (last quoted ${e.price_last_quoted || 'n/a'})` : ': price after consultation'}`
     : `- FAQ [${(e.tags || []).join(', ')}]: ${e.a}`);
   return `KNOWLEDGE BASE (the ONLY source for answers):\n${lines.join('\n')}`;
 }

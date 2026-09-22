@@ -510,6 +510,7 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(classifyInbound('can I speak to a real person?'), 'requested');
   // FAQ / lead traffic passes through to the LLM (null = no safety tier)
   assert.equal(classifyInbound('price of laser'), null);
+  assert.equal(classifyInbound('Is this offer av right now as well'), null, '"right now" is a time phrase, not an emergency');
   assert.equal(classifyInbound('PCOS hai to laser safe?'), null, 'condition + risk-FAQ is NOT layer-1 medical');
   assert.equal(classifyInbound('kya laser painful hai?'), null, '"is it painful" is the signed-off risk FAQ');
   assert.equal(classifyInbound('hydra facial ka kitna price hai'), null);

@@ -12,6 +12,7 @@
 //   node scripts/replay-shadow.js --all          # full corpus → replay-full.jsonl (§8.3 numbers)
 //   node scripts/replay-shadow.js --dry          # plan only: buckets, turn counts, call estimate — no API
 //   node scripts/replay-shadow.js --limit 5      # smoke: first N threads of the selection
+//   node scripts/replay-shadow.js --bucket price --out replay-price.jsonl   # one strat bucket only
 //   node scripts/replay-shadow.js --rpm 15       # throttle (default 15 calls/min, free-tier friendly)
 // Re-running the same command RESUMES: threads already in the output file are skipped.
 // 429/5xx → exponential backoff; a daily-quota 429 stops the run gracefully (just re-run later).
@@ -94,15 +95,26 @@ async function throttled(fn) {
   return fn();
 }
 class QuotaExceeded extends Error {}
+// Free tier = 500 requests/day (live-measured 2026-08-26). A quota 429 carries
+// "retry in Xs" — X short = a window we can simply wait out; X long (>2 min,
+// e.g. hours until the daily reset) = stop the run, resume later.
 async function withBackoff(fn) {
-  for (let a = 0; ; a++) {
+  for (let a = 0; ; ) {
     try { return await throttled(fn); }
     catch (e) {
-      const retryable = /\b(429|5\d\d)\b/.test(e.message);
-      if (retryable && /429/.test(e.message) && /quota|exhaust/i.test(e.message)) throw new QuotaExceeded(e.message);
-      if (!retryable || a >= 4) throw e;
-      console.warn(`  [replay] ${e.message.split('\n')[0]} — backoff ${2 ** a * 2000}ms`);
+      const msg = String(e.message);
+      const q = msg.match(/429[\s\S]*?retry in ([\d.]+)s/i);
+      if (q) {
+        const wait = parseFloat(q[1]) * 1000 + 2000;
+        if (wait > 120000) throw new QuotaExceeded(msg.split('\n')[0]);
+        console.warn(`  [replay] quota window — waiting ${Math.round(wait / 1000)}s`);
+        await sleep(wait);
+        continue;   // a quota wait doesn't consume a retry attempt
+      }
+      if (!/\b(429|5\d\d)\b/.test(msg) || a >= 4) throw e;
+      console.warn(`  [replay] ${msg.split('\n')[0]} — backoff ${2 ** a * 2000}ms`);
       await sleep(2 ** a * 2000);
+      a++;
     }
   }
 }
@@ -165,7 +177,11 @@ async function replayThread(thread, cfg, append) {
           const k = normCap(caption);
           offer = offerCache.get(k) || await withBackoff(() => parseOfferCaption(
             { model: cfg.model, caption, serviceKeys: cfg.kb.entries.filter(e => e.type === 'service').map(e => e.key) }
-          ).then(p => p && { ...p, last_seen: m.at, source_caption: caption.slice(0, 200) }));
+          ).then(p => p && { ...p, last_seen: m.at, source_caption: caption.slice(0, 200),
+                              // A just-parsed offer is fresh by definition (live resolveOffer
+                              // sets fresh:true; without this the ladder renders STALE on the
+                              // very turn the post was shared).
+                              fresh: isFreshOn(clock, m.at, cfg.offer_stale_days) }));
           if (offer) { offerCache.set(k, offer); lastOffer = offer; }
         } else if (lastOffer) {
           offer = { ...lastOffer, fresh: isFreshOn(clock, lastOffer.last_seen, cfg.offer_stale_days) };
@@ -188,6 +204,7 @@ async function replayThread(thread, cfg, append) {
           // handoff/non-lead turns are terminal there and don't tick).
           if (!decision.handoff && decision.category === 'lead' && String(decision.reply || '').trim()) turns++;
         } catch (err) {
+          if (err instanceof QuotaExceeded) throw err;   // stop the run, don't burn threads as error rows
           row.latency_ms = Date.now() - t0;
           row.error = err.message;   // llm_error equivalent — review's malformed rate
         }
@@ -206,7 +223,9 @@ const RUN = new Date().toISOString();
 (async () => {
   const threads = fs.readFileSync(CORPUS, 'utf8').trim().split('\n').map(l => JSON.parse(l));
   const { picked, byBucket } = selectSample(threads);
-  const selected = LIMIT > 0 ? picked.slice(0, LIMIT) : picked;
+  const BUCKET = opt('bucket', '');   // e.g. --bucket price: tune on lead-heavy threads only
+  const pool = BUCKET ? picked.filter(t => bucketOf(t) === BUCKET) : picked;
+  const selected = LIMIT > 0 ? pool.slice(0, LIMIT) : pool;
 
   const turnsEst = selected.reduce((n, t) => n + t.messages.filter(m => m.dir === 'in' && !m.canned && m.text).length, 0);
   console.log(`[replay] corpus ${threads.length} threads → selected ${selected.length} (${Object.entries(byBucket).map(([b, l]) => `${b}:${Math.min(l.length, ALL ? l.length : QUOTA[b] ?? 0)}`).join(' ')})`);
