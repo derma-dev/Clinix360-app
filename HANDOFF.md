@@ -18,7 +18,6 @@ config.js                      # Supabase URL + anon key, admin email, currency,
 netlify.toml                   # functions dir + SPA redirect
 package.json                   # only dep: @netlify/functions (needed to bundle the scheduled fn)
 SUPABASE_SCHEMA.sql            # CURRENT db schema (read this for the DB)
-supabase-schema.sql            # ORIGINAL day-1 schema (stale — kept for history)
 netlify/functions/
   send-feedback-email.js       # staff feedback -> admin email
   send-variance-alert.js       # closing-variance -> admin email

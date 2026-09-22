@@ -177,7 +177,7 @@ async function replayThread(thread, cfg, append) {
           const k = normCap(caption);
           offer = offerCache.get(k) || await withBackoff(() => parseOfferCaption(
             { model: cfg.model, caption, serviceKeys: cfg.kb.entries.filter(e => e.type === 'service').map(e => e.key) }
-          ).then(p => p && { ...p, last_seen: m.at, source_caption: caption.slice(0, 200),
+          ).then(p => p && { ...p, last_seen: m.at, source_caption: caption.slice(0, 500),
                               // A just-parsed offer is fresh by definition (live resolveOffer
                               // sets fresh:true; without this the ladder renders STALE on the
                               // very turn the post was shared).

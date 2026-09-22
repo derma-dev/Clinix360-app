@@ -144,11 +144,10 @@ fonts/                          geist.css + geist-latin.woff2 + geist-latin-ext.
 .env.example                    template for local function env vars
 .env                            local secrets — GITIGNORED, never commit
 SUPABASE_SCHEMA.sql             current live DB schema (source of truth for the DB)
-supabase-schema.sql             day-1 schema — STALE, kept for history only
 
 netlify/functions/
   get-config.js                 → Supabase URL + anon key to the browser from env vars
-  meta-webhook.js               → GET verify + POST receive for Meta (IG/FB/WA)
+  meta-webhook.mjs              → GET verify + POST receive for Meta (IG/FB/WA)
   meta-send.js                  → outbound reply to a lead, platform resolved from the row
   meta-status.js                → live connection check for admin "Connected Accounts"
   send-feedback-email.js        → staff feedback  → admin email
@@ -564,19 +563,20 @@ shared service: [netlify/functions/utils/meta-service.js](netlify/functions/util
 ```
 IG DM / FB message / WA message
   → Meta → POST <site>/webhook/meta
-  → meta-webhook.js
+  → meta-webhook.mjs  (verify HMAC → 200 at once → context.waitUntil)
   → handleWebhook(payload)
       ├ extractEvents(payload)  — platform + flattened event list
       ├ isPlatformEnabled(platform)  — admin toggle, FAIL-OPEN
-      └ per event: skip echoes, skip missing sender/text
+      └ per event: echoes → processEcho (app reply → store + takeover), skip missing sender/text
           → processIncomingMessage(senderId, text, platform, profileName)
               ├ findLeadByPlatformId(platform, senderId)
               ├ exists? backfill the real name if still a placeholder
               │  else   createLead({branch_id: META_BRANCH_ID, source, customer_name,
               │                     <platform>_user_id, status:'new',
               │                     bot_active: mode∈{live,shadow}})   ← D6
+              ├ routeLeadFromReply(lead, text, payload)  ← DMs only, BEFORE the insert,
+              │    so the row (and the bot reply) carry the new branch_id; failure logged
               └ insertMessage({lead_id, direction:'incoming', message, is_seen:false})
-          → routeLeadFromReply(lead, text, payload)
           → if FRESH insert (not a redelivery): botReply(lead, ev, platform)  ← never throws
   → row appears in the Inbox
 ```
@@ -600,8 +600,13 @@ WhatsApp, hence the explicit split at
   ([meta-service.js:36](netlify/functions/utils/meta-service.js#L36)). A silent default
   would write one platform's sender id into another's column and corrupt dedupe forever.
   This is the single most dangerous function in the integration.
-- **Echo skip**: `message.is_echo === true` means it's a copy of *our own* outbound
-  message — never ingest it.
+- **Echoes** (`message.is_echo === true`) are copies of messages sent *from* the account —
+  ours (bot, dashboard, comment DM) or staff typing in the Instagram app — never a customer
+  turn. `processEcho` waits 5 s (our send paths store their row right after the API
+  returns), then: an outgoing row with the same text in the last 2 min → ours, ignored;
+  the comment DM's button template → ours; anything else → stored as an outgoing row (so
+  the dashboard shows it, `external_message_id` = the echo mid) + D12 takeover + D17
+  capture. IG echoes carry no `app_id`, hence the text match.
 - **Non-text messages** (image/audio/…) get a display label (`📷 image`, `🔗 shared post:
   <caption>`, `📎 <type>`) instead of being dropped (chatbot Step 2); the event carries
   `ev.attachment {type, mediaId, title, url}` for the offer-price flow. WhatsApp delivery
@@ -665,7 +670,11 @@ botReply
   │    decision.is_medical → overrides the model's reply (D7 layer 2)
   ├ mode='shadow' → logShadowTurn: ONE bot_shadow_log row; no send, no lead mutation
   └ mode='live':
+       ├ burst guard (yieldsToBurst) → a newer inbound arrived? this turn sends nothing,
+       │    the newer turn answers both (share / image / safety-net messages never yield;
+       │    a text turn yields to one earlier in its burst, ≤60 s, no reply in between)
        ├ non-lead category → one canned reply (is_bot=true) → category filed, bot off
+       │    (misc on a thread already filed as a lead → stays lead, normal turn)
        ├ decision.handoff → handoffToStaff
        └ else → disclosure prepend on the FIRST bot turn (D15) → sendByPlatform
             → persist outgoing is_bot=true → persist category + qualification
@@ -681,7 +690,8 @@ botReply
   words for medical/emergency, "Bot didn't know: \<q\>" for kb_miss),
   `updateLead({bot_active:false, status:'qualified', category})`.
   A failed courtesy send never aborts the handoff.
-- **Takeover** (D12): any staff send via meta-send flips `bot_active=false`, sticky; the
+- **Takeover** (D12): any staff send via meta-send — or typed in the Instagram app (the
+  echo, see `processEcho`) — flips `bot_active=false`, sticky; the
   🤖⏯ Take-over button is the shortcut. The comment automation's DM deliberately does NOT
   flip it — the bot continuing qualification after "which branch?" is the intended flow.
 - **Teach-the-bot loop** (D17/D22, checklist Step 13): a `kb_miss` handoff stashes the
@@ -703,7 +713,9 @@ botReply
   cheap structured call (`parseOfferCaption`) matches the caption to a KB service key and
   price. Freshness is decided **in code** at quote time (`isOfferFresh`, ms compare vs
   `offer_stale_days` — `0` = instantly stale), never by the model: the prompt receives a
-  **LIVE OFFER (quotable)** block (the one price exception to the KB-only rule) or a
+  **LIVE OFFER (quotable)** block (the one price exception to the KB-only rule; it carries
+  the post caption, first 500 chars, so the bot can repeat a session count or branch the
+  post states — nothing the caption doesn't say) or a
   **STALE OFFER (not quotable)** block (KB ladder instead). The thread's latest offer
   rides in `bot_state.last_offer` so a follow-up "price?" (no attachment) still sees it;
   shadow mode logs the offer inside the `bot_shadow_log.decision` but writes nothing.
@@ -784,6 +796,8 @@ customer taps [Dwarka] (or types "dwarka")
 
 **Rules** live in `settings.comment_rules` (JSON), edited in **Admin → Settings → Comment
 Automation**. Case-insensitive substring, first hit wins, `*` is the catch-all tried last.
+One rule's keyword may list comma-separated alternatives (`price, cost, kitna`) — Hinglish
+variants share one DM instead of duplicating the copy.
 No match → the comment is left completely alone.
 
 ```json
@@ -903,7 +917,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | Function | Route | Method | Input | Behaviour |
 |---|---|---|---|---|
 | [get-config](netlify/functions/get-config.js) | `/.netlify/functions/get-config` | GET | — | Returns `{supabaseUrl, supabaseAnonKey}` from env. `Cache-Control: public, max-age=300`. `500` if env missing. |
-| [meta-webhook](netlify/functions/meta-webhook.js) | **`/webhook/meta`** | GET / POST | Meta payload | GET → `verifyWebhook()`, echoes `hub.challenge` as **plain text** (403 on mismatch). POST → `await handleWebhook()` then `200 {status:'ok'}`. The `await` matters — Supabase writes must finish before returning. |
+| [meta-webhook](netlify/functions/meta-webhook.mjs) | **`/webhook/meta`** | GET / POST | Meta payload | Modern Request/Response syntax (`.mjs` — the project is CommonJS). GET → `verifyWebhook()`, echoes `hub.challenge` as **plain text** (403 on mismatch). POST → HMAC check → `200 {status:'ok'}` **immediately**, then `handleWebhook()` runs under `context.waitUntil` (60 s limit) — a slow bot turn (27 s seen on a first-seen shared post) no longer blows Meta's delivery timeout and triggers retries. |
 | [meta-send](netlify/functions/meta-send.js) | `/.netlify/functions/meta-send` | POST | `{leadId, message}` | Resolves platform from the lead row, sends, then persists. `400` bad input / no recipient id / unsupported source, `404` lead not found, `502` send failure. Max 1000 bytes. |
 | [meta-status](netlify/functions/meta-status.js) | `/.netlify/functions/meta-status` | GET | — | `{instagram:{connected,name}, facebook:{…}, whatsapp:{…}}`. `Cache-Control: no-store`. Never returns tokens. |
 | [send-feedback-email](netlify/functions/send-feedback-email.js) | `/.netlify/functions/send-feedback-email` | POST | `{branch_name, entry_date, feedback_text, submitted_by}` | Resend email to the admin. |
@@ -931,7 +945,6 @@ Closing Balance - ₹12,345
 ## 17. Database schema
 
 Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
-(`supabase-schema.sql`, lowercase, is the day-1 version — **do not use it**.)
 
 | Table | Purpose | Key columns |
 |---|---|---|
@@ -1089,7 +1102,7 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
 - The anon key is public *by design* and safe to ship. **Never commit** the Netlify deploy
   token or `RESEND_API_KEY`.
 - **`X-Hub-Signature-256` is now verified (2026-08-13).** `META_APP_SECRET` HMAC-checks the
-  POST body on every webhook ([meta-webhook.js](netlify/functions/meta-webhook.js) →
+  POST body on every webhook ([meta-webhook.mjs](netlify/functions/meta-webhook.mjs) →
   `verifyMetaSignature()`); a mismatch is rejected with 403. If `META_APP_SECRET` is unset,
   verification is SKIPPED with a loud warning (dev fallback) — set it in prod.
   Base64-encoded bodies (`event.isBase64Encoded`) are decoded before HMAC. A mismatch logs a
@@ -1133,6 +1146,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-22 | — | **Webhook acks before processing + comment keyword lists + bot-turn outcome log.** (1) [meta-webhook.mjs](netlify/functions/meta-webhook.mjs) replaces `meta-webhook.js`: modern syntax so `context.waitUntil` can run `handleWebhook` after the 200 — a first-seen shared post took 27 s end to end (live, 2026-08-25), past Meta's delivery timeout. Nothing lost by acking early: `handleWebhook` already swallows per-event errors and 200s. (2) `matchCommentRule` accepts comma-separated keywords per rule. (3) `handleWebhook` logs one outcome line per bot turn (`sent` / `skipped:<why>` / handoff reason / `redelivery`, no message text) — two live test DMs on 2026-08-25 got no reply and left no DB trace. (4) A `misc` decision on a thread already filed as a lead is no longer refiled: "Ok" / "Thanx" / 👍🏻 came back misc 5× in the replay sample and got the canned misc reply, dropped out of Leads and switched the bot off. Now it stays a lead and runs as a normal turn (a `non_lead` handoff is dropped; any other handoff reason still hands off). (5) The LIVE OFFER block carries the post caption (stored length 200 → 500 chars), and the prompt's "never state a session count" rule now covers KB prices only: on 2026-08-25 the bot quoted the "5 Sessions of PRP at just ₹10,000" post as "₹10000 per session" and dodged "how many sessions?" twice, because it saw only the parsed service + price and the 100-char share label. Checked live against Gemini with the real caption: 6/6 replies say 5 sessions for ₹10,000, none say per session. (6) Burst guard: messages sent seconds apart no longer get one bot reply each (17% of corpus messages have a follow-up within 15 s). Just before sending, a turn that has a newer inbound from the same customer yields and the newer turn answers both; a yielding turn writes nothing, so `turn_count` / `bot_state` can't race. A shared post, image or safety-net message never yields (the newer turn can't see the offer, the image or the medical hit); a text turn yields to one earlier in its burst instead. The 25 Aug case was exactly that: the offer-less "price of this?" reply went out, then the share's offer reply 2 s later. Unit: webhook verify/forged-signature/ack-before-processing + keyword-list + lead-stays-lead + offer-caption + burst asserts. (7) Staff replies typed in the Instagram app now take the bot over and appear in the dashboard: they arrive only as echoes, which were skipped, so the bot kept talking over staff. `processEcho` tells them from the echo of our own sends by text match (IG echoes carry no `app_id`). Unit: own-send echo ignored, app reply stored + takeover, redelivery, template/test echoes. (8) A reply that picks a branch now routes **before** its message is stored, and `routeLeadFromReply` updates `lead.branch_id` in place: the routing message and the bot's reply were stamped with the default branch, so the new branch's realtime inbox (filtered on `branch_id`, and only an incoming row makes a routed lead appear) missed both until reopened. A routing failure is logged and the message is still stored. Unit: routed row carries the new branch; routing failure still stores. |
 | 2026-08-25 | — | **Chatbot Step 16 (scripts half): corpus replay harness + review (plan §8, D21 — local dev-only, zero publishes, zero runtime impact).** New [scripts/replay-shadow.js](scripts/replay-shadow.js): feeds `artifacts/data/ig_export_history.jsonl` (1,970 threads, gitignored PII) through the **real** decision pipeline — `classifyInbound` → cap checks → offer ladder → `callAssistant` — in shadow semantics (nothing sent, nothing written to Supabase except the `chatbot_config` read). Simulated lead state replaces the live DB: **synthetic `turn_count`** (ticks per drafted normal turn; hitting `turn_cap`/age-cap logs one `turn_cap` row then resets the window, so long threads stay covered without flooding — live shadow can't tick the counter), **thread-clock offer freshness** (`isOfferFresh` uses `Date.now()`, which would stale the years-old corpus instantly; freshness is computed against the message timestamp), an in-memory caption-keyed offer cache (export carries no media ids; one `parseOfferCaption` per distinct caption), and staff replies replayed as model-role history so drafts continue the real conversation. Deterministic stratified sample (safety>offers>collab>price>long>rest; ~300 threads ≈ 1,273 turns + 83 caption parses); threads with zero replayable inbounds filtered out. `--rpm` throttle (default 15) + 429/5xx exponential backoff; daily-quota 429 stops gracefully; **re-running the same command resumes** (done-markers in the output file). **Deliberate deviation from the checklist wording:** output is a local `artifacts/data/replay-*.jsonl` shaped like `bot_shadow_log` rows — NOT inserts into the live table (would pollute Step 19's shadow metrics and duplicate on tuning re-runs); each row also carries the staff's actual next reply for the draft-vs-staff comparison. New [scripts/review-shadow.js](scripts/review-shadow.js): malformed rate (<2% target), reason/category/safety-tier histograms, handoff + is_medical counts, offer fresh/stale + extraction table (≥90% correctness is an eyeball against captions), latency p50/p95, missed-medical invariant (must be 0), and a `--sample N --bucket b` side-by-side dump of bot drafts vs what staff actually replied — the §8 tuning loop (D21: humans edit text, not gradients). Verified: 2-thread live smoke through real Gemini (age cap fired across a 9-day thread gap then kept drafting; counter semantics confirmed), synthetic-fixture review check, `meta-service.test.js` untouched and green. Sample run + KB/prompt tuning + full-corpus `--all` pass tracked in [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md). |
 | 2026-08-25 | — | **Chatbot Steps 17–18: soft booking + caps + alerts + metrics SQL (plan D3/D18, open #17/#18 — unit-verified; live checks join the 13–15 publish batch).** (1) **Soft booking (Step 17, D3):** system prompt now explicitly drives the collection — once a lead is engaged the bot works toward their preferred day/time and on a booking intent confirms + hands off `reason:'wants_booking'`, never confirming a slot itself; `preferred_time` already flowed schema → `bot_state` → `handoff_summary` ("preferred \<time\>"). (2) **Caps (Step 18, open #17 finals = 10 turns / 7 days, both Settings-card fields with those defaults):** in `botReply` after the safety net and before Gemini — `bot_state.turn_count` (ticked on each delivered normal live bot turn) reaching `turn_cap` (the 11th customer DM hands off) **or** the lead older than `conversation_age_cap_days` → `turn_cap` handoff that sends the hold copy (`canned.turn_cap` if configured, else the llm_error copy); safety tiers outrank the cap; no disclosure prepend on a turn-capped thread (it disclosed long ago) but an age-cap-only first turn keeps it; shadow logs the cap row without ticking the counter (replay harness must inject a synthetic count — noted in the checklist). `findLeadByPlatformId` now selects `created_at` for the age check. (3) **Alerts (Step 18, D18 — badge half shipped with Step 13):** `emergency`/`kb_miss` handoffs email the operator via Resend (`sendBotAlert`, best-effort — missing key/failure logs and moves on, handoff already complete; `cfg.alert_email` override; verbatim customer text HTML-escaped in the body). Medical (non-emergency) handoffs and shadow mode alert nothing. (4) **Metrics (Step 18, open #18):** new read-only [scripts/bot-metrics.sql](scripts/bot-metrics.sql) for the weekly Supabase SQL-editor run — % of handoffs with phone+service+location (target ≥60%), safety/kb_miss/turn_cap counts, missed-medical invariant (target 0), bot volume. Unit suite extended: soft-booking summary + prompt markers, cap boundary (at-cap handoff with no Gemini call / under-cap tick), age-cap (fires + keeps disclosure on a first-ever turn), safety-outranks-cap, shadow cap row, D18 alert triggers (kb_miss with question in body, emergency with zero customer sends, medical/qualified/normal → none), alert-failure and missing-key resilience. |
 | 2026-08-25 | — | **Chatbot Steps 13–15: teach-the-bot loop + share→offer price + image vision (plan D17/D22/D9/D10 — unit-verified; live checks join the next publish batch; Steps 8–12 live-confirmed by the user on the published deploy same day).** (1) **Teach-the-bot (Step 13):** kb_miss handoffs now name the missed question in the summary card and stash `bot_state.kb_miss_question`; `meta-send` captures the **first staff reply** on a kb_miss thread into a pending `kb_candidates` row (exactly-once via a `kb_candidate_captured` flag, best-effort, never fails the send). New **Teach the Bot** card in Admin → Settings: editable answer + Approve/Discard; approval read-modify-writes the freshest `chatbot_config` and folds the Q/A into the KB — a price answer on a word-matched service updates that entry (`source:'learned:<YYYY-MM>'`, newest quote wins per D22), else a learned FAQ entry. Approval-first, never auto-learn. Branch lead cards gain ❓ kb_miss / 🔴 emergency badges (D18 dashboard half; email = Step 18). (2) **Share→offer (Step 14):** shared posts already carry caption + `ig_post_media_id`, so the plan's permalink→media-id map was skipped; `resolveOffer` checks a new `settings.offer_cache` row (media-id keyed, 50 newest) and on miss makes one structured `parseOfferCaption` call matched to KB service keys. Freshness is computed **in code** at quote time (ms compare vs `offer_stale_days`, 0 = instantly stale) and injected as a **LIVE OFFER (quotable)** / **STALE OFFER** prompt block — the model never judges validity; the thread's latest offer rides in `bot_state.last_offer` for follow-up "price?" turns; shadow logs the offer in the decision but writes nothing; any failure degrades to the plain KB ladder. (3) **Image vision (Step 15):** IG image DMs with a CDN url attach bytes as `inline_data` + a KB-service-match addendum on the same single Gemini call; a dead url degrades to a plain text turn (WA images carry no url — IG-first). Unit suite extended: offer ladder a–h (fresh/stale/miss-parse/cache/no-match/follow-up/no-caption/shadow-no-write), capture exactly-once, vision attach + failure, `isOfferFresh` edges, `parseOfferCaption` match/no-match/throw. Client-side approval helpers (`firstPriceIn`, service word-match) sanity-checked against price/phone cases — 8k/₹4,500/10k parse, phones and lakh totals rejected. |
@@ -1210,7 +1224,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
    Also still needs the client's keyword list and DM copy before it can go live.
 5. ~~**Webhook signature verification**~~ — **DONE 2026-08-13.** `X-Hub-Signature-256` is
    now HMAC-checked with `META_APP_SECRET` on every POST for all three platforms
-   ([meta-webhook.js](netlify/functions/meta-webhook.js) → `verifyMetaSignature()`). The
+   ([meta-webhook.mjs](netlify/functions/meta-webhook.mjs) → `verifyMetaSignature()`). The
    remaining open security item is the RLS/anon-key model (the `allow_anon_all` policy +
    client-side PIN is still cosmetic) — tightening it needs Supabase Auth or service_role
    writes; deferred as its own project (it would touch the client's PIN login).

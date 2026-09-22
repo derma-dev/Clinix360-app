@@ -31,9 +31,9 @@ Redeploy this app with:
 ## Step 2: Set Up the Database
 
 1. In Supabase → go to **SQL Editor** → click **New Query**
-2. Open `supabase-schema.sql` from this folder
+2. Open `SUPABASE_SCHEMA.sql` from this folder
 3. Paste the entire file contents → click **Run**
-4. This creates all tables and inserts the 3 branches with PIN `0000`
+4. This creates all tables — then insert your branches with a starting PIN, and set `settings.admin_pin`
 
 ---
 

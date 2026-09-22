@@ -76,11 +76,6 @@ html, body {
   margin-bottom: 40px;
 }
 
-.logo-icon {
-  font-size: 48px;
-  margin-bottom: 12px;
-}
-
 .logo-img {
   width: 80px;
   height: auto;
@@ -157,18 +152,6 @@ html, body {
   font-size: 20px;
   color: var(--primary);
   opacity: 0.6;
-}
-
-.branch-loading {
-  text-align: center;
-  color: var(--text-muted);
-  padding: 40px;
-}
-
-.home-footer {
-  margin-top: auto;
-  padding-top: 40px;
-  text-align: center;
 }
 
 /* ============================================================
@@ -306,21 +289,6 @@ html, body {
   color: var(--text);
 }
 
-.screen-date {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.icon-btn {
-  background: none;
-  border: none;
-  font-size: 20px;
-  cursor: pointer;
-  color: var(--text-muted);
-  padding: 4px;
-  -webkit-tap-highlight-color: transparent;
-}
-
 /* ============================================================
    DASHBOARD SCREEN
    ============================================================ */
@@ -380,9 +348,6 @@ html, body {
   left: 50%;
   pointer-events: none;
 }
-
-/* Legacy — kept in case referenced elsewhere */
-.date-badge { display: none; }
 
 /* Yesterday pending warning */
 .yesterday-warning {
@@ -453,14 +418,6 @@ html, body {
 .status-label { font-weight: 600; font-size: 15px; }
 .status-sub { font-size: 12px; color: var(--text-muted); }
 
-/* stats-row kept for backwards compat */
-.stats-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
 .stat-card {
   background: var(--card);
   border-radius: var(--radius);
@@ -480,12 +437,6 @@ html, body {
   font-size: 20px;
   font-weight: 700;
   color: var(--primary-dark);
-}
-
-.stat-sub {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 4px;
 }
 
 /* ============================================================
@@ -915,27 +866,6 @@ html, body {
    ADMIN SCREEN
    ============================================================ */
 
-.admin-wrap { padding: 20px 16px 80px; max-width: 600px; margin: 0 auto; }
-
-.admin-login-card {
-  background: var(--card);
-  border-radius: var(--radius);
-  padding: 32px 24px;
-  box-shadow: var(--shadow);
-  text-align: center;
-  margin-top: 20px;
-}
-
-.admin-icon { font-size: 48px; margin-bottom: 16px; }
-
-.admin-login-card h2 { font-size: 22px; margin-bottom: 8px; }
-
-.admin-login-card p {
-  color: var(--text-muted);
-  font-size: 14px;
-  margin-bottom: 24px;
-}
-
 .text-input {
   width: 100%;
   border: 1.5px solid var(--border);
@@ -952,26 +882,6 @@ html, body {
 .admin-msg { font-size: 13px; margin-top: 12px; color: var(--text-muted); }
 .admin-msg.success { color: var(--success); }
 .admin-msg.error { color: var(--danger); }
-
-.admin-welcome {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 20px;
-  flex-wrap: wrap;
-}
-
-.role-badge {
-  background: var(--primary);
-  color: white;
-  padding: 3px 10px;
-  border-radius: 100px;
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
-.role-badge.accountant { background: var(--accent); }
 
 .admin-branch-row {
   display: flex;
@@ -1248,12 +1158,6 @@ html, body {
   /* Date hero on desktop */
   .cashup-date-hero { font-size: 18px; padding: 14px 32px; }
 
-  /* Admin panel */
-  .admin-wrap {
-    max-width: 900px;
-    padding: 28px 32px 80px;
-  }
-
   /* Screen header */
   .screen-header { padding: 16px 24px; }
   .screen-title { font-size: 18px; }
@@ -1336,10 +1240,7 @@ html, body {
 
   /* Buttons */
   .primary-btn.full-width { font-size: 15px; padding: 15px; }
-  .submit-btn { font-size: 16px; padding: 16px; }
 
-  /* Admin wrap */
-  .admin-wrap { padding: 16px 14px 80px; }
   .admin-branch-row { flex-wrap: wrap; gap: 8px; }
 
   /* Modals */
@@ -1458,9 +1359,6 @@ html, body {
   justify-content: center;
 }
 
-/* Legacy (keep for backward compat) */
-.alert-row { display: none; }
-
 /* New flat notification rows */
 .notif-row {
   display: flex;
@@ -1568,25 +1466,6 @@ html, body {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
-
-.loading-text { color: var(--text-muted); font-size: 14px; }
-
-/* ============================================================
-   DATE OVERRIDE NOTICE (admin)
-   ============================================================ */
-
-.date-override-bar {
-  background: var(--warning);
-  color: white;
-  padding: 8px 16px;
-  font-size: 13px;
-  font-weight: 600;
-  text-align: center;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-}
 
 /* ============================================================
    ADMIN SIDEBAR LAYOUT
@@ -2551,23 +2430,6 @@ html, body {
    REPORTS SCREEN
    ============================================================ */
 
-.reports-entry-card {
-  cursor: pointer;
-  transition: box-shadow 0.15s;
-}
-.reports-entry-card:hover {
-  box-shadow: 0 4px 16px rgba(196,146,42,0.15);
-}
-
-.reports-wrap {
-  padding: 20px 24px;
-  max-width: 700px;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
 .reports-presets {
   display: flex;
   flex-wrap: wrap;
@@ -2630,43 +2492,6 @@ html, body {
   text-align: center;
   padding: 48px 20px;
   color: #9ca3af;
-}
-
-/* ── Report Sections Checklist ── */
-.report-sections-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 18px 16px;
-}
-.report-section-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 14px;
-  color: #374151;
-  transition: background 0.1s;
-}
-.report-section-item:hover { background: #f9fafb; }
-.report-section-item input[type="checkbox"] {
-  width: 17px;
-  height: 17px;
-  accent-color: var(--primary);
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.rs-hint { color: #9ca3af; font-size: 12px; }
-.rs-staff-wrap {
-  padding-left: 36px;
-  opacity: 0.4;
-  pointer-events: none;
-}
-.rs-staff-wrap.enabled {
-  opacity: 1;
-  pointer-events: auto;
 }
 
 /* ── Report Output Cards ── */
@@ -2801,19 +2626,6 @@ html, body {
 .rpt-badge.other { background: #fef3c7; color: #92400e; }
 .rpt-no-data { text-align: center; padding: 24px; color: #9ca3af; font-size: 13px; }
 
-/* ── Options row ─────────────────────────── */
-.rpt-options-row {
-  display: flex; align-items: center; gap: 16px;
-  padding: 6px 2px 14px;
-}
-.rpt-option-toggle {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 13px; color: #374151; cursor: pointer;
-}
-.rpt-option-toggle input[type="checkbox"] {
-  width: 16px; height: 16px; accent-color: var(--primary); cursor: pointer;
-}
-
 /* ── KPI grid ────────────────────────────── */
 .rpt-kpi-grid {
   display: grid; grid-template-columns: repeat(3, 1fr);
@@ -2861,7 +2673,6 @@ html, body {
 .rpt-summary-toggle.open .toggle-arrow { transform: rotate(90deg); }
 
 @media (max-width: 600px) {
-  .reports-wrap { padding: 14px 12px; }
   .reports-date-row { grid-template-columns: 1fr; }
   .rpt-header { flex-direction: column; gap: 12px; }
   .rpt-export-btn { width: 100%; justify-content: center; }

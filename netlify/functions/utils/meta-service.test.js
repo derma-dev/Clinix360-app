@@ -417,6 +417,12 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(matchCommentRule('nice post', [{ keyword: 'price', dm: 'x' }]), null);
   assert.equal(matchCommentRule('anything', []), null);
   assert.equal(matchCommentRule(undefined, rules).keyword, '*');
+
+  // Comma-separated alternatives share one rule; stray spaces/empty parts ignored.
+  const multi = [{ keyword: 'price, cost ,kitna,', dm: 'x' }];
+  assert.equal(matchCommentRule('Kitna hai ye?', multi), multi[0]);
+  assert.equal(matchCommentRule('laser COST?', multi), multi[0]);
+  assert.equal(matchCommentRule('nice post', multi), null, 'an empty part must not match everything');
 }
 
 // ── Branch routing from the reply (real branch names) ────────
@@ -650,6 +656,103 @@ assert.equal(extractComments({}).length, 0);
     delete process.env.WHATSAPP_PHONE_NUMBER_ID;
   }
 
+  // ── routing happens BEFORE the inbound insert: the row carries the new branch,
+  //    so the branch inbox's realtime feed (filtered on branch_id) shows it ──
+  {
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.META_BRANCH_ID = 'FALLBACK';
+    const { handleWebhook } = require('./meta-service');
+    const run = async (routeFails) => {
+      const calls = { inserts: [], patches: [] };
+      global.fetch = async (url, opts = {}) => {
+        if (url.includes('settings?key=eq.')) return { ok: true, json: async () => [] };
+        if (url.includes('/leads?instagram_user_id=eq.IGS_R'))
+          return { ok: true, json: async () => [{ id: 'LR', branch_id: 'FALLBACK', bot_active: false, customer_name: 'Priya' }] };
+        if (url.includes('/branches?')) return { ok: true, json: async () => [{ id: 'DWK', name: 'Dwarka Sec 12' }, { id: 'JPR', name: 'Janakpuri' }] };
+        if (url.includes('/leads?id=eq.LR') && opts.method === 'PATCH') {
+          if (routeFails) return { ok: false, status: 500, text: async () => 'db down' };
+          calls.patches.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => [] };
+        }
+        if (url.includes('/lead_messages') && opts.method === 'POST') {
+          calls.inserts.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => [{ id: 'in1' }] };
+        }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      await handleWebhook({ object: 'instagram', entry: [{ messaging: [{ sender: { id: 'IGS_R' }, message: { mid: 'm_r', text: 'dwarka' } }] }] });
+      return calls;
+    };
+    let calls = await run(false);
+    assert.deepEqual(calls.patches, [{ branch_id: 'DWK' }]);
+    assert.equal(calls.inserts[0].branch_id, 'DWK', 'the routing reply itself lands in the new branch inbox');
+    calls = await run(true);
+    assert.equal(calls.inserts.length, 1, 'a routing failure never drops the message');
+    assert.equal(calls.inserts[0].branch_id, 'FALLBACK');
+    delete process.env.META_BRANCH_ID;
+  }
+
+  // ── processEcho: a reply typed in the IG app is stored + takes the bot over;
+  //    the echo of our own send (same text, just stored) is ignored ──
+  {
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    const { processEcho } = require('./meta-service');
+    const echoMock = ({ history = [], dup = false } = {}) => {
+      const calls = { fetches: 0, inserts: [], patches: [] };
+      global.fetch = async (url, opts = {}) => {
+        calls.fetches++;
+        if (url.includes('/leads?instagram_user_id=eq.IGSID_9'))
+          return { ok: true, json: async () => [{ id: 'L1', branch_id: 'B1', bot_active: true, bot_state: {} }] };
+        if (url.includes('lead_messages?lead_id=eq.')) return { ok: true, json: async () => [...history].reverse() };
+        if (url.includes('/lead_messages') && opts.method === 'POST') {
+          calls.inserts.push(JSON.parse(opts.body));
+          return dup ? { ok: false, status: 409, json: async () => ({ code: '23505' }) }
+                     : { ok: true, json: async () => [{ id: 'row1' }] };
+        }
+        if (url.includes('/leads?id=eq.L1') && opts.method === 'PATCH') {
+          calls.patches.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => [] };
+        }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      return calls;
+    };
+    const echo = (text, extra = {}) => ({ isEcho: true, senderId: 'IG_ACCOUNT', recipientId: 'IGSID_9', messageId: 'm_echo', messageText: text, ...extra });
+    const now = new Date().toISOString();
+
+    // our own send (bot / dashboard) — the row is already there → nothing happens
+    let calls = echoMock({ history: [{ id: 'o1', direction: 'outgoing', message: 'Which branch?', created_at: now }] });
+    await processEcho(echo('Which branch?'), 'instagram', 0);
+    assert.equal(calls.inserts.length + calls.patches.length, 0, 'the echo of our own send is not a takeover');
+
+    // staff typed in the IG app → stored as outgoing (dashboard shows it) + bot off
+    calls = echoMock({ history: [{ id: 'o1', direction: 'outgoing', message: 'Which branch?', created_at: now }] });
+    await processEcho(echo('Hi, Dr. Mehta here — 11am works'), 'instagram', 0);
+    assert.equal(calls.inserts.length, 1);
+    assert.equal(calls.inserts[0].direction, 'outgoing');
+    assert.equal(calls.inserts[0].external_message_id, 'm_echo');
+    assert.deepEqual(calls.patches, [{ bot_active: false }], 'an app reply is a D12 takeover');
+
+    // same text as an OLD bot line (not a fresh send) → still a staff reply
+    calls = echoMock({ history: [{ id: 'o1', direction: 'outgoing', message: 'Thank you!', created_at: '2026-08-25T07:00:00Z' }] });
+    await processEcho(echo('Thank you!'), 'instagram', 0);
+    assert.equal(calls.patches.length, 1);
+
+    // a redelivered app echo stores nothing twice and flips nothing twice
+    calls = echoMock({ dup: true });
+    await processEcho(echo('hello'), 'instagram', 0);
+    assert.equal(calls.patches.length, 0);
+
+    // our comment-DM button template echo, and Meta's text-less test echo → no DB at all
+    calls = echoMock();
+    await processEcho(echo(undefined, { attachment: { type: 'template' } }), 'instagram', 0);
+    await processEcho(echo('📎 template', { attachment: { type: 'template' } }), 'instagram', 0);
+    await processEcho(echo('hi', { recipientId: undefined }), 'instagram', 0);
+    assert.equal(calls.fetches, 0);
+  }
+
   // ── botReply: the full turn pipeline (§8.1 — Steps 8–12) ──
   {
     // dummy creds so getSettingJson/createSupabaseClient actually fetch (mocked)
@@ -860,6 +963,56 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(b.status, undefined, 'non-leads are not marked qualified');
     }
 
+    // 7b) "Ok" on a thread already filed as a lead: misc is NOT refiled — no
+    //     canned reply, category stays lead, bot stays on (replay: 5 such turns)
+    {
+      const calls = botMock({
+        config: CFG('live'),
+        decision: { ...REPLY_DECISION, category: 'misc', reply: '', handoff: true, reason: 'non_lead' },
+      });
+      const r = await botReply({ ...LEAD, category: 'lead' }, { ...EV, messageText: 'Ok' }, 'instagram');
+      assert.deepEqual(r, { skipped: 'empty_reply' });
+      assert.equal(calls.sends.length + calls.patches.length, 0, 'an acknowledgement neither replies nor refiles');
+      // …but a real handoff reason on a misc label still hands off, filed as a lead
+      const c2 = botMock({
+        config: CFG('live'),
+        decision: { ...REPLY_DECISION, category: 'misc', reply: '', handoff: true, reason: 'declined_booking' },
+      });
+      assert.equal((await botReply({ ...LEAD, category: 'lead' }, { ...EV, messageText: 'Thanks, you too' }, 'instagram')).handoff, 'declined_booking');
+      assert.equal(c2.patches[0].body.category, 'lead');
+    }
+
+    // 7c) burst guard: the older turn yields to a newer inbound; a share never
+    //     yields and a text turn yields to a share earlier in its burst
+    {
+      const t = (s) => new Date(Date.parse('2026-08-25T07:09:00Z') + s * 1000).toISOString();
+      const row = (id, message, s, direction = 'incoming') => ({ id, direction, message, is_bot: direction !== 'incoming', created_at: t(s) });
+      const SHARE = '🔗 shared post: Get 5 Sessions of PRP';
+      const run = async (history, rowId) => {
+        const calls = botMock({ config: CFG('live'), history, decision: REPLY_DECISION });
+        const text = history.find(m => m.id === rowId).message;
+        return { r: await botReply(LEAD, { ...EV, messageText: text }, 'instagram', { id: rowId }), calls };
+      };
+      // a) "hi" then "price?" 2 s later → the "hi" turn yields, sends/writes nothing
+      let { r, calls } = await run([row('a', 'hi', 0), row('b', 'price?', 2)], 'a');
+      assert.deepEqual(r, { skipped: 'burst' });
+      assert.equal(calls.sends.length + calls.patches.length + calls.msgInserts.length, 0);
+      // …and the "price?" turn answers both
+      ({ r } = await run([row('a', 'hi', 0), row('b', 'price?', 2)], 'b'));
+      assert.deepEqual(r, { sent: true });
+      // b) share then "price of this?" (the 25 Aug case) → the share turn still sends…
+      ({ r } = await run([row('a', SHARE, 0), row('b', 'price of this?', 25)], 'a'));
+      assert.deepEqual(r, { sent: true }, 'a share turn never yields');
+      // …and the text turn yields to it
+      ({ r } = await run([row('a', SHARE, 0), row('b', 'price of this?', 25)], 'b'));
+      assert.deepEqual(r, { skipped: 'burst' });
+      // c) the share was already answered, or is older than a function can live → send
+      ({ r } = await run([row('a', SHARE, 0), row('o', 'offer reply', 3, 'outgoing'), row('b', 'price?', 25)], 'b'));
+      assert.deepEqual(r, { sent: true });
+      ({ r } = await run([row('a', SHARE, 0), row('b', 'price?', 61)], 'b'));
+      assert.deepEqual(r, { sent: true }, 'a crashed share turn must not mute the thread');
+    }
+
     // 8) model-decided handoff: model's closing reply sent, summary + qualified
     {
       const calls = botMock({
@@ -1013,6 +1166,8 @@ assert.equal(extractComments({}).length, 0);
         assert.ok(sys.includes('looking at our post offering LHR FULL BODY P/S at ₹9999'),
           'fresh offer is marked quotable');
         assert.ok(!sys.includes('sighting is older'));
+        assert.ok(sys.includes('"""Full body laser special!"""'),
+          'a live offer carries its caption (session count / branch live there)');
         assert.equal(calls.settingUpserts.length, 0);
         assert.equal(calls.patches[0].body.bot_state.last_offer.offer_price, 9999,
           'the thread remembers its latest offer');
@@ -1027,6 +1182,7 @@ assert.equal(extractComments({}).length, 0);
         assert.ok(sys.includes('sighting is older than the offer window'),
           'stale_days=0 makes any sighting stale');
         assert.ok(!sys.includes('looking at our post offering'));
+        assert.ok(!sys.includes('Full body laser special'), 'a stale offer never carries its caption');
       }
 
       // c) cache MISS → one caption parse, offer cached cross-lead, last_offer set
@@ -1254,5 +1410,34 @@ assert.equal(extractComments({}).length, 0);
   }
 
   global.fetch = realFetch;
+
+  // ── meta-webhook handler: verify, reject forgeries, ack before processing ──
+  {
+    const crypto = require('crypto');
+    const { default: webhook } = await import('../meta-webhook.mjs');
+    const url = 'https://x/webhook/meta';
+    process.env.META_VERIFY_TOKEN = 'vt';
+    let r = await webhook(new Request(`${url}?hub.mode=subscribe&hub.verify_token=vt&hub.challenge=abc`), {});
+    assert.equal(r.status, 200);
+    assert.equal(await r.text(), 'abc', 'challenge echoed as plain text');
+    r = await webhook(new Request(`${url}?hub.mode=subscribe&hub.verify_token=nope&hub.challenge=abc`), {});
+    assert.equal(r.status, 403);
+
+    process.env.META_APP_SECRET = 's3cret';
+    const body = JSON.stringify({ object: 'not_meta' });   // unsupported object → handleWebhook touches no DB
+    const post = (sig, ctx) => webhook(new Request(url, { method: 'POST', body, headers: { 'x-hub-signature-256': sig } }), ctx);
+    r = await post('sha256=forged', {});
+    assert.equal(r.status, 403, 'bad signature rejected before any processing');
+
+    const pending = [];
+    r = await post('sha256=' + crypto.createHmac('sha256', 's3cret').update(body).digest('hex'),
+                   { waitUntil: (p) => pending.push(p) });
+    assert.equal(r.status, 200);
+    assert.equal(pending.length, 1, 'processing handed to waitUntil, not awaited before the 200');
+    await Promise.all(pending);
+    delete process.env.META_APP_SECRET;
+    delete process.env.META_VERIFY_TOKEN;
+  }
+
   console.log('meta-service: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });

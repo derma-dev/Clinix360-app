@@ -51,12 +51,11 @@ config.js                  # non-secret app config (admin email, currency ₹, t
 netlify.toml               # functions dir + webhook redirect + SPA catch-all redirect
 package.json               # one dep: @netlify/functions (to bundle the scheduled function)
 SUPABASE_SCHEMA.sql        # CURRENT live DB schema — source of truth for the database
-supabase-schema.sql        # original day-1 schema (stale, kept for history)
 .env.example               # template for local function env vars
 HANDOFF.md / README.md     # developer handoff / original setup guide
 netlify/functions/
   get-config.js            # returns Supabase URL + anon key to the browser from env vars
-  meta-webhook.js          # GET verify + POST receive for Meta (Instagram) → /webhook/meta
+  meta-webhook.mjs         # GET verify + POST receive for Meta (Instagram) → /webhook/meta
   meta-send.js             # (stub) outbound Instagram/FB replies — Phase 2, not built
   send-feedback-email.js   # staff feedback  -> admin email
   send-variance-alert.js   # till variance   -> admin email
@@ -133,7 +132,7 @@ Tabs: **Overview** (branches + KPIs: this/last week, this/last month), **Reports
 ### 4.8 Lead Hub + Meta (Instagram) ingestion
 
 - `leads`, `lead_notes`, `lead_messages` tables back a per-branch leads pipeline (status: new → contacted → converted → lost).
-- **Inbound Instagram DMs**: Meta calls `/webhook/meta` (redirected to `meta-webhook.js`):
+- **Inbound Instagram DMs**: Meta calls `/webhook/meta` (redirected to `meta-webhook.mjs`):
   - `GET` answers Meta's verification challenge (`META_VERIFY_TOKEN`).
   - `POST` → `handleWebhook()` in `utils/meta-service.js`: for each Instagram `messages` change it finds-or-creates a lead by `instagram_user_id` (branch = `META_BRANCH_ID`), then inserts the message into `lead_messages` (`direction: 'incoming'`).
 - **Outbound replies** (`meta-send.js`, `sendInstagramMessage`) are **Phase 2 stubs — not yet built.**
@@ -189,7 +188,7 @@ META_BRANCH_ID                       # branch UUID new IG leads attach to
 ### 5.3 First-time database setup
 
 1. Create a Supabase project (Singapore region is closest to India).
-2. SQL Editor → paste **`SUPABASE_SCHEMA.sql`** → Run. (`supabase-schema.sql` is the stale day-1 version — don't use it.)
+2. SQL Editor → paste **`SUPABASE_SCHEMA.sql`** → Run.
 3. Insert your branches with a starting PIN, and set `settings.admin_pin` and `settings.payment_modes`.
 
 ---

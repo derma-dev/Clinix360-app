@@ -2,7 +2,6 @@
 -- Clinix360 Cashup — CURRENT Supabase schema (as of 24 Aug 2026)
 -- Project ref: plxhbtsncfkuvnywstgn  (https://plxhbtsncfkuvnywstgn.supabase.co)
 -- This reflects the LIVE database including all migrations since launch.
--- (The original supabase-schema.sql is the day-1 version and is now out of date.)
 -- RLS is DISABLED on all tables — access is gated at the app level by PIN.
 -- The frontend talks to these tables with the public ANON key (in config.js).
 -- ============================================================

@@ -211,7 +211,6 @@ async function loadLeadsTab() {
   }
 
   subscribeInbox(state.currentBranch?.id);   // live inbox (no-op until DB realtime is enabled)
-  console.log('[leads] currentBranch.id =', state.currentBranch?.id);
 
   const { data: leads, error } = await db
     .from('leads')
@@ -225,7 +224,6 @@ async function loadLeadsTab() {
     return;
   }
 
-  console.log('Leads returned:', leads);
   _leads = leads || [];
 
   if (!_leads.length) {
@@ -242,8 +240,6 @@ async function loadLeadsTab() {
     .in('lead_id', _leads.map(l => l.id))
     .order('created_at', { ascending: false });
 
-  console.log('Messages returned:', msgs);
-
   const lastMsg     = {};
   const unreadCount = {};
   (msgs || []).forEach(m => {
@@ -253,7 +249,6 @@ async function loadLeadsTab() {
     }
   });
 
-  console.log('Conversation list (lastMsg map):', lastMsg);
   _leadsLastMsg = lastMsg;
   _leadsUnread  = unreadCount;
   applyLeadsFilter();
@@ -2434,8 +2429,6 @@ async function openDashboard() {
     statusCard.innerHTML = `<div class="status-info"><div class="status-dot" style="background:#d1d5db"></div><div><div class="status-label" style="color:#9ca3af">Loading…</div></div></div>`;
   }
 
-  // (Date override panel removed — use date navigator at top)
-
   await loadTodayStatus(branch.id, date);
   await loadDashboardStats(branch.id, date);
 
@@ -3398,7 +3391,6 @@ let PT_LABEL = {
   cash: 'Cash', scan: 'Scan', upi: 'UPI', icici_machine: 'ICICI Machine',
   pinelab: 'PINELAB', bajaj_finance: 'Bajaj Finance', savein: 'SaveIN', cheque: 'Cheque'
 };
-const CHART_COLORS = ['#C4922A','#10b981','#3b82f6','#f59e0b','#8b5cf6','#ef4444','#06b6d4','#ec4899'];
 
 let _pendingCharts = [];
 let _chartInstances = {};
@@ -3891,29 +3883,6 @@ function rptSection(title, kpi, body) {
   </div>`;
 }
 
-function tableHtml(cols, rows) {
-  const ths = cols.map(c => `<th${c === 'Amount' ? ' class="amt"' : ''}>${c}</th>`).join('');
-  return `<div class="rpt-table-wrap"><table class="rpt-table"><thead><tr>${ths}</tr></thead><tbody>${rows}</tbody></table></div>`;
-}
-
-function chartOpts(prefix = '') {
-  return {
-    plugins: { legend: { display: false } },
-    scales: {
-      y: {
-        ticks: {
-          callback: v => prefix + (v >= 1000 ? (v / 1000).toFixed(0) + 'k' : v),
-          font: { size: 11 }
-        },
-        grid: { color: '#f3f4f6' }
-      },
-      x: { ticks: { font: { size: 11 } }, grid: { display: false } }
-    },
-    responsive: true,
-    maintainAspectRatio: true,
-  };
-}
-
 async function exportReportToDoc() {
   const output = document.getElementById('reports-output');
   if (!output || output.querySelector('.reports-empty-state')) { showToast('Run a report first', 'error'); return; }
@@ -4092,8 +4061,6 @@ function bindGlobalEvents() {
     navigateDashboardDate(val);
   });
 
-  // (Date override listeners removed — date navigation handled by date-nav at top)
-
   // Cashup form
   document.getElementById('btn-cashup-back').addEventListener('click', () => {
     stopLiveClock();
@@ -4135,11 +4102,6 @@ function bindGlobalEvents() {
   document.getElementById('auto-trigger-type').addEventListener('change', (e) => {
     updateAutoTriggerUI(e.target.value);
   });
-  // Reload automations when switching to settings tab
-
-
-  // Date override panel removed from Overview (was replaced by KPI filters)
-
   document.getElementById('btn-save-admin-pin').addEventListener('click', saveAdminPIN);
 
   // Clear the "Product/Service required" highlight as soon as staff start typing
@@ -4219,12 +4181,6 @@ function formatConvoTime(isoStr) {
   if (diffDay === 1) return 'Yesterday';
   if (diffDay < 7)  return date.toLocaleDateString('en-IN', { weekday: 'short' });
   return date.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
-}
-
-function formatShortDate(dateStr) {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const date = new Date(y, m - 1, d);
-  return new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }).format(date);
 }
 
 function getDateRanges(dateStr) {
