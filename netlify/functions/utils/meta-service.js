@@ -1155,7 +1155,7 @@ HARD RULES — breaking any is a failure:
 - Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise price is "shared after consultation" with a cue to the team. NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. KB prices are the last price staff quoted and often cover a package of sessions — for a KB price NEVER say "per session" or state a session count; say it starts from that price and the team confirms the exact plan. A LIVE OFFER may state only what its post caption states. Never reuse one service's price for a different service.
 - NEVER guarantee results.
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
-- Mirror the customer's language (Hinglish is fine and encouraged). Keep replies warm, 2–4 sentences.
+- Reply in the language and script of the customer's LATEST message, even if earlier messages were in another language: Hinglish in Roman letters ("kya aapki koi aur branch hai?") → reply in Roman Hinglish; Hindi in Devanagari → Hindi in Devanagari; English → English. Keep replies warm, 2–4 sentences.
 - When qualifying a lead, ask ONE question at a time, in order: service → branch/location → WhatsApp number → preferred time. Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one). Never re-ask something the conversation already answered — if they named a branch or area (even two), note it and move on to the next question. Ask any one question at most twice in the whole chat — the WhatsApp number included; if it is still unanswered, move on.
 - Soft booking: once a lead is engaged, work toward their preferred day/time for a visit. When they want to book, confirm what you have (service, branch, preferred time), ask for their WhatsApp number if you don't have it yet, thank them, and hand off with reason 'wants_booking' — the human team locks the appointment in the clinic system. NEVER confirm a slot or appointment yourself.
 - A deflected or partial answer always ends with a soft cue to the human team — never a dead end.
@@ -1310,7 +1310,9 @@ async function callAssistant({ model, kb, history, inboundText, offer, image }) 
 
   const sysParts = [{ text: ASSISTANT_SYSTEM_PROMPT }, { text: renderKbForPrompt(kb) }];
   if (offer) sysParts.push({ text: renderOfferForPrompt(offer) });
-  const parts = [{ text: `Customer's new message:\n${inboundText}${image ? IMAGE_TURN_ADDENDUM : ''}` }];
+  // Language reminder sits next to the message: in the system prompt alone, a short
+  // Hinglish line after an English thread still got English replies (live, 2026-09-23).
+  const parts = [{ text: `Customer's new message (reply in ITS language — plain English → only English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi):\n${inboundText}${image ? IMAGE_TURN_ADDENDUM : ''}` }];
   if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
 
   const contents = [
@@ -1416,6 +1418,8 @@ function buildHandoffSummary(reason, botState, ev) {
 // kb_miss/llm_error send their canned hold copy (D13); model-decided handoffs
 // send the model's own closing reply when it wrote one. A failed send never
 // aborts the handoff — staff still get the summary and the lead.
+const SOFT_HANDOFFS = ['qualified', 'wants_booking', 'declined_booking'];
+
 async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, firstBotTurn) {
   let text = null;
   if (!decision.safety_net) {
@@ -1440,7 +1444,11 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   }
   const summary = buildHandoffSummary(decision.reason, botState, ev);
   await db.updateLead(lead.id, {
-    bot_active: false,
+    // A soft handoff (the lead is ready for staff, nothing the bot can't handle)
+    // keeps the bot answering until a human actually replies — that reply is the
+    // takeover (D12). Live 2026-09-22: after a 'qualified' handoff the customer's
+    // "any other branch?" and "Hello?" got silence while no staff had picked up.
+    bot_active: SOFT_HANDOFFS.includes(decision.reason),
     status:     'qualified',
     category:   decision.category || lead.category || 'lead',
     bot_state:  { ...botState, handoff_summary: summary,

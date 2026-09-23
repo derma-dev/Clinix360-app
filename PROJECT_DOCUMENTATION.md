@@ -9,7 +9,7 @@
 >
 > Minimum update per change: the relevant section + a line in [§21 Change log](#21-change-log).
 >
-> Last updated: **2026-08-25** · Chatbot Steps 17–18 built (soft booking, turn/age caps, emergency/kb_miss email alerts, weekly metrics SQL) — unit-verified, live batch pending publish — see [§21](#21-change-log)
+> Last updated: **2026-09-23** · Chatbot replies in the customer's latest language + keeps answering after a soft handoff until staff reply; docs mark all infra as **our test setup** — see [§21](#21-change-log)
 
 ---
 
@@ -80,6 +80,25 @@ anything that needs a secret.
 | **Admin email** | `hospitalitybee@gmail.com` (hardcoded in [config.js](config.js) **and** in three functions — see [§20](#20-security-model-quirks--known-issues)) |
 | **Timezone** | `Asia/Kolkata` (IST) everywhere |
 | **Currency** | `₹` (INR), `en-IN` formatting |
+
+> 🧪 **TEST ENVIRONMENT — none of this infrastructure is the client's.**
+> The Netlify site above (`eloquent-pothos-dc09dc`), the **Supabase project**
+> (`plxhbtsncfkuvnywstgn` — so every lead, message, cashup and settings row in it is mock
+> data), the **Meta app**, the connected **Instagram** account and the **Facebook Page**
+> were all created by us as a sandbox to build and prove the app before it goes onto the
+> client's real accounts. So:
+>
+> - Every "live" check in this doc and in [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md)
+>   ("live on test IG", "published deploy", `mode:'live'`) means **live on our test
+>   accounts** — no real customer is ever messaged. Only app-role users can DM the test IG
+>   (Standard Access), so `mode:'live'` here is safe.
+> - The **only real client data** in the project is the Instagram DM export (`inbox/` →
+>   `artifacts/data/`, gitignored PII) used to seed and tune the chatbot KB.
+> - Going to production = re-creating this setup on the **client's** Meta app / IG / FB
+>   Page / site / Supabase project (schema from [SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql))
+>   with their tokens and env vars ([§18](#18-environment-variables)) — see
+>   **Client rollout** in [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md) (Step 19) and
+>   [§22](#22-roadmap--open-items).
 
 **Live branch UUIDs** (needed for `META_BRANCH_ID` and manual SQL):
 
@@ -688,7 +707,10 @@ botReply
   canned hold copy; model-decided handoffs send the model's closing reply. Then
   `bot_state.handoff_summary` (built in code — qualification + reason, verbatim customer
   words for medical/emergency, "Bot didn't know: \<q\>" for kb_miss),
-  `updateLead({bot_active:false, status:'qualified', category})`.
+  `updateLead({bot_active, status:'qualified', category})`. **Soft handoffs**
+  (`qualified` / `wants_booking` / `declined_booking` — `SOFT_HANDOFFS`) keep
+  `bot_active=true`, so the bot keeps answering until staff actually reply (takeover
+  below); every other reason (safety tiers, kb_miss, llm_error, turn_cap) turns it off.
   A failed courtesy send never aborts the handoff.
 - **Takeover** (D12): any staff send via meta-send — or typed in the Instagram app (the
   echo, see `processEcho`) — flips `bot_active=false`, sticky; the
@@ -883,6 +905,9 @@ recommended.
 - The button shows *effective* state: `liveConnected && enabled`.
 
 ### Meta app requirements (learned the hard way)
+
+> Learned on **our test Meta app** — every one of these must be repeated on the client's
+> own app at rollout (see [§2](#2-infrastructure--identifiers) test-environment note).
 
 - **The app must be set to Live** in the App Dashboard or Meta sends **zero** real webhook
   notifications — even from tester accounts. The dashboard "Test" button still works
@@ -1146,6 +1171,9 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-23 | — | **Chatbot keeps answering after a soft handoff until staff reply.** Live 2026-09-22: the bot handed off `qualified` (service + branch + day, WhatsApp asked twice) and turned itself off, so the customer's next "Kya aap ki or koi brach bhi hai?" and "Hello?" got silence with no staff on the thread. `handoffToStaff` now leaves `bot_active=true` for `qualified` / `wants_booking` / `declined_booking`; the summary card and `status:'qualified'` still land, and the takeover is unchanged (staff send, Instagram-app reply or the Take-over button). Safety tiers, kb_miss, llm_error and turn_cap still turn the bot off. Unit: soft handoff keeps the bot on + the next turn replies. |
+| 2026-09-23 | — | **Chatbot replies in the language of the customer's latest message (prompt-only).** "Mirror the customer's language" was read against the whole thread: after English turns, "Kya aap ki or koi brach bhi hai?" got English back. The system-prompt rule now names the latest message and the three cases (English → English, Roman Hinglish → Roman Hinglish, Devanagari → Hindi), and `callAssistant` repeats it next to the new message, because the rule in the system prompt alone still gave English about half the time. Live check against Gemini with the real KB and that thread's history: 8/8 correct for English and Hinglish. Devanagari still comes back as Roman Hinglish (only 15 of 6,500 corpus inbounds, left as is). |
+| 2026-09-23 | — | **Docs only: test environment made explicit.** The Netlify site, Supabase project, Meta app, Instagram account and Facebook Page are all our own test/mock setup, not the client's — callout added to [§2](#2-infrastructure--identifiers) and [§15 Meta app requirements](#meta-app-requirements-learned-the-hard-way); [§22](#22-roadmap--open-items) gains a client-infrastructure item; [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md) Step 19 now lists the client-account setup (their Meta app, IG, FB Page, site, env vars, App Review) before shadow mode. No code change. |
 | 2026-09-22 | — | **Webhook acks before processing + comment keyword lists + bot-turn outcome log.** (1) [meta-webhook.mjs](netlify/functions/meta-webhook.mjs) replaces `meta-webhook.js`: modern syntax so `context.waitUntil` can run `handleWebhook` after the 200 — a first-seen shared post took 27 s end to end (live, 2026-08-25), past Meta's delivery timeout. Nothing lost by acking early: `handleWebhook` already swallows per-event errors and 200s. (2) `matchCommentRule` accepts comma-separated keywords per rule. (3) `handleWebhook` logs one outcome line per bot turn (`sent` / `skipped:<why>` / handoff reason / `redelivery`, no message text) — two live test DMs on 2026-08-25 got no reply and left no DB trace. (4) A `misc` decision on a thread already filed as a lead is no longer refiled: "Ok" / "Thanx" / 👍🏻 came back misc 5× in the replay sample and got the canned misc reply, dropped out of Leads and switched the bot off. Now it stays a lead and runs as a normal turn (a `non_lead` handoff is dropped; any other handoff reason still hands off). (5) The LIVE OFFER block carries the post caption (stored length 200 → 500 chars), and the prompt's "never state a session count" rule now covers KB prices only: on 2026-08-25 the bot quoted the "5 Sessions of PRP at just ₹10,000" post as "₹10000 per session" and dodged "how many sessions?" twice, because it saw only the parsed service + price and the 100-char share label. Checked live against Gemini with the real caption: 6/6 replies say 5 sessions for ₹10,000, none say per session. (6) Burst guard: messages sent seconds apart no longer get one bot reply each (17% of corpus messages have a follow-up within 15 s). Just before sending, a turn that has a newer inbound from the same customer yields and the newer turn answers both; a yielding turn writes nothing, so `turn_count` / `bot_state` can't race. A shared post, image or safety-net message never yields (the newer turn can't see the offer, the image or the medical hit); a text turn yields to one earlier in its burst instead. The 25 Aug case was exactly that: the offer-less "price of this?" reply went out, then the share's offer reply 2 s later. Unit: webhook verify/forged-signature/ack-before-processing + keyword-list + lead-stays-lead + offer-caption + burst asserts. (7) Staff replies typed in the Instagram app now take the bot over and appear in the dashboard: they arrive only as echoes, which were skipped, so the bot kept talking over staff. `processEcho` tells them from the echo of our own sends by text match (IG echoes carry no `app_id`). Unit: own-send echo ignored, app reply stored + takeover, redelivery, template/test echoes. (8) A reply that picks a branch now routes **before** its message is stored, and `routeLeadFromReply` updates `lead.branch_id` in place: the routing message and the bot's reply were stamped with the default branch, so the new branch's realtime inbox (filtered on `branch_id`, and only an incoming row makes a routed lead appear) missed both until reopened. A routing failure is logged and the message is still stored. Unit: routed row carries the new branch; routing failure still stores. |
 | 2026-08-25 | — | **Chatbot Step 16 (scripts half): corpus replay harness + review (plan §8, D21 — local dev-only, zero publishes, zero runtime impact).** New [scripts/replay-shadow.js](scripts/replay-shadow.js): feeds `artifacts/data/ig_export_history.jsonl` (1,970 threads, gitignored PII) through the **real** decision pipeline — `classifyInbound` → cap checks → offer ladder → `callAssistant` — in shadow semantics (nothing sent, nothing written to Supabase except the `chatbot_config` read). Simulated lead state replaces the live DB: **synthetic `turn_count`** (ticks per drafted normal turn; hitting `turn_cap`/age-cap logs one `turn_cap` row then resets the window, so long threads stay covered without flooding — live shadow can't tick the counter), **thread-clock offer freshness** (`isOfferFresh` uses `Date.now()`, which would stale the years-old corpus instantly; freshness is computed against the message timestamp), an in-memory caption-keyed offer cache (export carries no media ids; one `parseOfferCaption` per distinct caption), and staff replies replayed as model-role history so drafts continue the real conversation. Deterministic stratified sample (safety>offers>collab>price>long>rest; ~300 threads ≈ 1,273 turns + 83 caption parses); threads with zero replayable inbounds filtered out. `--rpm` throttle (default 15) + 429/5xx exponential backoff; daily-quota 429 stops gracefully; **re-running the same command resumes** (done-markers in the output file). **Deliberate deviation from the checklist wording:** output is a local `artifacts/data/replay-*.jsonl` shaped like `bot_shadow_log` rows — NOT inserts into the live table (would pollute Step 19's shadow metrics and duplicate on tuning re-runs); each row also carries the staff's actual next reply for the draft-vs-staff comparison. New [scripts/review-shadow.js](scripts/review-shadow.js): malformed rate (<2% target), reason/category/safety-tier histograms, handoff + is_medical counts, offer fresh/stale + extraction table (≥90% correctness is an eyeball against captions), latency p50/p95, missed-medical invariant (must be 0), and a `--sample N --bucket b` side-by-side dump of bot drafts vs what staff actually replied — the §8 tuning loop (D21: humans edit text, not gradients). Verified: 2-thread live smoke through real Gemini (age cap fired across a 9-day thread gap then kept drafting; counter semantics confirmed), synthetic-fixture review check, `meta-service.test.js` untouched and green. Sample run + KB/prompt tuning + full-corpus `--all` pass tracked in [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md). |
 | 2026-08-25 | — | **Chatbot Steps 17–18: soft booking + caps + alerts + metrics SQL (plan D3/D18, open #17/#18 — unit-verified; live checks join the 13–15 publish batch).** (1) **Soft booking (Step 17, D3):** system prompt now explicitly drives the collection — once a lead is engaged the bot works toward their preferred day/time and on a booking intent confirms + hands off `reason:'wants_booking'`, never confirming a slot itself; `preferred_time` already flowed schema → `bot_state` → `handoff_summary` ("preferred \<time\>"). (2) **Caps (Step 18, open #17 finals = 10 turns / 7 days, both Settings-card fields with those defaults):** in `botReply` after the safety net and before Gemini — `bot_state.turn_count` (ticked on each delivered normal live bot turn) reaching `turn_cap` (the 11th customer DM hands off) **or** the lead older than `conversation_age_cap_days` → `turn_cap` handoff that sends the hold copy (`canned.turn_cap` if configured, else the llm_error copy); safety tiers outrank the cap; no disclosure prepend on a turn-capped thread (it disclosed long ago) but an age-cap-only first turn keeps it; shadow logs the cap row without ticking the counter (replay harness must inject a synthetic count — noted in the checklist). `findLeadByPlatformId` now selects `created_at` for the age check. (3) **Alerts (Step 18, D18 — badge half shipped with Step 13):** `emergency`/`kb_miss` handoffs email the operator via Resend (`sendBotAlert`, best-effort — missing key/failure logs and moves on, handoff already complete; `cfg.alert_email` override; verbatim customer text HTML-escaped in the body). Medical (non-emergency) handoffs and shadow mode alert nothing. (4) **Metrics (Step 18, open #18):** new read-only [scripts/bot-metrics.sql](scripts/bot-metrics.sql) for the weekly Supabase SQL-editor run — % of handoffs with phone+service+location (target ≥60%), safety/kb_miss/turn_cap counts, missed-medical invariant (target 0), bot volume. Unit suite extended: soft-booking summary + prompt markers, cap boundary (at-cap handoff with no Gemini call / under-cap tick), age-cap (fires + keeps disclosure on a first-ever turn), safety-outranks-cap, shadow cap row, D18 alert triggers (kb_miss with question in body, emergency with zero customer sends, medical/qualified/normal → none), alert-failure and missing-key resilience. |
@@ -1186,6 +1214,15 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 ## 22. Roadmap / open items
 
+0. **Move everything onto the client's accounts (OPEN, blocks any real traffic).** All
+   work so far runs on our test Meta app, test IG, test FB Page, our Netlify site and our
+   Supabase project ([§2](#2-infrastructure--identifiers)). Production needs: a client-owned
+   Supabase project (schema + branches + `chatbot_config`/KB seeded), the client's Meta
+   app (Live, privacy policy, webhook fields subscribed, App Review for public DMs — item 3),
+   their IG professional account + FB Page connected to it, a site on their side (or their
+   domain) with every [§18](#18-environment-variables) var set to their tokens, and the
+   webhook callback pointed at that site. Then re-run the live checks there. Step-by-step:
+   [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md) Step 19.
 1. **Multi-branch routing for WhatsApp (OPEN, blocking real rollout).** Every inbound lead
    on every platform lands in the single hardcoded `META_BRANCH_ID`. WhatsApp inbound
    carries **no location field** — `metadata.phone_number_id` is *our* number (identical for

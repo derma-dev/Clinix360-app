@@ -1027,11 +1027,18 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.sends[0].message.text,
         'Hi! I am the clinic’s assistant 🤖\n\nWonderful! Our team will confirm your slot shortly 🙏');
       const b = calls.patches[0].body;
-      assert.equal(b.bot_active, false);
+      assert.equal(b.bot_active, true, 'a soft handoff keeps the bot on until staff reply (D12 takeover)');
       assert.equal(b.status, 'qualified');
       assert.match(b.bot_state.handoff_summary, /qualified/);
       assert.match(b.bot_state.handoff_summary, /LHR FULL BODY P\/S/);
       assert.match(b.bot_state.handoff_summary, /9876543210/);
+
+      // …so the customer's next question still gets an answer (live 2026-09-22:
+      // "any other branch?" after a qualified handoff got silence)
+      const next = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      const r2 = await botReply({ ...LEAD, bot_active: b.bot_active, bot_state: b.bot_state }, EV, 'instagram');
+      assert.deepEqual(r2, { sent: true });
+      assert.equal(next.sends.length, 1);
     }
 
     // 9) kb_miss → canned hold copy + handoff; the missed question rides in the

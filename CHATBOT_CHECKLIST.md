@@ -24,8 +24,15 @@
 > Steps are vertical slices: implement → verify → only then move on. Each step's Verify is
 > the exit test; don't start step N+1 with step N failing.
 >
-> Deployment context (D23): steps run against **our test Meta app + test IG** (live mode is
-> safe there — Standard Access = only app-role users can DM it). Client rollout = Step 19+.
+> **Deployment context (D23) — everything here is OUR TEST SETUP, not the client's.** The
+> Meta app, the Instagram account, the Facebook Page, the Netlify site
+> (`eloquent-pothos-dc09dc`) and the Supabase DB (`plxhbtsncfkuvnywstgn` — all rows are
+> mock data) were all created by us to build and prove the bot before it
+> goes onto the client's real accounts. "Live", "published", `mode:'live'` in this file =
+> live on those test accounts (safe — Standard Access, only app-role users can DM). The
+> only real client data is the IG DM export (`inbox/` → corpus, gitignored PII) used for
+> the KB + replay. Client rollout = **Step 19+**, which starts by re-creating this setup
+> on the client's accounts.
 
 ---
 
@@ -40,6 +47,8 @@
   **Live batch checklist for 17–18 (user, against the published deploy):** run a qualify→agree flow ("price of laser" … "book kar do Saturday evening") → handoff summary must contain service + branch + preferred day/time · DM an emergency phrasing → alert EMAIL arrives (bot sends the customer nothing) · trigger a kb_miss → alert email arrives (an unknown-question DM covers the 13 teach-loop too) · send 11 quick DMs on a throwaway thread → bot replies to #1–10 then hands off `turn_cap` on #11 with the "connect you" copy · paste [scripts/bot-metrics.sql](scripts/bot-metrics.sql) in the Supabase SQL editor → real numbers return (missed_medical=0).
 
 ## Log (append one line per completed step — date · step · what/why/learned)
+
+- 2026-09-23 · Live-test fixes · (1) **Language:** reply follows the customer's LATEST message (rule in the system prompt + a reminder next to the new message). With the rule in the system prompt only, a Hinglish line after an English thread still got English back about half the time. Live check with the real KB: 8/8 correct for English and Hinglish; Devanagari replies come back in Roman Hinglish (15/6,500 corpus inbounds, left as is). (2) **Soft handoff keeps the bot on:** `qualified`/`wants_booking`/`declined_booking` write the summary + `status:'qualified'` but leave `bot_active=true` until a staff reply takes over (user decision). Found live: after a `qualified` handoff, "Kya aap ki or koi brach bhi hai?" + "Hello?" got silence. Unit suite green. Needs a publish to test live.
 
 - 2026-08-25 · Step 16 (scripts half) · `scripts/replay-shadow.js` + `scripts/review-shadow.js` built and live-smoke-verified (2 threads / 8 turns through real Gemini; drafts vs staff readable; **age cap fired correctly across a 9-day thread gap** then reset and kept drafting; counter ticks only on drafted normal turns). Design: replay drives the REAL decision pipeline (`classifyInbound` → caps → offer ladder → `callAssistant`) with a simulated lead state — synthetic `turn_count` (ticks per drafted normal turn, cap → one turn_cap row then window reset, so long threads stay covered without flooding), thread-clock freshness for offers (corpus is years old; `isOfferFresh`'s `Date.now()` would stale everything), in-memory caption-keyed offer cache (export carries no media ids), staff replies replayed as model-role history. Deterministic stratified ~300-thread sample (safety 53 all + offers 55 + collab 55 + price 60 + long 3 + rest 74 ≈ 1,273 turns + 83 caption parses); threads with zero replayable inbounds filtered out (they were eating quota slots). Output = local `artifacts/data/replay-*.jsonl` (gitignored PII dir), NOT the live `bot_shadow_log` — replay rows would pollute Step 19 shadow metrics and duplicate on re-runs; rows carry the staff's actual reply for the draft-vs-staff eyeball. Resume by re-running the same command; `--rpm` throttle (default 15) + 429/5xx backoff; daily-quota 429 stops gracefully. `review-shadow.js`: malformed rate (<2%), reason/category/tier histograms, offer fresh/stale + extraction table (≥90% eyeball), latency p50/p95, missed-medical invariant (0), `--sample N --bucket b` draft-vs-staff dump. **Learned:** the first smoke "passed" with 0 turns — the two oldest picked threads had no replayable inbounds, so the estimate line is now the cheap guard (0 turns = selection bug, not success).
 
@@ -158,6 +167,14 @@
 ## Client rollout (plan Phase 5/6)
 
 ### Step 19 — Client shadow-first rollout
+- **Move off our test accounts first (nothing so far touches the client's).** Repeat on the client's side what we set up for testing — [PROJECT_DOCUMENTATION.md §15 Meta app requirements](PROJECT_DOCUMENTATION.md#meta-app-requirements-learned-the-hard-way) has the gotchas:
+  - [ ] **Meta app** owned by the client (their Business Manager): app icon, privacy policy URL, category, set to **Live**; Business Verification if Meta asks.
+  - [ ] **Client IG professional account + FB Page** linked and connected to that app; tokens generated (`META_ACCESS_TOKEN`, `META_PAGE_ACCESS_TOKEN`).
+  - [ ] **App Review → Advanced Access** on `instagram_business_manage_messages` (+ Messenger equivalent) — without it the public can't reach the bot, only app-role users (open #3 in doc §22). Long pole — start early.
+  - [ ] **Site** on the client's side (their Netlify account / domain) deploying this repo; every env var in doc §18 set to the client's values (`META_*`, `GEMINI_API_KEY`, `RESEND_API_KEY`, `INTERNAL_FUNCTION_SECRET`, `META_BRANCH_ID`) → redeploy.
+  - [ ] **Webhook** callback = `<client site>/webhook/meta`, verify token matches, fields subscribed (`messages`, `messaging_postbacks`, `comments` if comment automation goes on); IG `subscribed_apps` confirmed.
+  - [ ] **Client-owned Supabase project** (ours is mock): apply [SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql) — trust the code over the file where they drift (doc §17) — insert the real branches (new UUIDs → `META_BRANCH_ID`), set `SUPABASE_URL`/`SUPABASE_ANON_KEY` to it (the browser gets them from the same env vars), re-run `scripts/seed-kb.js --write` against it, then configure `chatbot_config` in Settings (the Settings card creates the row on first save).
+  - [ ] Start the client install at `mode:'off'`, re-run the Steps 2–18 live checks with a staff account DMing the client IG, then flip to shadow.
 - **Implement:** deliver same code + [final plan](artifacts/CHATBOT_FINAL_PLAN_2026-08-24.md) to client; client KB gets Phase 1 sign-offs (clinician risk/guardrail wording, offers.md, canned #2); flip client `mode:'shadow'` on real traffic; seeded scenarios re-run on their app.
 - **Pre-19 build — scheduled metrics email (client wants DAILY analytics; approach locked 2026-08-25):** NO new settings card/section — `chatbot_config.report_frequency: 'off' | 'daily' | 'weekly'` dropdown in the **existing Chatbot card** (recipient = `alert_email`). ONE daily scheduled function decides at runtime (daily → send every run · weekly → Mondays only · off → skip) — the `check-automations` pattern, not a second cron. Content = the same numbers as [scripts/bot-metrics.sql](scripts/bot-metrics.sql) computed over Supabase REST, emailed via Resend; the SQL file stays for ad-hoc runs. Deliberately NOT the `cashup_automations` per-report config model — one fixed digest, one config field.
 - **Verify:** **exit criteria** (final plan §8.3): ≥30 leads/≥100 turns · ≥10 seeded Hinglish medical = 0 drafted answers · malformed <2% · offer extraction ≥90% · 20-draft sign-off. Not met → fix, extend shadow.
@@ -175,4 +192,6 @@
 - [x] ~~Price sheet~~ — **resolved 2026-08-25, client declined to provide one:** "Learn the pricing from previous conversations as they must be provided there; if any isn't provided should push to human in the loop to fetch the pricing" — i.e. D22 confirmed verbatim (corpus latest-wins + kb_miss HITL, Steps 4 + 13 already shipped). No sheet will arrive; sanity-check banner (open #5) stays corpus-based.
 - [ ] offers.md confirmation; 2nd canned template approved copy
 - [ ] Clinician sign-off on risk-FAQ + guardrail wording
-- [ ] Gemini API key (needed at Step 6 live check)
+- [ ] Gemini API key **on the client's account** (ours powers the test build; Step 6 live check was done with it)
+- [ ] Admin access to the client's Meta Business Manager, IG professional account and FB Page (for the Step 19 account setup)
+- [ ] Where the production site lives (client Netlify account / domain) + Resend sender domain for alert/report emails
