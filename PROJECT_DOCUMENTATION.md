@@ -394,6 +394,13 @@ attaches a shared dropdown to the relevant inputs.
 
 Opened by `openAdminPanel()` ([app.js:1009](app.js#L1009)). Five tabs:
 
+> **Not in use (2026-10-02, chatbot-as-a-service, Q3):** `OFF_AREAS` at the top of [app.js](app.js) greys out
+> the **Leads**, **Reports** and **Notifications** tabs, the Overview **Performance** card, and the whole
+> **branch dashboard** (branch PIN login, "View →", `#/branch/*`, `#/cashup/*` bounce back with a toast).
+> They are `inert` (can't be clicked, focused or routed to) and labelled "Not in use". Nothing is deleted
+> and no data is touched: remove a name from `OFF_AREAS` to turn that area back on. Overview → Branches
+> and **Settings** stay fully usable (this is now our operator console).
+
 ### Overview
 - Branch list with add / edit / delete (`loadAdminBranches`, `showAddBranchModal`,
   `editBranch`, `saveBranchModal`, `deleteBranch`).
@@ -1180,6 +1187,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-02 | — | **Console: Cashup + Lead Hub greyed out (service tracker S1, Q3).** `OFF_AREAS` in [app.js](app.js) marks the admin Leads / Reports / Notifications tabs, the Overview Performance card and the "View →" buttons `inert` with a "Not in use" label; `switchAdminTab` ignores them; `openDashboard` / `openCashupForm` refuse the branch dashboard (branch PIN → logout to home, admin → back to the panel). Their loaders (cashup KPIs, alert badges) no longer run on panel open. Nothing deleted, no data touched; one-line revert. See [§11](#11-admin-panel). |
 | 2026-09-23 | — | **Chatbot metrics email (pre-Step 19).** New scheduled [send-bot-report.js](netlify/functions/send-bot-report.js) (09:00 IST daily) emails the #18 numbers — handoffs, % complete (phone+service+branch, target ≥60%), medical/emergency, kb_miss, turn_cap, missed medical (target 0, subject gets ⚠️ when not), bot messages — to `alert_email`. `chatbot_config.report_frequency` decides at runtime: `daily` (last 24 h) · `weekly` (Mondays, last 7 days) · `off` (default). Chatbot Settings card gains an **Alerts & report** row: alert email + report dropdown (alert email was previously config-only). Unit: metrics incl. missed-medical boundary, frequency gate. Queries checked read-only against the test Supabase. |
 | 2026-09-23 | — | **Chatbot keeps answering after a soft handoff until staff reply.** Live 2026-09-22: the bot handed off `qualified` (service + branch + day, WhatsApp asked twice) and turned itself off, so the customer's next "Kya aap ki or koi brach bhi hai?" and "Hello?" got silence with no staff on the thread. `handoffToStaff` now leaves `bot_active=true` for `qualified` / `wants_booking` / `declined_booking`; the summary card and `status:'qualified'` still land, and the takeover is unchanged (staff send, Instagram-app reply or the Take-over button). Safety tiers, kb_miss, llm_error and turn_cap still turn the bot off. Unit: soft handoff keeps the bot on + the next turn replies. |
 | 2026-09-23 | — | **Chatbot replies in the language of the customer's latest message (prompt-only).** "Mirror the customer's language" was read against the whole thread: after English turns, "Kya aap ki or koi brach bhi hai?" got English back. The system-prompt rule now names the latest message and the three cases (English → English, Roman Hinglish → Roman Hinglish, Devanagari → Hindi), and `callAssistant` repeats it next to the new message, because the rule in the system prompt alone still gave English about half the time. Live check against Gemini with the real KB and that thread's history: 8/8 correct for English and Hinglish. Devanagari still comes back as Roman Hinglish (only 15 of 6,500 corpus inbounds, left as is). |

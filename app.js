@@ -51,6 +51,16 @@ let state = {
   ],
 };
 
+// Areas not in use since the chatbot-as-a-service pivot (Q3): greyed out and can't be opened.
+// Nothing is deleted and no data is touched. Remove a name to turn that area back on.
+// 'branch' = the whole branch dashboard (Daily Cashup, Emails, Leads inbox); the rest are admin tabs
+// (data-tab) or admin cards (data-area).
+const OFF_AREAS = ['branch', 'leads', 'reports', 'notifications', 'performance'];
+
+function markOffAreas(root = document) {
+  OFF_AREAS.forEach(a => root.querySelectorAll(`[data-tab="${a}"], [data-area="${a}"]`).forEach(el => { el.inert = true; }));
+}
+
 // ============================================================
 // ROUTING + SESSION PERSISTENCE
 // Keeps the user logged in and on the same page across refresh,
@@ -164,6 +174,7 @@ function switchBranchTab(page) {
 
 // Admin tab switching (global so the router can restore a tab on refresh)
 function switchAdminTab(tab) {
+  if (OFF_AREAS.includes(tab)) return;   // e.g. an old #/admin/leads link
   document.querySelectorAll('.admin-tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.sidebar-item[data-tab]').forEach(b => b.classList.remove('active'));
   document.querySelectorAll('.bottom-nav-item[data-tab]').forEach(b => b.classList.remove('active'));
@@ -1085,6 +1096,7 @@ async function init() {
   db = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
   await Promise.all([loadBranches(), loadAdminPIN(), loadPaymentModes()]);
   bindGlobalEvents();
+  markOffAreas();
   window.addEventListener('hashchange', () => {
     if (_suppressHash > 0) { _suppressHash--; return; }
     routeFromHash();
@@ -1620,7 +1632,11 @@ async function openAdminPanel() {
   document.getElementById('admin-tab-overview')?.classList.add('active');
   document.querySelectorAll('[data-tab="overview"]').forEach(b => b.classList.add('active'));
 
-  await Promise.all([loadAdminBranches(), loadAdminStats(), loadAdminAlerts()]);
+  await Promise.all([
+    loadAdminBranches(),
+    !OFF_AREAS.includes('performance') && loadAdminStats(),
+    !OFF_AREAS.includes('notifications') && loadAdminAlerts(),   // also fills the nav badges
+  ]);
 }
 
 async function loadAdminAlerts() {
@@ -1790,11 +1806,12 @@ async function loadAdminBranches() {
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
         <button class="icon-text-btn branch-gear-btn" title="Edit branch" onclick="editBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}','${esc(b.pin)}','${esc((b.state||'').replace(/'/g, "\\'"))}')"><svg class="icon"><use href="#i-settings"/></svg></button>
-        <button class="link-btn" onclick="viewBranchAsAdmin('${b.id}')" style="color:#C4922A">View →</button>
+        <button class="link-btn" data-area="branch" onclick="viewBranchAsAdmin('${b.id}')" style="color:#C4922A">View →</button>
         <button class="danger-btn" onclick="deleteBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}')"><svg class="icon"><use href="#i-trash"/></svg></button>
       </div>
     </div>
   `).join('');
+  markOffAreas(list);
 }
 
 async function viewBranchAsAdmin(branchId) {
@@ -2413,6 +2430,11 @@ async function sendForgotPIN() {
 // ============================================================
 
 async function openDashboard() {
+  // Every way in (branch PIN, admin "View →", a saved #/branch link) lands here.
+  if (OFF_AREAS.includes('branch')) {
+    showToast('The branch dashboard is not in use');
+    return state.isAdmin ? openAdminPanel() : logout();
+  }
   showScreen('dashboard');
   activateBranchTab('cashup');
   setRoute('#/branch/cashup');
@@ -2639,6 +2661,7 @@ async function navigateDashboardDate(date) {
 }
 
 async function openCashupForm(date) {
+  if (OFF_AREAS.includes('branch')) return;   // openDashboard already redirected
   // Non-admin staff cannot open cashup sheets older than 7 days
   if (!state.isAdmin && date < getISTDateOffset(-7)) {
     showToast('You can only view up to 7 days back', 'error');
