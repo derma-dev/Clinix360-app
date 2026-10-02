@@ -110,7 +110,7 @@ function createSupabaseClient() {
     async findLeadByPlatformId(platform, userId) {
       const col = idColumnFor(platform);
       const res = await fetch(
-        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id,bot_active,category,bot_state,created_at&limit=1`,
+        `${url}/rest/v1/leads?${col}=eq.${encodeURIComponent(userId)}&select=id,customer_name,branch_id,bot_active,category,bot_state,created_at,source,instagram_user_id&limit=1`,
         { headers }
       );
       if (!res.ok) throw new Error(`leads lookup failed: ${res.status} ${await res.text()}`);
@@ -1394,15 +1394,19 @@ function mergeBotState(prev, decision) {
 // The summary-card body (D11) — assembled in code from the structured decision,
 // no second LLM call. Medical/emergency carry the customer's verbatim words;
 // kb_miss names the question the bot couldn't answer (D17).
-function buildHandoffSummary(reason, botState, ev) {
-  const q    = botState?.qualification || {};
+// " — service X, branch Y, WhatsApp Z" (or '' when nothing is known yet).
+function qualificationBits(q = {}) {
   const bits = [];
   if (q.service)        bits.push(`service ${q.service}`);
   if (q.branch)         bits.push(`branch ${q.branch}`);
   else if (q.location)  bits.push(`area ${q.location}`);
   if (q.phone)          bits.push(`WhatsApp ${q.phone}`);
   if (q.preferred_time) bits.push(`preferred ${q.preferred_time}`);
-  const head = `Bot handed off (${reason})${bits.length ? ' — ' + bits.join(', ') : ''}`;
+  return bits.length ? ' — ' + bits.join(', ') : '';
+}
+
+function buildHandoffSummary(reason, botState, ev) {
+  const head = `Bot handed off (${reason})${qualificationBits(botState?.qualification)}`;
   if (reason === 'medical' || reason === 'emergency') {
     return `${head}\nCustomer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
   }
@@ -1442,7 +1446,14 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
       console.error(`[meta-service] handoff courtesy reply failed on lead ${lead.id} (handoff continues):`, e.message);
     }
   }
-  const summary = buildHandoffSummary(decision.reason, botState, ev);
+  const summary  = buildHandoffSummary(decision.reason, botState, ev);
+  const category = decision.category || lead.category || 'lead';
+  const nextState = { ...botState, handoff_summary: summary,
+                      handoff_reason: decision.reason, handoff_at: new Date().toISOString(),
+                      // D17 — the question rides in bot_state so meta-send can capture
+                      // the staff answer to it without re-deriving anything.
+                      ...(decision.reason === 'kb_miss'
+                        ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500) } : {}) };
   await db.updateLead(lead.id, {
     // A soft handoff (the lead is ready for staff, nothing the bot can't handle)
     // keeps the bot answering until a human actually replies — that reply is the
@@ -1450,13 +1461,8 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     // "any other branch?" and "Hello?" got silence while no staff had picked up.
     bot_active: SOFT_HANDOFFS.includes(decision.reason),
     status:     'qualified',
-    category:   decision.category || lead.category || 'lead',
-    bot_state:  { ...botState, handoff_summary: summary,
-                  handoff_reason: decision.reason, handoff_at: new Date().toISOString(),
-                  // D17 — the question rides in bot_state so meta-send can capture
-                  // the staff answer to it without re-deriving anything.
-                  ...(decision.reason === 'kb_miss'
-                    ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500) } : {}) },
+    category,
+    bot_state:  nextState,
   });
   console.log(`[meta-service] handoffToStaff: lead ${lead.id} reason=${decision.reason} — "${summary.split('\n')[0]}"`);
   // D18 — email alert on emergency/kb_miss handoffs (one mechanism, two triggers;
@@ -1465,6 +1471,8 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   if (decision.reason === 'emergency' || decision.reason === 'kb_miss') {
     await sendBotAlert(cfg, lead, decision.reason, summary);
   }
+  // S2 — a handoff settles the chat: push it to the client's webhook (never throws).
+  await pushLead(db, { ...lead, category, bot_state: nextState }, cfg);
   return { handoff: decision.reason, summary };
 }
 
@@ -1476,9 +1484,19 @@ const escHtml = (s) => String(s).replace(/[&<>"']/g, c => (
 // or failed send logs a warning and moves on — the handoff is already complete
 // and the dashboard badge still marks the lead.
 async function sendBotAlert(cfg, lead, reason, summary) {
+  await sendAlertEmail(cfg,
+    `${reason === 'emergency' ? '🔴' : '❓'} Bot alert — ${reason} handoff (${lead.customer_name || lead.id})`,
+    `${reason === 'emergency' ? 'Emergency handoff' : 'Bot didn’t know the answer'} — ${lead.customer_name || lead.id}`,
+    summary,
+    'Open the dashboard to reply — the lead is waiting in the branch inbox.');
+}
+
+// One Resend email to the operator (cfg.alert_email or the default admin
+// address). Best-effort: logs and returns on a missing key or failed send.
+async function sendAlertEmail(cfg, subject, title, body, footer) {
   const key = process.env.RESEND_API_KEY;
   if (!key) {
-    console.warn('[meta-service] RESEND_API_KEY not set — bot alert email skipped');
+    console.warn('[meta-service] RESEND_API_KEY not set — alert email skipped');
     return;
   }
   try {
@@ -1488,19 +1506,135 @@ async function sendBotAlert(cfg, lead, reason, summary) {
       body: JSON.stringify({
         from: 'DSkin Bot <onboarding@resend.dev>',
         to:   [String(cfg?.alert_email || 'hospitalitybee@gmail.com').trim()],
-        subject: `${reason === 'emergency' ? '🔴' : '❓'} Bot alert — ${reason} handoff (${lead.customer_name || lead.id})`,
+        subject,
         html: `<div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1f2937">
 <div style="font-size:17px;font-weight:700;color:#8B6508;margin-bottom:12px">DSkin DM Assistant</div>
-<p style="margin:0 0 12px"><strong>${reason === 'emergency' ? 'Emergency handoff' : 'Bot didn’t know the answer'} — ${escHtml(lead.customer_name || lead.id)}</strong></p>
-<pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font-family:inherit;margin:0">${escHtml(summary)}</pre>
-<p style="margin:16px 0 0;color:#6b7280;font-size:13px">Open the dashboard to reply — the lead is waiting in the branch inbox.</p>
+<p style="margin:0 0 12px"><strong>${escHtml(title)}</strong></p>
+<pre style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:12px;white-space:pre-wrap;font-family:inherit;margin:0">${escHtml(body)}</pre>
+<p style="margin:16px 0 0;color:#6b7280;font-size:13px">${escHtml(footer)}</p>
 </div>`,
       }),
     });
-    if (!res.ok) console.warn('[meta-service] bot alert email failed:', res.status, await res.text());
+    if (!res.ok) console.warn('[meta-service] alert email failed:', res.status, await res.text());
   } catch (e) {
-    console.warn('[meta-service] bot alert email error:', e.message);
+    console.warn('[meta-service] alert email error:', e.message);
   }
+}
+
+// ── Lead push → the client's webhook (Make) · service tracker S2 (Q7 Q31 Q34) ──
+// A chat settles at a bot handoff, or after chatbot_config.lead_quiet_hours with
+// no new message (bot-hourly.js). Then: `lead` if a phone is known,
+// `potential_lead` if only a service is, nothing for non-leads or empty chats.
+// At most twice per customer: a potential_lead, then a lead once a phone
+// arrives. bot_state.lead_pushed stamps each sent type, so a Meta redelivery, a
+// later handoff or the next hourly run never resends it.
+function leadPushDue(lead) {
+  if ((lead?.category || 'lead') !== 'lead') return null;
+  const q    = lead.bot_state?.qualification || {};
+  const type = q.phone ? 'lead' : q.service ? 'potential_lead' : null;
+  const sent = lead.bot_state?.lead_pushed || {};
+  return type && !sent[type] && !sent.lead ? type : null;
+}
+
+// The whole thread, one line per message: "[2 Oct, 10:15] Customer: …".
+function conversationText(rows) {
+  return rows.map(m => {
+    const at = new Date(m.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata',
+      day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+    return `[${at}] ${isIncomingRow(m) ? 'Customer' : m.is_bot ? 'Bot' : 'Staff'}: ${m.message}`;
+  }).join('\n');
+}
+
+// What the bot would quote: a fresh post offer, else the KB "starts from" price.
+function priceQuoted(botState, cfg) {
+  const offer = offerFromBotState(botState, cfg || {});
+  if (offer?.fresh) return `₹${offer.offer_price} (post offer)`;
+  const svc = botState?.qualification?.service;
+  const e = (cfg?.kb?.entries || []).find(x => x.type === 'service' && x.key === svc && x.price);
+  return e ? `from ₹${e.price}` : '';
+}
+
+// One POST, 3 tries with backoff on 429 / 5xx / network errors (same pattern as
+// send-automation-webhook). Any other 4xx (400 bad payload, 410 webhook gone)
+// won't fix itself on retry. Optional LEAD_WEBHOOK_KEY → Make's API-key header (Q10).
+async function postLeadWebhook(url, payload) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (process.env.LEAD_WEBHOOK_KEY) headers['x-make-apikey'] = process.env.LEAD_WEBHOOK_KEY;
+  let error;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload),
+                                     signal: AbortSignal.timeout(8000) });
+      if (res.ok) return { ok: true };
+      error = `HTTP ${res.status}`;
+      if (res.status !== 429 && res.status < 500) break;
+    } catch (e) {
+      error = e.message;
+    }
+    if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
+  }
+  return { ok: false, error };
+}
+
+// Never throws: a failed push must not break the handoff or the hourly run.
+// Unstamped failures are retried by the next hourly run; we're emailed once per
+// lead + type so a dead webhook can't flood the inbox.
+async function pushLead(db, lead, cfg, quiet = false) {
+  const type = leadPushDue(lead);
+  const url  = process.env.LEAD_WEBHOOK_URL;
+  if (!type) return null;
+  if (!url) { console.warn('[meta-service] LEAD_WEBHOOK_URL not set — lead push skipped'); return null; }
+  const bs = lead.bot_state || {};
+  const q  = bs.qualification || {};
+  try {
+    let branch = q.branch || '';
+    if (!branch && lead.branch_id && lead.branch_id !== process.env.META_BRANCH_ID) {
+      branch = (await db.listBranches()).find(b => b.id === lead.branch_id)?.name || '';
+    }
+    const profile = lead.instagram_user_id ? await fetchInstagramProfile(lead.instagram_user_id) : null;
+    // ponytail: 500 newest messages; a longer thread loses its oldest lines.
+    const rows = await db.listRecentMessages(lead.id, 500);
+    // Fixed field list, every key always present: Make locks its data structure
+    // to the first payload it sees.
+    const payload = {
+      lead_type:        type,
+      source:           lead.source || 'instagram',
+      ig_user_id:       lead.instagram_user_id || '',
+      name:             lead.customer_name || '',
+      phone:            q.phone || '',
+      service:          q.service || '',
+      branch,
+      location:         q.location || '',
+      preferred_time:   q.preferred_time || '',
+      price_quoted:     priceQuoted(bs, cfg),
+      reason:           bs.handoff_reason || 'quiet',
+      summary:          quiet ? `Chat went quiet${qualificationBits(q)}` +
+                                  (bs.handoff_summary ? `\nEarlier: ${bs.handoff_summary}` : '')
+                              : bs.handoff_summary,
+      conversation:     conversationText(rows),
+      conversation_url: profile?.username ? `https://ig.me/m/${profile.username}` : '',
+      post_url:         '',                                   // S7: comment leads
+      created_at:       lead.created_at || '',
+    };
+    const r = await postLeadWebhook(url, payload);
+    const now = new Date().toISOString();
+    if (r.ok) {
+      await db.updateLead(lead.id, { bot_state: { ...bs, lead_pushed: { ...bs.lead_pushed, [type]: now } } });
+      console.log(`[meta-service] lead push: lead ${lead.id} sent as ${type}`);
+      return type;
+    }
+    console.error(`[meta-service] lead push failed for lead ${lead.id} (${type}): ${r.error}`);
+    if (!bs.lead_push_alerted?.[type]) {
+      await sendAlertEmail(cfg, `⚠️ Lead push failed — ${lead.customer_name || lead.id}`,
+        `The ${type} for ${lead.customer_name || lead.id} didn't reach the webhook (${r.error})`,
+        payload.summary,
+        'The hourly job retries it for 2 days. A 4xx usually means the webhook URL is wrong or the scenario is off.');
+      await db.updateLead(lead.id, { bot_state: { ...bs, lead_push_alerted: { ...bs.lead_push_alerted, [type]: now } } });
+    }
+  } catch (e) {
+    console.error(`[meta-service] lead push error on lead ${lead.id}:`, e.message);
+  }
+  return null;
 }
 
 // D17 teach-the-bot capture — called by meta-send on EVERY staff send: the
@@ -1741,6 +1875,9 @@ module.exports = {
   normalizePhone,
   handoffToStaff,
   maybeCaptureKbCandidate,
+  getSettingJson,
+  pushLead,
+  leadPushDue,
   parseOfferCaption,
   resolveOffer,
   isOfferFresh,

@@ -1477,5 +1477,229 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(reportWindowDays(undefined, 1), null, 'unset = off');
   }
 
+  // ── S2 lead push → client webhook (Q7 Q31 Q34) ──
+  {
+    const { pushLead, leadPushDue } = require('./meta-service');
+    const realSetTimeout = global.setTimeout;
+    global.setTimeout = (fn) => realSetTimeout(fn, 0);           // no real backoff waits
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.META_ACCESS_TOKEN = 'ig_token';
+    process.env.META_BRANCH_ID = 'FALLBACK';
+    process.env.RESEND_API_KEY = 'test_resend';
+    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+
+    // Types (Q34): phone → lead · service only → potential_lead · else nothing;
+    // a sent type never repeats, a potential_lead upgrades once to a lead.
+    const L = (q, extra = {}) => ({ category: 'lead', bot_state: { qualification: q, ...extra } });
+    assert.equal(leadPushDue(L({ service: 'LHR', phone: '9876543210' })), 'lead');
+    assert.equal(leadPushDue(L({ phone: '9876543210' })), 'lead', 'a phone alone is a lead');
+    assert.equal(leadPushDue(L({ service: 'LHR' })), 'potential_lead');
+    assert.equal(leadPushDue(L({ location: 'Uttam Nagar' })), null, 'neither phone nor service → nothing');
+    assert.equal(leadPushDue({ ...L({ service: 'LHR', phone: '9876543210' }), category: 'collaboration' }), null);
+    assert.equal(leadPushDue({ ...L({ service: 'LHR' }), category: 'sales_pitch' }), null);
+    assert.equal(leadPushDue(L({ service: 'LHR' }, { lead_pushed: { potential_lead: 't' } })), null, 'same type never resent');
+    assert.equal(leadPushDue(L({ service: 'LHR', phone: '9876543210' }, { lead_pushed: { potential_lead: 't' } })), 'lead', 'upgrade');
+    assert.equal(leadPushDue(L({ service: 'LHR', phone: '9876543210' }, { lead_pushed: { lead: 't' } })), null, 'at most twice');
+    assert.equal(leadPushDue(L({ service: 'LHR' }, { lead_pushed: { lead: 't' } })), null);
+
+    // `hook` = the webhook's answers in order (a number = status, 'net' = network error)
+    const pushMock = ({ hook = [200], history = [], botTurn = null } = {}) => {
+      const calls = { hooks: [], alerts: [], patches: [], profiles: 0, sends: [], inserts: [] };
+      global.fetch = async (url, opts = {}) => {
+        if (url.startsWith('https://hook.make.test')) {
+          calls.hooks.push({ headers: opts.headers, body: JSON.parse(opts.body) });
+          const r = hook[calls.hooks.length - 1] ?? hook.at(-1);
+          if (r === 'net') throw new Error('fetch failed');
+          return { ok: r < 300, status: r };
+        }
+        if (url.includes('api.resend.com')) { calls.alerts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
+        if (url.includes('graph.instagram.com') && url.includes('fields=')) {
+          calls.profiles++;
+          return { ok: true, json: async () => ({ name: 'Riya Sharma', username: 'riya.s' }) };
+        }
+        if (url.includes('graph.instagram.com')) {                       // the bot's send
+          calls.sends.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => ({ message_id: 'm' }) };
+        }
+        if (url.includes('/branches?')) return { ok: true, json: async () => [{ id: 'DWK', name: 'Dwarka Sec 12' }] };
+        if (url.includes('lead_messages?lead_id=eq.')) return { ok: true, json: async () => [...history].reverse() };
+        if (url.includes('/lead_messages') && opts.method === 'POST') { calls.inserts.push(JSON.parse(opts.body)); return { ok: true, json: async () => [{ id: 'o1' }] }; }
+        if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') { calls.patches.push(JSON.parse(opts.body)); return { ok: true, json: async () => [] }; }
+        if (url.includes('settings?key=eq.chatbot_config'))
+          return { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live', canned: {}, kb: { entries: [] } }) }] };
+        if (url.includes('generativelanguage.googleapis.com'))
+          return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(botTurn) }] } }] }) };
+        throw new Error('unexpected fetch: ' + url);
+      };
+      return calls;
+    };
+    const db = createSupabaseClient();
+    const CFG = { kb: { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 }] } };
+    const HISTORY = [
+      { id: 'm1', direction: 'incoming', message: 'laser price?', is_bot: false, created_at: '2026-10-02T04:45:00Z' },
+      { id: 'm2', direction: 'outgoing', message: 'Starts from ₹35000. Your WhatsApp?', is_bot: true, created_at: '2026-10-02T04:45:05Z' },
+      { id: 'm3', direction: 'incoming', message: '9876543210', is_bot: false, created_at: '2026-10-02T04:46:00Z' },
+      { id: 'm4', direction: 'outgoing', message: 'Our team will call you.', is_bot: false, created_at: '2026-10-02T05:00:00Z' },
+    ];
+    const LEAD = { id: 'L9', customer_name: 'Riya Sharma', instagram_user_id: 'IGS_9', source: 'instagram',
+                   branch_id: 'FALLBACK', category: 'lead', created_at: '2026-10-02T04:44:00Z',
+                   bot_state: { qualification: { service: 'LHR FULL BODY P/S', phone: '9876543210', branch: 'Janakpuri',
+                                                 location: 'Uttam Nagar', preferred_time: 'Saturday evening' },
+                                handoff_reason: 'wants_booking', handoff_summary: 'Bot handed off (wants_booking) — service LHR FULL BODY P/S',
+                                turn_count: 2 } };
+
+    // Payload: fixed field list, every key present, values from the lead + thread
+    let calls = pushMock({ history: HISTORY });
+    assert.equal(await pushLead(db, LEAD, CFG), 'lead');
+    assert.equal(calls.hooks.length, 1);
+    const p = calls.hooks[0].body;
+    assert.deepEqual(Object.keys(p), ['lead_type', 'source', 'ig_user_id', 'name', 'phone', 'service', 'branch',
+      'location', 'preferred_time', 'price_quoted', 'reason', 'summary', 'conversation', 'conversation_url',
+      'post_url', 'created_at'], 'fixed field list (Make locks it after the first sample)');
+    assert.deepEqual({ ...p, conversation: undefined }, {
+      lead_type: 'lead', source: 'instagram', ig_user_id: 'IGS_9', name: 'Riya Sharma', phone: '9876543210',
+      service: 'LHR FULL BODY P/S', branch: 'Janakpuri', location: 'Uttam Nagar', preferred_time: 'Saturday evening',
+      price_quoted: 'from ₹35000', reason: 'wants_booking',
+      summary: 'Bot handed off (wants_booking) — service LHR FULL BODY P/S',
+      conversation: undefined, conversation_url: 'https://ig.me/m/riya.s', post_url: '', created_at: '2026-10-02T04:44:00Z' });
+    assert.equal(p.conversation, [
+      '[2 Oct, 10:15] Customer: laser price?',
+      '[2 Oct, 10:15] Bot: Starts from ₹35000. Your WhatsApp?',
+      '[2 Oct, 10:16] Customer: 9876543210',
+      '[2 Oct, 10:30] Staff: Our team will call you.'].join('\n'), 'whole thread, one IST-stamped line per message');
+    assert.equal(calls.hooks[0].headers['x-make-apikey'], undefined, 'no key header unless LEAD_WEBHOOK_KEY is set');
+    // stamp keeps the rest of bot_state
+    assert.equal(calls.patches.length, 1);
+    assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'type stamped with a time');
+    assert.equal(calls.patches[0].bot_state.turn_count, 2, 'stamp merges into bot_state, never replaces it');
+
+    // Quiet push: "Chat went quiet" summary keeps the earlier handoff; a routed
+    // branch is named when the customer never typed one; a fresh post offer wins
+    process.env.LEAD_WEBHOOK_KEY = 'mk_123';
+    calls = pushMock({ history: HISTORY });
+    const quietLead = { ...LEAD, branch_id: 'DWK', bot_state: { ...LEAD.bot_state,
+      qualification: { service: 'LHR FULL BODY P/S' }, lead_pushed: {},
+      last_offer: { service: 'LHR FULL BODY P/S', offer_price: 9999, last_seen: new Date().toISOString() } } };
+    assert.equal(await pushLead(db, quietLead, CFG, true), 'potential_lead');
+    const q = calls.hooks[0].body;
+    assert.equal(q.lead_type, 'potential_lead');
+    assert.equal(q.phone, '');
+    assert.equal(q.branch, 'Dwarka Sec 12');
+    assert.equal(q.price_quoted, '₹9999 (post offer)');
+    assert.equal(q.summary, 'Chat went quiet — service LHR FULL BODY P/S\nEarlier: Bot handed off (wants_booking) — service LHR FULL BODY P/S');
+    assert.equal(calls.hooks[0].headers['x-make-apikey'], 'mk_123', 'LEAD_WEBHOOK_KEY → Make API-key header (Q10)');
+    delete process.env.LEAD_WEBHOOK_KEY;
+
+    // Retry: 429 / 5xx / network errors get 3 tries; success on the 3rd still stamps
+    calls = pushMock({ hook: [503, 'net', 200], history: HISTORY });
+    assert.equal(await pushLead(db, LEAD, CFG), 'lead');
+    assert.equal(calls.hooks.length, 3);
+    assert.equal(calls.alerts.length, 0);
+    calls = pushMock({ hook: [429], history: HISTORY });
+    assert.equal(await pushLead(db, LEAD, CFG), null);
+    assert.equal(calls.hooks.length, 3, '429 retried, gives up after 3');
+
+    // No retry on 400 / 410: one try, one alert email, no lead_pushed stamp (the
+    // hourly run retries) — and the alert is sent once per lead + type
+    for (const status of [400, 410]) {
+      calls = pushMock({ hook: [status], history: HISTORY });
+      assert.equal(await pushLead(db, LEAD, CFG), null);
+      assert.equal(calls.hooks.length, 1, `${status} not retried`);
+      assert.equal(calls.alerts.length, 1, `${status} alerts us`);
+      assert.match(calls.alerts[0].subject, /Lead push failed — Riya Sharma/);
+      assert.match(calls.alerts[0].html, new RegExp(`HTTP ${status}`));
+      assert.equal(calls.patches.length, 1);
+      assert.equal(calls.patches[0].bot_state.lead_pushed, undefined, 'a failed push is not stamped as sent');
+      assert.ok(calls.patches[0].bot_state.lead_push_alerted.lead);
+    }
+    calls = pushMock({ hook: [410], history: HISTORY });
+    await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_push_alerted: { lead: 't' } } }, CFG);
+    assert.equal(calls.alerts.length, 0, 'already alerted for this lead + type → no second email');
+
+    // Nothing due / no URL → no webhook call at all
+    calls = pushMock({ history: HISTORY });
+    assert.equal(await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_pushed: { lead: 't' } } }, CFG), null);
+    delete process.env.LEAD_WEBHOOK_URL;
+    assert.equal(await pushLead(db, LEAD, CFG), null);
+    assert.equal(calls.hooks.length + calls.patches.length, 0);
+    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+
+    // Settle trigger 1 — a handoff pushes; a failed push never blocks the handoff
+    process.env.GEMINI_API_KEY = 'test_key';
+    const BOT_LEAD = { id: 'L9', customer_name: 'Riya Sharma', instagram_user_id: 'IGS_9', source: 'instagram',
+                       branch_id: 'FALLBACK', bot_active: true, category: 'lead', created_at: new Date().toISOString(),
+                       bot_state: { qualification: { service: 'LHR FULL BODY P/S' } } };
+    const HANDOFF = { category: 'lead', is_medical: false, reply: 'Thanks! Our team will call you on WhatsApp.',
+                      kb_covers: true, handoff: true, reason: 'qualified', qualification: { phone: '98765 43210' } };
+    const EV9 = { messageText: '98765 43210', senderId: 'IGS_9', messageId: 'mid_9' };
+    calls = pushMock({ history: HISTORY, botTurn: HANDOFF });
+    let r = await botReply(BOT_LEAD, EV9, 'instagram');
+    assert.equal(r.handoff, 'qualified');
+    assert.equal(calls.hooks.length, 1, 'the handoff settles the chat → one push');
+    assert.equal(calls.hooks[0].body.lead_type, 'lead');
+    assert.equal(calls.hooks[0].body.phone, '9876543210');
+    assert.equal(calls.hooks[0].body.reason, 'qualified');
+    assert.match(calls.hooks[0].body.summary, /^Bot handed off \(qualified\)/);
+    assert.ok(calls.patches.at(-1).bot_state.lead_pushed.lead);
+    assert.equal(calls.patches.at(-1).bot_state.handoff_reason, 'qualified', 'stamp kept the handoff state');
+    calls = pushMock({ hook: [500], history: HISTORY, botTurn: HANDOFF });
+    r = await botReply(BOT_LEAD, EV9, 'instagram');
+    assert.equal(r.handoff, 'qualified', 'webhook down → the handoff still completes');
+    assert.equal(calls.sends.length, 1, 'and the customer still got the reply');
+    // a normal (non-handoff) turn never pushes
+    calls = pushMock({ history: HISTORY, botTurn: { ...HANDOFF, handoff: false } });
+    await botReply(BOT_LEAD, EV9, 'instagram');
+    assert.equal(calls.hooks.length, 0);
+    delete process.env.GEMINI_API_KEY;
+
+    // Settle trigger 2 — bot-hourly: chats quiet ≥ lead_quiet_hours, live mode only
+    const { quietLeadIds, handler: hourly } = require('../bot-hourly');
+    const now = Date.parse('2026-10-02T12:00:00Z');
+    assert.deepEqual(quietLeadIds([
+      { lead_id: 'A', created_at: '2026-10-02T09:00:00Z' },
+      { lead_id: 'A', created_at: '2026-10-02T09:30:00Z' },     // A's newest: 2.5 h ago → quiet
+      { lead_id: 'B', created_at: '2026-10-02T08:00:00Z' },
+      { lead_id: 'B', created_at: '2026-10-02T11:00:00Z' },     // B's newest: 1 h ago → still talking
+      { lead_id: 'C', created_at: '2026-10-02T10:00:00Z' },     // exactly 2 h → quiet
+    ], now, 2 * 3600e3), ['A', 'C']);
+
+    const hourlyMock = ({ mode, quietHours, msgs, leads }) => {
+      const calls = { hooks: [], patches: [], msgQueries: [] };
+      global.fetch = async (url, opts = {}) => {
+        if (url.includes('settings?key=eq.chatbot_config'))
+          return { ok: true, json: async () => [{ value: JSON.stringify({ mode, lead_quiet_hours: quietHours }) }] };
+        if (url.includes('lead_messages?created_at=gt.')) { calls.msgQueries.push(url); return { ok: true, json: async () => msgs }; }
+        if (url.includes('/leads?id=in.(')) return { ok: true, json: async () => leads.filter(l => url.includes(l.id)) };
+        if (url.includes('lead_messages?lead_id=eq.')) return { ok: true, json: async () => [] };
+        if (url.includes('graph.instagram.com')) return { ok: true, json: async () => ({ username: 'u' }) };
+        if (url.startsWith('https://hook.make.test')) { calls.hooks.push(JSON.parse(opts.body)); return { ok: true, status: 200 }; }
+        if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') { calls.patches.push(JSON.parse(opts.body)); return { ok: true, json: async () => [] }; }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      return calls;
+    };
+    const ago = (min) => new Date(Date.now() - min * 60e3).toISOString();
+    const QUIET = { id: 'Q1', customer_name: 'A', instagram_user_id: 'I1', category: 'lead', branch_id: 'FALLBACK',
+                    bot_state: { qualification: { service: 'LHR FULL BODY P/S' } } };
+    const BUSY  = { ...QUIET, id: 'Q2' };
+    const opts = { quietHours: 0.05, msgs: [{ lead_id: 'Q1', created_at: ago(10) }, { lead_id: 'Q2', created_at: ago(1) }],
+                   leads: [QUIET, BUSY] };
+    calls = hourlyMock({ mode: 'live', ...opts });
+    await hourly();
+    assert.equal(calls.hooks.length, 1, 'only the chat quiet ≥ 3 min (0.05 h) is pushed');
+    assert.equal(calls.hooks[0].lead_type, 'potential_lead');
+    assert.match(calls.hooks[0].summary, /^Chat went quiet/);
+    assert.equal(calls.hooks[0].reason, 'quiet');
+    calls = hourlyMock({ mode: 'shadow', ...opts });
+    await hourly();
+    assert.equal(calls.msgQueries.length + calls.hooks.length, 0, 'not live → the hourly run does nothing');
+
+    global.setTimeout = realSetTimeout;
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
+      delete process.env[k];
+  }
+
+  global.fetch = realFetch;
   console.log('meta-service: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });

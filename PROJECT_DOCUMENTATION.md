@@ -779,6 +779,21 @@ botReply
   `cfg.alert_email` in `chatbot_config` (Settings → Chatbot → Alerts & report) overrides
   the default admin address. Medical
   (non-emergency) handoffs do NOT alert; shadow mode alerts nothing.
+- **Lead push** (chatbot-as-a-service S2, Q7/Q31/Q34): `pushLead` POSTs a settled chat to
+  `LEAD_WEBHOOK_URL` (our Make webhook until S15). A chat settles at **any bot handoff** (called at the
+  end of `handoffToStaff`) or after **`lead_quiet_hours` with no message** ([bot-hourly](netlify/functions/bot-hourly.js)).
+  Type: `lead` = phone known · `potential_lead` = service but no phone · nothing for
+  collab / sales / misc or an empty chat. At most twice per customer: a `potential_lead`, then a `lead`
+  once a phone arrives. `bot_state.lead_pushed {<type>: time}` stamps each sent type, so redeliveries,
+  later handoffs and hourly runs never resend it. Payload: a **fixed** field list (Make locks its
+  structure to the first sample): `lead_type, source, ig_user_id, name, phone, service, branch, location,
+  preferred_time, price_quoted, reason, summary, conversation, conversation_url, post_url, created_at`.
+  `conversation` = whole thread, `[2 Oct, 10:15] Customer|Bot|Staff: …` per line; `price_quoted` = a
+  fresh post offer, else the KB "from" price; `conversation_url` = `ig.me/m/<username>` (one profile
+  fetch); `post_url` stays `''` until S7. Delivery: 3 tries with backoff on 429 / 5xx / network (8 s
+  timeout each); other 4xx aren't retried. A failure is not stamped (the hourly run retries for 2 days)
+  and emails the operator once per lead + type (`bot_state.lead_push_alerted`). Never throws: a failed
+  push can't block the reply or the handoff.
 - **Weekly metrics** (open #18): [scripts/bot-metrics.sql](scripts/bot-metrics.sql) —
   read-only, paste into the Supabase SQL editor: handoffs 7d, % with
   phone+service+location (target ≥60%), safety/kb_miss/turn_cap handoff counts, the
@@ -966,6 +981,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | [send-automation-report](netlify/functions/send-automation-report.js) | `/.netlify/functions/send-automation-report` | POST | `{automation_id, date_from, date_to}` | Builds a styled HTML→`.doc`, base64-attaches it to a Resend email, updates `last_sent_at`. |
 | [send-automation-webhook](netlify/functions/send-automation-webhook.js) | `/.netlify/functions/send-automation-webhook` | POST | `{automation_id, date_from, date_to}` | Builds a per-branch plain-text block `{report: "…"}`, POSTs to `webhook_url`, **3 retries** w/ backoff, updates `last_sent_at`, `502` on final failure. |
 | [check-automations](netlify/functions/check-automations.js) | scheduled | cron | — | `schedule('0 18 * * *')`. Fires due scheduled automations (see [§13](#13-report-automations)). |
+| [bot-hourly](netlify/functions/bot-hourly.js) | scheduled | cron | — | `schedule('0 * * * *')`, live mode only. Chats with no message for `chatbot_config.lead_quiet_hours` (default 2) → `pushLead` (lead push, see §15). S6 adds owner-question timeouts here. Trigger by hand from the Netlify UI to test. |
 | [send-bot-report](netlify/functions/send-bot-report.js) | scheduled | cron | — | `schedule('30 3 * * *')`. Chatbot metrics email to `chatbot_config.alert_email` per `report_frequency` (daily / weekly on Mondays / off). |
 
 **Webhook payload emitted by `send-automation-webhook`** (one string, per branch):
@@ -1012,7 +1028,7 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 | `payment_modes` | JSON array `[{code,label}, …]` |
 | `integrations` | JSON flags `{"instagram":true,"facebook":true,"whatsapp":true}` — only an explicit `false` disables |
 | `comment_rules` | JSON array `[{keyword, public, dm}, …]` — Instagram & Facebook comment automation ([§15](#instagram-comment-automation-comment--dm--branch-routing)) |
-| `chatbot_config` | JSON object — chatbot config (final plan §5): `mode` ('off'/'shadow'/'live'), `model`, `kb {entries, prices_verified_at}`, `locality_map`, `canned` (7 replies), `offer_stale_days`, `turn_cap`, `conversation_age_cap_days`. Created on first Settings save; absent row = code defaults with `mode:'off'`. |
+| `chatbot_config` | JSON object — chatbot config (final plan §5): `mode` ('off'/'shadow'/'live'), `model`, `kb {entries, prices_verified_at}`, `locality_map`, `canned` (7 replies), `offer_stale_days`, `turn_cap`, `conversation_age_cap_days`, `lead_quiet_hours` (lead push, default 2). Created on first Settings save; absent row = code defaults with `mode:'off'`. |
 | `offer_cache` | JSON object — share→offer cache (D9/D10, Step 14): `{offers: {<media_id>: {service, offer_price, last_seen, source_caption}}}`, capped at 50 newest, written only by the webhook; humans never edit it. |
 
 **Indexes**: `idx_leads_branch`, `idx_leads_instagram_user`, `idx_leads_facebook_user`,
@@ -1055,6 +1071,8 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 | `META_BRANCH_ID` | `processIncomingMessage()` | Branch UUID every inbound lead attaches to |
 | `WHATSAPP_PHONE_NUMBER_ID` | WA send + WA status | Numeric **phone number ID**, not the number |
 | `WHATSAPP_ACCESS_TOKEN` | WA send + WA status | **Use a System User token with expiry Never** — the dashboard token dies in 24 h |
+| `LEAD_WEBHOOK_URL` | `pushLead()` (meta-service) | Make Custom-webhook URL that settled chats are POSTed to. Unset = no pushes. Env, not DB: the DB is readable with the public key (Q35) |
+| `LEAD_WEBHOOK_KEY` | `pushLead()` (optional) | Sent as `x-make-apikey` once the webhook has an API key (Q10) |
 | `URL` | check-automations | Injected by Netlify; falls back to the hardcoded site URL |
 | `INTERNAL_FUNCTION_SECRET` | check-automations → send-automation-* | Shared secret authorizing the cron's calls to the (now PIN/secret-gated) send endpoints. **Required** for scheduled automations to fire. |
 
@@ -1187,6 +1205,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-02 | — | **Lead push → client webhook (service tracker S2, Q7/Q31/Q34).** New `pushLead` in [meta-service.js](netlify/functions/utils/meta-service.js) POSTs settled chats to `LEAD_WEBHOOK_URL` (Make) as `lead` (phone) / `potential_lead` (service, no phone): at every bot handoff, and from the new hourly [bot-hourly.js](netlify/functions/bot-hourly.js) once a chat has been quiet `lead_quiet_hours` (new Settings field, default 2, decimals allowed for tests). Fixed 16-field payload incl. the whole conversation; at most one push per type per customer (`bot_state.lead_pushed`); 3 tries on 429/5xx/network, no retry on other 4xx, one alert email per failing lead + type. `sendBotAlert`'s Resend call moved into a shared `sendAlertEmail`. `findLeadByPlatformId` now also selects `source, instagram_user_id`. Unit: types, upgrade, stamps, payload, retry/no-retry, alert-once, handoff push, failure doesn't block, hourly quiet selection + live-only. See §15. |
 | 2026-10-02 | — | **Console: Cashup + Lead Hub greyed out (service tracker S1, Q3).** `OFF_AREAS` in [app.js](app.js) marks the admin Leads / Reports / Notifications tabs, the Overview Performance card and the "View →" buttons `inert` with a "Not in use" label; `switchAdminTab` ignores them; `openDashboard` / `openCashupForm` refuse the branch dashboard (branch PIN → logout to home, admin → back to the panel). Their loaders (cashup KPIs, alert badges) no longer run on panel open. Nothing deleted, no data touched; one-line revert. See [§11](#11-admin-panel). |
 | 2026-09-23 | — | **Chatbot metrics email (pre-Step 19).** New scheduled [send-bot-report.js](netlify/functions/send-bot-report.js) (09:00 IST daily) emails the #18 numbers — handoffs, % complete (phone+service+branch, target ≥60%), medical/emergency, kb_miss, turn_cap, missed medical (target 0, subject gets ⚠️ when not), bot messages — to `alert_email`. `chatbot_config.report_frequency` decides at runtime: `daily` (last 24 h) · `weekly` (Mondays, last 7 days) · `off` (default). Chatbot Settings card gains an **Alerts & report** row: alert email + report dropdown (alert email was previously config-only). Unit: metrics incl. missed-medical boundary, frequency gate. Queries checked read-only against the test Supabase. |
 | 2026-09-23 | — | **Chatbot keeps answering after a soft handoff until staff reply.** Live 2026-09-22: the bot handed off `qualified` (service + branch + day, WhatsApp asked twice) and turned itself off, so the customer's next "Kya aap ki or koi brach bhi hai?" and "Hello?" got silence with no staff on the thread. `handoffToStaff` now leaves `bot_active=true` for `qualified` / `wants_booking` / `declined_booking`; the summary card and `status:'qualified'` still land, and the takeover is unchanged (staff send, Instagram-app reply or the Take-over button). Safety tiers, kb_miss, llm_error and turn_cap still turn the bot off. Unit: soft handoff keeps the bot on + the next turn replies. |
