@@ -1446,5 +1446,36 @@ assert.equal(extractComments({}).length, 0);
     delete process.env.META_VERIFY_TOKEN;
   }
 
+  // ── send-bot-report: #18 metrics + frequency gate ──
+  {
+    const { computeBotMetrics, reportWindowDays } = require('../send-bot-report');
+    const q = (o) => ({ qualification: o });
+    const handoffs = [
+      { id: 'a', bot_state: { ...q({ phone: '9876543210', service: 'laser', branch: 'b1' }), handoff_reason: 'qualified' } },
+      { id: 'b', bot_state: { ...q({ phone: '9876543210', service: 'laser', location: 'Adajan' }), handoff_reason: 'wants_booking' } },
+      { id: 'c', bot_state: { ...q({ service: 'laser' }), handoff_reason: 'kb_miss' } },
+      { id: 'd', bot_state: { handoff_reason: 'medical' } },
+      { id: 'e', bot_state: { handoff_reason: 'emergency' } },
+      { id: 'f', bot_state: { handoff_reason: 'turn_cap' } },
+    ];
+    const messages = [
+      // d: earlier bot reply, then the medical inbound → not missed
+      { lead_id: 'd', is_bot: true,  direction: 'outgoing', created_at: '2026-09-23T10:00:00Z' },
+      { lead_id: 'd', is_bot: false, direction: 'incoming', created_at: '2026-09-23T10:01:00Z' },
+      // e: bot replied AFTER the emergency inbound → missed
+      { lead_id: 'e', is_bot: false, direction: 'incoming', created_at: '2026-09-23T10:00:00Z' },
+      { lead_id: 'e', is_bot: true,  direction: 'outgoing', created_at: '2026-09-23T10:00:05Z' },
+    ];
+    const m = computeBotMetrics(handoffs, messages, 12);
+    assert.deepEqual(m, { handoffs: 6, complete: 2, pct_complete: 33.3, safety: 2, kb_miss: 1,
+                          turn_cap: 1, missed_medical: 1, bot_messages: 12 });
+    assert.equal(computeBotMetrics([], [], 0).pct_complete, null, 'no handoffs → no % (not NaN)');
+    assert.equal(reportWindowDays('daily', 3), 1);
+    assert.equal(reportWindowDays('weekly', 1), 7, 'weekly fires Mondays');
+    assert.equal(reportWindowDays('weekly', 2), null);
+    assert.equal(reportWindowDays('off', 1), null);
+    assert.equal(reportWindowDays(undefined, 1), null, 'unset = off');
+  }
+
   console.log('meta-service: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });

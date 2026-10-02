@@ -780,6 +780,15 @@
                 <input type="number" id="chatbot-age-cap-days" class="text-input" placeholder="7" min="1" style="margin:0;width:130px" title="Hand off if the conversation is older than this many days">
               </div>
               <div style="font-size:11px;color:#9ca3af">Offer stale days · turn cap · conversation age cap (days)</div>
+              <div style="font-weight:600;font-size:13px;margin-top:6px">Alerts &amp; report</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap">
+                <input type="email" id="chatbot-alert-email" class="text-input" placeholder="hospitalitybee@gmail.com" style="margin:0;flex:1;min-width:200px" title="Gets emergency / kb_miss alerts and the metrics report">
+                <select id="chatbot-report-frequency" class="text-input" style="margin:0;width:150px" title="Bot metrics email (sent 9 am IST; weekly = Mondays)">
+                  <option value="off">Report: off</option>
+                  <option value="daily">Report: daily</option>
+                  <option value="weekly">Report: weekly</option>
+                </select>
+              </div>
               <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
                 <span id="chatbot-kb-status" style="font-size:12px;color:#9ca3af"></span>
                 <button class="primary-btn" id="btn-save-chatbot-config">Save</button>

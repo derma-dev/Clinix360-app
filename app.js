@@ -1265,6 +1265,8 @@ const DEFAULT_CHATBOT_CONFIG = {
   offer_stale_days: 30,              // D10
   turn_cap: 10,                      // pending open #17
   conversation_age_cap_days: 7,
+  alert_email: '',                   // '' = default admin address (server side)
+  report_frequency: 'off',           // 'off' | 'daily' | 'weekly' — send-bot-report cron
 };
 
 const CHATBOT_MODES = [
@@ -1301,6 +1303,8 @@ function renderChatbotConfig() {
   set('chatbot-offer-stale-days', cfg.offer_stale_days);
   set('chatbot-turn-cap', cfg.turn_cap);
   set('chatbot-age-cap-days', cfg.conversation_age_cap_days);
+  set('chatbot-alert-email', cfg.alert_email || '');
+  set('chatbot-report-frequency', cfg.report_frequency || 'off');
 
   const kbN = (cfg.kb?.entries || []).length;
   const locN = Object.keys(cfg.locality_map || {}).length;
@@ -1342,6 +1346,8 @@ function collectChatbotConfigFromForm() {
     offer_stale_days: int('chatbot-offer-stale-days', 0, DEFAULT_CHATBOT_CONFIG.offer_stale_days),
     turn_cap:         int('chatbot-turn-cap', 1, DEFAULT_CHATBOT_CONFIG.turn_cap),
     conversation_age_cap_days: int('chatbot-age-cap-days', 1, DEFAULT_CHATBOT_CONFIG.conversation_age_cap_days),
+    alert_email:      (val('chatbot-alert-email') || '').trim(),
+    report_frequency: val('chatbot-report-frequency') || 'off',
   };
 }
 

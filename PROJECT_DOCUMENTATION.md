@@ -175,6 +175,7 @@ netlify/functions/
   send-automation-report.js     → automation: emails a .doc report (Resend attachment)
   send-automation-webhook.js    → automation: POSTs a formatted text report to a webhook
   check-automations.js          → cron (0 18 * * * UTC = 23:30 IST): fires scheduled automations
+  send-bot-report.js            → cron (30 3 * * * UTC = 09:00 IST): chatbot metrics email (daily/weekly/off)
   utils/meta-service.js         → shared Meta logic: verify, parse, store, send, comment automation + branch routing
   utils/meta-service.test.js    → the ONLY test in the repo (node, assert, no framework)
 
@@ -768,13 +769,20 @@ botReply
   the operator — `sendBotAlert` posts to Resend (same provider as the variance alert),
   best-effort (a missing `RESEND_API_KEY` or failed send logs and moves on; the handoff is
   already complete and the dashboard ❓/🔴 badge from Step 13 still marks the lead).
-  `cfg.alert_email` in `chatbot_config` overrides the default admin address. Medical
+  `cfg.alert_email` in `chatbot_config` (Settings → Chatbot → Alerts & report) overrides
+  the default admin address. Medical
   (non-emergency) handoffs do NOT alert; shadow mode alerts nothing.
 - **Weekly metrics** (open #18): [scripts/bot-metrics.sql](scripts/bot-metrics.sql) —
   read-only, paste into the Supabase SQL editor: handoffs 7d, % with
   phone+service+location (target ≥60%), safety/kb_miss/turn_cap handoff counts, the
   missed-medical invariant (target 0 — no is_bot message newer than the last inbound on
   a medical/emergency-handoff thread), bot message volume.
+- **Metrics email** (pre-Step 19, client asked for daily analytics):
+  [send-bot-report.js](netlify/functions/send-bot-report.js) — one scheduled function
+  (`30 3 * * *` = 9:00 IST) reads `chatbot_config.report_frequency` each run: `daily` →
+  emails the last 24 h, `weekly` → Mondays only, last 7 days, `off`/unset → nothing. Same
+  numbers as the SQL file (kept for ad-hoc runs), computed over REST, sent via Resend to
+  `alert_email`. Set in Settings → Chatbot → Alerts & report.
 - Unit suite: `node netlify/functions/utils/meta-service.test.js` covers the §8.1
   invariants (guard order, classifier-first, phone, non-lead, handoff, shadow never-send /
   never-mutate / one-row-even-on-error, disclosure, crash-swallow) plus the offer ladder
@@ -951,6 +959,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | [send-automation-report](netlify/functions/send-automation-report.js) | `/.netlify/functions/send-automation-report` | POST | `{automation_id, date_from, date_to}` | Builds a styled HTML→`.doc`, base64-attaches it to a Resend email, updates `last_sent_at`. |
 | [send-automation-webhook](netlify/functions/send-automation-webhook.js) | `/.netlify/functions/send-automation-webhook` | POST | `{automation_id, date_from, date_to}` | Builds a per-branch plain-text block `{report: "…"}`, POSTs to `webhook_url`, **3 retries** w/ backoff, updates `last_sent_at`, `502` on final failure. |
 | [check-automations](netlify/functions/check-automations.js) | scheduled | cron | — | `schedule('0 18 * * *')`. Fires due scheduled automations (see [§13](#13-report-automations)). |
+| [send-bot-report](netlify/functions/send-bot-report.js) | scheduled | cron | — | `schedule('30 3 * * *')`. Chatbot metrics email to `chatbot_config.alert_email` per `report_frequency` (daily / weekly on Mondays / off). |
 
 **Webhook payload emitted by `send-automation-webhook`** (one string, per branch):
 
@@ -1029,7 +1038,7 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 |---|---|---|
 | `SUPABASE_URL` | all DB-touching functions | Supabase project URL |
 | `SUPABASE_ANON_KEY` | all DB-touching functions | Public anon key (also served to the browser) |
-| `RESEND_API_KEY` | 4 email functions | Resend API key — **secret** |
+| `RESEND_API_KEY` | 5 email functions + bot alerts | Resend API key — **secret** |
 | `META_APP_ID` | meta-service `getConfig()` | Meta app id |
 | `META_APP_SECRET` | `verifyMetaSignature()` | HMAC-verifies the `X-Hub-Signature-256` on every webhook POST (see [§20](#20-security-model-quirks--known-issues)) |
 | `META_VERIFY_TOKEN` | `verifyWebhook()` | Webhook GET handshake — shared by IG, FB **and** WA |
@@ -1171,6 +1180,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-09-23 | — | **Chatbot metrics email (pre-Step 19).** New scheduled [send-bot-report.js](netlify/functions/send-bot-report.js) (09:00 IST daily) emails the #18 numbers — handoffs, % complete (phone+service+branch, target ≥60%), medical/emergency, kb_miss, turn_cap, missed medical (target 0, subject gets ⚠️ when not), bot messages — to `alert_email`. `chatbot_config.report_frequency` decides at runtime: `daily` (last 24 h) · `weekly` (Mondays, last 7 days) · `off` (default). Chatbot Settings card gains an **Alerts & report** row: alert email + report dropdown (alert email was previously config-only). Unit: metrics incl. missed-medical boundary, frequency gate. Queries checked read-only against the test Supabase. |
 | 2026-09-23 | — | **Chatbot keeps answering after a soft handoff until staff reply.** Live 2026-09-22: the bot handed off `qualified` (service + branch + day, WhatsApp asked twice) and turned itself off, so the customer's next "Kya aap ki or koi brach bhi hai?" and "Hello?" got silence with no staff on the thread. `handoffToStaff` now leaves `bot_active=true` for `qualified` / `wants_booking` / `declined_booking`; the summary card and `status:'qualified'` still land, and the takeover is unchanged (staff send, Instagram-app reply or the Take-over button). Safety tiers, kb_miss, llm_error and turn_cap still turn the bot off. Unit: soft handoff keeps the bot on + the next turn replies. |
 | 2026-09-23 | — | **Chatbot replies in the language of the customer's latest message (prompt-only).** "Mirror the customer's language" was read against the whole thread: after English turns, "Kya aap ki or koi brach bhi hai?" got English back. The system-prompt rule now names the latest message and the three cases (English → English, Roman Hinglish → Roman Hinglish, Devanagari → Hindi), and `callAssistant` repeats it next to the new message, because the rule in the system prompt alone still gave English about half the time. Live check against Gemini with the real KB and that thread's history: 8/8 correct for English and Hinglish. Devanagari still comes back as Roman Hinglish (only 15 of 6,500 corpus inbounds, left as is). |
 | 2026-09-23 | — | **Docs only: test environment made explicit.** The Netlify site, Supabase project, Meta app, Instagram account and Facebook Page are all our own test/mock setup, not the client's — callout added to [§2](#2-infrastructure--identifiers) and [§15 Meta app requirements](#meta-app-requirements-learned-the-hard-way); [§22](#22-roadmap--open-items) gains a client-infrastructure item; [CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md) Step 19 now lists the client-account setup (their Meta app, IG, FB Page, site, env vars, App Review) before shadow mode. No code change. |
@@ -1309,6 +1319,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 | [INSTAGRAM_COMMENT_AUTOMATION.md](INSTAGRAM_COMMENT_AUTOMATION.md) | Comment → public reply → auto-DM that asks the branch question → routing + 24 h window. Build-vs-buy, Meta API mechanics, full implementation spec. Built, not yet switched on. |
 | [FACEBOOK_COMMENT_AUTOMATION.md](FACEBOOK_COMMENT_AUTOMATION.md) | The Facebook counterpart, on shared `comment_rules`. FB `feed` webhook, `/messages` `recipient:{comment_id}` (PSID), `/comments` public reply, Page permissions. Built, not yet switched on; gated on IG going live. |
 | [artifacts/CHATBOT_AUTOMATION.md](artifacts/CHATBOT_AUTOMATION.md) | Chatbot — research + impl spec. LLM assistant that deflects FAQs and pre-qualifies leads, plugging into the existing message choke point. Hybrid model (constrained LLM + KB + guardrails + classifier-first medical handoff), minimal schema, build-vs-buy. Research, not started; gated on inbox stability + client decisions. |
+| [artifacts/CHATBOT_SERVICE_PIVOT_2026-09-28.md](artifacts/CHATBOT_SERVICE_PIVOT_2026-09-28.md) | **Chatbot-as-a-service pivot (research + draft design, nothing built).** Bot hosted on our accounts; leads → client's Make webhook; owner escalation via Telegram; Business Login for Instagram onboarding. Supersedes checklist Step 19. Open decisions: [Questions.md](Questions.md). |
 | **[CHATBOT_CHECKLIST.md](CHATBOT_CHECKLIST.md)** | **Chatbot — live implementation tracker.** Phase-by-phase checkboxes (corpus → review → KB → build → shadow → go-live); kept current as steps complete. Start here for "where are we". |
 | [artifacts/CHATBOT_BRAINSTORM_2026-08-17.md](artifacts/CHATBOT_BRAINSTORM_2026-08-17.md) | Chatbot planning session — the client's clarified priorities (IG bot first: FAQ + qualification + soft booking + locality→branch), the corpus-extraction findings (all test traffic; real history must come from the client's IG account via the `--meta` pull), and the resulting build order. |
 | [WHATSAPP_SETUP_RUNBOOK.md](WHATSAPP_SETUP_RUNBOOK.md) | Click-by-click Meta setup, test flow, client-handover replay, ranked gotchas |
