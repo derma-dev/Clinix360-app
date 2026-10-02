@@ -1129,6 +1129,7 @@ const ASSISTANT_DECISION_SCHEMA = {
     is_medical:   { type: 'BOOLEAN' },
     reply:        { type: 'STRING' },
     kb_covers:    { type: 'BOOLEAN' },
+    asks_price:   { type: 'BOOLEAN' },
     handoff:      { type: 'BOOLEAN' },
     reason: { type: 'STRING', enum: ['wants_booking', 'declined_booking', 'qualified', 'medical',
                                      'emergency', 'requested', 'kb_miss', 'llm_error', 'turn_cap', 'non_lead'] },
@@ -1143,16 +1144,16 @@ const ASSISTANT_DECISION_SCHEMA = {
       },
     },
   },
-  required: ['category', 'is_medical', 'reply', 'kb_covers', 'handoff', 'reason'],
+  required: ['category', 'is_medical', 'reply', 'kb_covers', 'asks_price', 'handoff', 'reason'],
 };
 
 const ASSISTANT_SYSTEM_PROMPT = `You are the Instagram DM assistant for Derma Skin and Hair Solutions, a Delhi-NCR dermatology clinic (branches: Janakpuri main, Kirti Nagar, Dwarka Sec 12).
 
 HARD RULES — breaking any is a failure:
-- Answer ONLY from the KNOWLEDGE BASE below. If it does not answer the question, set kb_covers=false, reply="" and handoff=true.
+- Answer ONLY from the KNOWLEDGE BASE below. asks_price=true whenever the customer asks what something costs. If the KB does not answer the question, set kb_covers=false and reason='kb_miss'; then for a PRICE you don't have, reply="" and handoff=true (the team checks the price and comes back), and for ANY OTHER question handoff=false: say the team will confirm that point, then carry on with the next qualifying question.
 - NEVER diagnose, prescribe medicines, or interpret symptoms. A message describing active symptoms (pain, itching, bleeding, a reaction) is not yours to answer: set is_medical=true, reply="" and handoff=true.
 - "Is it safe / painful for my condition?" questions about a STABLE condition (e.g. "PCOS hai to laser safe?") are NOT medical — answer from the KB's safety entries, is_medical=false.
-- Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise price is "shared after consultation" with a cue to the team. NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. KB prices are the last price staff quoted and often cover a package of sessions — for a KB price NEVER say "per session" or state a session count; say it starts from that price and the team confirms the exact plan. A LIVE OFFER may state only what its post caption states. Never reuse one service's price for a different service.
+- Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise you don't have the price: kb_miss, handoff=true (above). NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. KB prices are the last price staff quoted and often cover a package of sessions — for a KB price NEVER say "per session" or state a session count; say it starts from that price and the team confirms the exact plan. A LIVE OFFER may state only what its post caption states. Never reuse one service's price for a different service.
 - NEVER guarantee results.
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
 - Reply in the language and script of the customer's LATEST message, even if earlier messages were in another language: Hinglish in Roman letters ("kya aapki koi aur branch hai?") → reply in Roman Hinglish; Hindi in Devanagari → Hindi in Devanagari; English → English. Keep replies warm, 2–4 sentences.
@@ -1161,7 +1162,7 @@ HARD RULES — breaking any is a failure:
 - A deflected or partial answer always ends with a soft cue to the human team — never a dead end.
 - Keep the conversation going yourself: do NOT hand off merely because the basics are answered. "Fully qualified" means you have asked for their WhatsApp number and they gave it or clearly refused it — never hand off with the number still unasked. If they wind down ("okay", "I'll think", "thanks") and you have not yet asked for their WhatsApp number, ask for it now so the team can share details there — never let the chat end with the number unasked. Staff take over only at a real closing point.
 
-Set handoff=true with the matching reason when: the customer wants to book now or declines, is fully qualified (WhatsApp number asked — given or refused), asks for a human, the message is medical, or you cannot answer from the KB.`;
+Set handoff=true with the matching reason when: the customer wants to book now or declines, is fully qualified (WhatsApp number asked — given or refused), asks for a human, the message is medical, or they ask a price you don't have (kb_miss).`;
 
 // Whole-KB injection every turn (D20): no retrieval step can miss a medical
 // entry. ~40 entries stays tiny; upgrade path is pgvector top-k.
@@ -1169,7 +1170,8 @@ function renderKbForPrompt(kb) {
   const lines = (kb?.entries || []).map(e => e.type === 'service'
     // Corpus-mined prices are what staff last quoted — often a multi-session
     // package, so no "per session" claim here (the P/S in keys is the clinic's billing name).
-    ? `- SERVICE ${e.key}${e.price ? `: ₹${e.price} (last quoted ${e.price_last_quoted || 'n/a'})` : ': price after consultation'}`
+    // No price = unknown (S3): a price question on it goes to the owner, who fills it in (S4).
+    ? `- SERVICE ${e.key}${e.price ? `: ₹${e.price} (last quoted ${e.price_last_quoted || 'n/a'})` : ': no price yet'}`
     : `- FAQ [${(e.tags || []).join(', ')}]: ${e.a}`);
   return `KNOWLEDGE BASE (the ONLY source for answers):\n${lines.join('\n')}`;
 }
@@ -1454,6 +1456,13 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
                       // the staff answer to it without re-deriving anything.
                       ...(decision.reason === 'kb_miss'
                         ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500) } : {}) };
+  // S3 — owner alert (Q12 Q32). A price question keeps its Telegram message id so
+  // the owner's reply maps back to this lead (S4). Sent before the write below so
+  // the id lands in the same bot_state that pushLead later stamps.
+  if (OWNER_ALERTS[decision.reason]) {
+    const msgId = await sendBotAlert(cfg, { ...lead, bot_state: nextState }, decision.reason, summary, ev?.messageText);
+    if (decision.reason === 'kb_miss') nextState.owner_alert_msg_id = msgId;
+  }
   await db.updateLead(lead.id, {
     // A soft handoff (the lead is ready for staff, nothing the bot can't handle)
     // keeps the bot answering until a human actually replies — that reply is the
@@ -1465,12 +1474,6 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     bot_state:  nextState,
   });
   console.log(`[meta-service] handoffToStaff: lead ${lead.id} reason=${decision.reason} — "${summary.split('\n')[0]}"`);
-  // D18 — email alert on emergency/kb_miss handoffs (one mechanism, two triggers;
-  // the dashboard ❓/🔴 badges shipped with Step 13). Best-effort: never throws,
-  // never delays the handoff result. Shadow mode never reaches here.
-  if (decision.reason === 'emergency' || decision.reason === 'kb_miss') {
-    await sendBotAlert(cfg, lead, decision.reason, summary);
-  }
   // S2 — a handoff settles the chat: push it to the client's webhook (never throws).
   await pushLead(db, { ...lead, category, bot_state: nextState }, cfg);
   return { handoff: decision.reason, summary };
@@ -1479,16 +1482,58 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
 const escHtml = (s) => String(s).replace(/[&<>"']/g, c => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// D18 — the email half of the alert. Same provider as send-variance-alert
-// (Resend); `cfg.alert_email` overrides the default admin address. A missing key
-// or failed send logs a warning and moves on — the handoff is already complete
-// and the dashboard badge still marks the lead.
-async function sendBotAlert(cfg, lead, reason, summary) {
-  await sendAlertEmail(cfg,
-    `${reason === 'emergency' ? '🔴' : '❓'} Bot alert — ${reason} handoff (${lead.customer_name || lead.id})`,
-    `${reason === 'emergency' ? 'Emergency handoff' : 'Bot didn’t know the answer'} — ${lead.customer_name || lead.id}`,
-    summary,
-    'Open the dashboard to reply — the lead is waiting in the branch inbox.');
+// "2 Oct, 10:15" in IST: conversation lines and alert deadlines.
+const istStamp = (t) => new Date(t).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata',
+  day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+
+// One Telegram Bot API sendMessage. Plain text, so customer words need no
+// escaping. Throws on any failure (403 = the owner blocked the bot); returns the Message.
+async function sendTelegram(chatId, text, extra = {}) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) throw new Error('TELEGRAM_BOT_TOKEN not set');
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text, ...extra }),
+    signal: AbortSignal.timeout(8000),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!data.ok) throw new Error(`Telegram ${res.status} ${data.description || ''}`.trim());
+  return data.result;
+}
+
+// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies). kb_miss is a
+// price question by now (Q30, see botReply); the rest are FYIs. Medical,
+// turn_cap and soft handoffs alert nobody. One alert per thread per incident
+// comes free: each of these switches the bot off for the thread, so the next
+// message can't alert again (an LLM outage pings once per chat, not per message).
+const OWNER_ALERTS = {
+  kb_miss:   { head: '❓ Price question',      ask: 'Reply to this message with the price and I’ll pass it on.' },
+  emergency: { head: '🔴 Emergency',           ask: 'The bot didn’t reply. Please answer them yourself.' },
+  requested: { head: '🙋 Asked for a person',  ask: 'The bot has stepped back. Please answer them yourself.' },
+  llm_error: { head: '⚠️ Bot error',           ask: 'They were told the team will help. Please answer them yourself.' },
+};
+
+// Telegram to the bound owner (settings.telegram_owner, set by telegram-webhook).
+// A price question goes with ForceReply, so tapping it opens a reply. No owner
+// bound, no token, or a failed send → the same alert by email (Resend,
+// cfg.alert_email). Never throws. Returns the Telegram message id, or null.
+async function sendBotAlert(cfg, lead, reason, summary, said) {
+  const { head, ask } = OWNER_ALERTS[reason];
+  const who = `${head}: ${lead.customer_name || 'A customer'}${qualificationBits(lead.bot_state?.qualification)}`;
+  try {
+    const owner = await getSettingJson('telegram_owner');
+    if (!owner?.chat_id) throw new Error('no owner linked');
+    const m = await sendTelegram(owner.chat_id,
+      `${who}\n"${String(said || '').slice(0, 300)}"\n\n${ask}\n⏳ You can reply until ${istStamp(Date.now() + 24 * 3600e3)}.`,
+      reason === 'kb_miss' ? { reply_markup: { force_reply: true, input_field_placeholder: 'The price…' } } : {});
+    return m.message_id;
+  } catch (e) {
+    console.warn(`[meta-service] Telegram alert failed (${e.message}) — emailing it instead`);
+    await sendAlertEmail(cfg, who, who, summary,
+      `Sent by email because the Telegram alert failed (${e.message}). Reply to them in the Instagram app.`);
+    return null;
+  }
 }
 
 // One Resend email to the operator (cfg.alert_email or the default admin
@@ -1538,11 +1583,9 @@ function leadPushDue(lead) {
 
 // The whole thread, one line per message: "[2 Oct, 10:15] Customer: …".
 function conversationText(rows) {
-  return rows.map(m => {
-    const at = new Date(m.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata',
-      day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
-    return `[${at}] ${isIncomingRow(m) ? 'Customer' : m.is_bot ? 'Bot' : 'Staff'}: ${m.message}`;
-  }).join('\n');
+  return rows.map(m =>
+    `[${istStamp(m.created_at)}] ${isIncomingRow(m) ? 'Customer' : m.is_bot ? 'Bot' : 'Staff'}: ${m.message}`
+  ).join('\n');
 }
 
 // What the bot would quote: a fresh post offer, else the KB "starts from" price.
@@ -1608,9 +1651,10 @@ async function pushLead(db, lead, cfg, quiet = false) {
       preferred_time:   q.preferred_time || '',
       price_quoted:     priceQuoted(bs, cfg),
       reason:           bs.handoff_reason || 'quiet',
-      summary:          quiet ? `Chat went quiet${qualificationBits(q)}` +
-                                  (bs.handoff_summary ? `\nEarlier: ${bs.handoff_summary}` : '')
-                              : bs.handoff_summary,
+      summary:          (quiet ? `Chat went quiet${qualificationBits(q)}` +
+                                   (bs.handoff_summary ? `\nEarlier: ${bs.handoff_summary}` : '')
+                               : bs.handoff_summary) +
+                        (bs.team_questions?.length ? `\nTeam to confirm: ${bs.team_questions.map(x => `"${x}"`).join(', ')}` : ''),
       conversation:     conversationText(rows),
       conversation_url: profile?.username ? `https://ig.me/m/${profile.username}` : '',
       post_url:         '',                                   // S7: comment leads
@@ -1780,6 +1824,13 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       if (lead.category === 'lead' && decision.category === 'misc') {
         decision = { ...decision, category: 'lead', ...(decision.reason === 'non_lead' && { handoff: false }) };
       }
+      // Q30 — the owner is asked about unknown PRICES only. Any other question the
+      // KB can't answer: no handoff, the bot says the team will confirm it and keeps
+      // qualifying, and the question goes in the lead summary (team_questions below).
+      if (decision.reason === 'kb_miss' && !decision.asks_price) {
+        decision = { ...decision, handoff: false,
+                     reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss') };
+      }
     }
 
     // D19/D24 — shadow: log exactly one row, send nothing, mutate nothing.
@@ -1842,6 +1893,9 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // Open #17 — the cap counter ticks only on a delivered normal turn (a failed
     // send throws above and never persists; handoff/non-lead replies are terminal).
     botState.turn_count = turns + 1;
+    if (decision.reason === 'kb_miss' && !decision.kb_covers) {
+      botState.team_questions = [...(botState.team_questions || []), String(ev.messageText || '').slice(0, 200)].slice(-5);
+    }
     await db.updateLead(lead.id, { category: 'lead', bot_state: botState });
     console.log(`[meta-service] botReply: replied on lead ${lead.id} (${Math.round(Date.now() - t0)}ms)`);
     return { sent: true };
@@ -1852,6 +1906,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
 }
 
 module.exports = {
+  safeEqual,
   verifyWebhook,
   verifyMetaSignature,
   authorizeRequest,
@@ -1878,6 +1933,7 @@ module.exports = {
   getSettingJson,
   pushLead,
   leadPushDue,
+  sendTelegram,
   parseOfferCaption,
   resolveOffer,
   isOfferFresh,

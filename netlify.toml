@@ -8,6 +8,13 @@
   status = 200
   force  = true
 
+# Telegram owner alerts (S3) — also before the catch-all
+[[redirects]]
+  from = "/webhook/telegram"
+  to   = "/.netlify/functions/telegram-webhook"
+  status = 200
+  force  = true
+
 [[redirects]]
   from = "/*"
   to = "/index.html"

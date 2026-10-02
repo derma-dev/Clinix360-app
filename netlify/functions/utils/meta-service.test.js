@@ -562,7 +562,7 @@ assert.equal(extractComments({}).length, 0);
       const body = JSON.parse(captured.opts.body);
       assert.equal(body.generationConfig.responseMimeType, 'application/json');
       assert.deepEqual(body.generationConfig.responseSchema.required,
-        ['category', 'is_medical', 'reply', 'kb_covers', 'handoff', 'reason']);
+        ['category', 'is_medical', 'reply', 'kb_covers', 'asks_price', 'handoff', 'reason']);
       assert.ok(body.systemInstruction.parts.some(p => p.text.includes('LHR FULL BODY P/S')),
         'whole KB injected into the prompt (D20)');
       assert.ok(body.contents.at(-1).parts[0].text.includes('price of laser'));
@@ -773,16 +773,25 @@ assert.equal(extractComments({}).length, 0);
     // `offerCache` seeds settings.offer_cache; `offerParse` is what a caption
     // parse returns ('error' → HTTP failure; null → no service match).
     const botMock = ({ config, history = [], decision, geminiError, sendFails = false,
-                       offerCache = null, offerParse, imageFails = false, alertFails = false } = {}) => {
+                       offerCache = null, offerParse, imageFails = false, alertFails = false,
+                       owner = null, telegram = 200 } = {}) => {
       const calls = { sends: [], msgInserts: [], patches: [], shadowLogs: [], gemini: [],
                       historyFetches: 0, settingUpserts: [], offerCacheReads: 0, imageFetches: 0,
-                      alerts: [] };
+                      alerts: [], telegrams: [] };
       global.fetch = async (url, opts = {}) => {
-        if (url.includes('api.resend.com')) {                              // D18 alert email
+        if (url.includes('api.resend.com')) {                              // alert email (fallback)
           if (alertFails) return { ok: false, status: 500, text: async () => 'smtp down' };
           calls.alerts.push(JSON.parse(opts.body));
           return { ok: true, json: async () => ({}) };
         }
+        if (url.includes('api.telegram.org')) {                            // S3 owner alert
+          calls.telegrams.push({ url, body: JSON.parse(opts.body) });
+          return telegram === 200
+            ? { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 700 + calls.telegrams.length } }) }
+            : { ok: false, status: telegram, json: async () => ({ ok: false, description: 'Forbidden: bot was blocked by the user' }) };
+        }
+        if (url.includes('settings?key=eq.telegram_owner'))
+          return { ok: true, json: async () => owner ? [{ value: JSON.stringify(owner) }] : [] };
         if (url.includes('settings?key=eq.chatbot_config'))
           return { ok: true, json: async () => [{ value: JSON.stringify(config) }] };
         if (url.includes('settings?key=eq.offer_cache')) {
@@ -859,6 +868,8 @@ assert.equal(extractComments({}).length, 0);
       kb_covers: true, handoff: false, reason: 'wants_booking',
       qualification: { service: 'LHR FULL BODY P/S', phone: '+91 98765 43210' },
     };
+    // A price the KB doesn't have (Q30: the only kb_miss that hands off)
+    const PRICE_MISS = { ...REPLY_DECISION, kb_covers: false, asks_price: true, handoff: true, reason: 'kb_miss', reply: '' };
 
     // 1) bot_active=false → strict no-op, zero network calls
     {
@@ -1046,7 +1057,7 @@ assert.equal(extractComments({}).length, 0);
     {
       const calls = botMock({
         config: CFG('live'),
-        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' },
+        decision: PRICE_MISS,
       });
       const r = await botReply(LEAD, EV, 'instagram');
       assert.equal(r.handoff, 'kb_miss');
@@ -1352,49 +1363,114 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.sends.length + calls.patches.length, 0);
     }
 
-    // 19) D18 email alerts (Step 18): emergency + kb_miss handoffs fire ONE Resend
-    //     email each; other handoffs none; a failed alert never breaks the handoff
+    // 19) S3 owner alerts (Q12 Q30 Q32): Telegram to the bound owner, email as
+    //     the fallback; a failed alert never breaks the handoff
     {
-      // kb_miss → alert with the missed question in the body, cfg.alert_email honoured
-      let calls = botMock({
-        config: CFG('live', { alert_email: 'owner@clinic.example' }),
-        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' },
-      });
-      await botReply(LEAD, EV, 'instagram');
-      assert.equal(calls.alerts.length, 1, 'kb_miss fires the D18 email');
-      assert.equal(calls.alerts[0].to[0], 'owner@clinic.example');
-      assert.match(calls.alerts[0].subject, /kb_miss/);
-      assert.match(calls.alerts[0].subject, /Priya Sharma/);
-      assert.match(calls.alerts[0].html, /Bot didn&#39;t know: &quot;price of laser&quot;/,
-        'the missed question rides in the alert body (HTML-escaped — it is verbatim customer text)');
+      process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
+      const OWNER = { chat_id: 4242, name: 'Owner' };
 
-      // emergency → alert fires even though NOTHING was sent to the customer
-      calls = botMock({ config: CFG('live') });
-      await botReply(LEAD, { ...EV, messageText: 'emergency! khoon beh raha hai' }, 'instagram');
-      assert.equal(calls.sends.length, 0);
-      assert.equal(calls.alerts.length, 1, 'emergency fires the D18 email');
-      assert.match(calls.alerts[0].subject, /emergency/);
+      // price kb_miss → ONE question, ForceReply, name + known details + question +
+      // deadline; its message id lands in the handoff's own bot_state write
+      let calls = botMock({ config: CFG('live'), decision: PRICE_MISS, owner: OWNER });
+      assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'kb_miss');
+      assert.equal(calls.telegrams.length, 1);
+      assert.equal(calls.alerts.length, 0, 'Telegram worked → no email');
+      const t = calls.telegrams[0];
+      assert.match(t.url, /api\.telegram\.org\/bottg_token\/sendMessage$/);
+      assert.equal(t.body.chat_id, 4242);
+      assert.equal(t.body.text.split('\n')[0], '❓ Price question: Priya Sharma — service LHR FULL BODY P/S, WhatsApp 9876543210');
+      assert.equal(t.body.text.split('\n')[1], '"price of laser"');
+      assert.match(t.body.text, /Reply to this message with the price/);
+      assert.match(t.body.text, /⏳ You can reply until \d{1,2} \w{3}, \d\d:\d\d\.$/, '24 h window deadline, IST');
+      assert.equal(t.body.reply_markup.force_reply, true, 'tapping the alert opens a reply');
+      assert.equal(calls.patches.length, 1, 'one lead write: the id rides in it');
+      assert.equal(calls.patches[0].body.bot_state.owner_alert_msg_id, 701, 'S4 maps the reply back by this id');
+      assert.equal(calls.patches[0].body.bot_active, false, 'bot waits for the owner (resumes in S4)');
+      assert.equal(calls.sends[0].message.text, 'Hi! I am the clinic’s assistant 🤖\n\nLet me check with our team.',
+        'the customer gets the hold copy');
 
-      // plain medical handoff + qualified handoff + normal turn → no email
-      calls = botMock({ config: CFG('live') });
-      await botReply(LEAD, { ...EV, messageText: 'khujli ho rahi hai' }, 'instagram');
-      calls = botMock({ config: CFG('live'),
-        decision: { ...REPLY_DECISION, handoff: true, reason: 'qualified', reply: 'Team will confirm 🙏' } });
-      await botReply(LEAD, EV, 'instagram');
-      calls = botMock({ config: CFG('live'), decision: REPLY_DECISION });
-      await botReply(LEAD, EV, 'instagram');
-      assert.equal(calls.alerts.length, 0, 'only emergency/kb_miss alert (D18 two triggers)');
+      // a non-price question the KB lacks → no owner question, no handoff: the bot
+      // says the team will confirm and keeps going; the question is kept for the lead
+      calls = botMock({ config: CFG('live'), owner: OWNER, decision: { ...PRICE_MISS, asks_price: false, handoff: false,
+        reply: 'The team will confirm parking for you. Which branch suits you?' } });
+      assert.deepEqual(await botReply(LEAD, { ...EV, messageText: 'is there parking?' }, 'instagram'), { sent: true });
+      assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'the owner is asked about prices only');
+      assert.match(calls.sends[0].message.text, /Which branch suits you\?$/);
+      assert.equal(calls.patches[0].body.bot_active, undefined, 'bot stays on');
+      assert.deepEqual(calls.patches[0].body.bot_state.team_questions, ['is there parking?']);
+      // …even when the model still hands it off: code turns it into a normal turn
+      // (empty reply → the canned hold copy) and appends to the earlier questions
+      calls = botMock({ config: CFG('live'), owner: OWNER, decision: { ...PRICE_MISS, asks_price: false } });
+      const r19 = await botReply({ ...LEAD, bot_state: { team_questions: ['is there parking?'] } },
+        { ...EV, messageText: 'do you open on Sunday?' }, 'instagram');
+      assert.deepEqual(r19, { sent: true });
+      assert.equal(calls.telegrams.length, 0);
+      assert.match(calls.sends[0].message.text, /Let me check with our team\.$/);
+      assert.deepEqual(calls.patches[0].body.bot_state.team_questions, ['is there parking?', 'do you open on Sunday?']);
 
-      // Resend outage → handoff still completes
-      calls = botMock({ config: CFG('live'), alertFails: true,
-        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' } });
+      // FYIs: emergency (nothing sent to the customer), asks for a person, LLM down.
+      // No ForceReply, no stored message id.
+      for (const [ev, over, head] of [
+        [{ ...EV, messageText: 'emergency! khoon beh raha hai' }, {}, '🔴 Emergency: Priya Sharma'],
+        [{ ...EV, messageText: 'talk to a human please' }, {}, '🙋 Asked for a person: Priya Sharma'],
+        [EV, { geminiError: 'overloaded' }, '⚠️ Bot error: Priya Sharma'],
+      ]) {
+        calls = botMock({ config: CFG('live'), owner: OWNER, ...over });
+        await botReply(LEAD, ev, 'instagram');
+        assert.equal(calls.telegrams.length, 1, head);
+        assert.ok(calls.telegrams[0].body.text.startsWith(head), head);
+        assert.ok(calls.telegrams[0].body.text.includes(`"${ev.messageText}"`), 'their words ride in the FYI');
+        assert.equal(calls.telegrams[0].body.reply_markup, undefined, 'an FYI expects no reply');
+        assert.equal(calls.patches[0].body.bot_state.owner_alert_msg_id, undefined);
+      }
+      assert.equal(calls.sends.length, 1, 'llm_error still sends its hold copy');
+
+      // one alert per incident: the alerting handoff switched the bot off, so the
+      // next message in the outage reaches no alert at all
+      const after = calls.patches[0].body;
+      calls = botMock({ config: CFG('live'), owner: OWNER, geminiError: 'overloaded' });
+      assert.deepEqual(await botReply({ ...LEAD, ...after }, EV, 'instagram'), { skipped: 'bot_inactive' });
+      assert.equal(calls.telegrams.length + calls.alerts.length, 0);
+
+      // medical, turn_cap, soft handoff, normal turn → nobody alerted
+      let quiet = 0;
+      for (const [lead, ev, over] of [
+        [LEAD, { ...EV, messageText: 'khujli ho rahi hai' }, {}],
+        [{ ...LEAD, bot_state: { turn_count: 10 } }, EV, { decision: REPLY_DECISION }],
+        [LEAD, EV, { decision: { ...REPLY_DECISION, handoff: true, reason: 'qualified', reply: 'Team will confirm 🙏' } }],
+        [LEAD, EV, { decision: REPLY_DECISION }],
+      ]) {
+        calls = botMock({ config: CFG('live'), owner: OWNER, ...over });
+        await botReply(lead, ev, 'instagram');
+        quiet += calls.telegrams.length + calls.alerts.length;
+      }
+      assert.equal(quiet, 0, 'only price questions + emergency/requested/llm_error alert');
+
+      // email fallback: no owner linked, or Telegram refuses (403 = owner blocked
+      // the bot) → the same alert by email to cfg.alert_email, no message id
+      for (const over of [{ owner: null }, { owner: OWNER, telegram: 403 }]) {
+        calls = botMock({ config: CFG('live', { alert_email: 'owner@clinic.example' }), decision: PRICE_MISS, ...over });
+        assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'kb_miss');
+        assert.equal(calls.alerts.length, 1, 'emailed instead');
+        assert.equal(calls.alerts[0].to[0], 'owner@clinic.example');
+        assert.equal(calls.alerts[0].subject, '❓ Price question: Priya Sharma — service LHR FULL BODY P/S, WhatsApp 9876543210');
+        assert.match(calls.alerts[0].html, /Bot didn&#39;t know: &quot;price of laser&quot;/,
+          'the missed question rides in the email body (HTML-escaped, verbatim customer text)');
+        assert.equal(calls.patches[0].body.bot_state.owner_alert_msg_id, null);
+      }
+      assert.match(calls.alerts[0].html, /Telegram 403 Forbidden: bot was blocked by the user/, 'why it came by email');
+      delete process.env.TELEGRAM_BOT_TOKEN;
+      calls = botMock({ config: CFG('live'), decision: PRICE_MISS, owner: OWNER });
+      await botReply(LEAD, EV, 'instagram');
+      assert.equal(calls.telegrams.length, 0);
+      assert.equal(calls.alerts.length, 1, 'no bot token yet → email, as before S3');
+
+      // Telegram AND email down / no RESEND_API_KEY → handoff still completes
+      calls = botMock({ config: CFG('live'), alertFails: true, decision: PRICE_MISS });
       assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'kb_miss',
-        'a failed alert email must not break the handoff');
-
-      // no RESEND_API_KEY → alert skipped silently, handoff unaffected
+        'a failed alert must not break the handoff');
       delete process.env.RESEND_API_KEY;
-      calls = botMock({ config: CFG('live'),
-        decision: { ...REPLY_DECISION, kb_covers: false, handoff: true, reason: 'kb_miss', reply: '' } });
+      calls = botMock({ config: CFG('live'), decision: PRICE_MISS });
       assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'kb_miss');
       assert.equal(calls.alerts.length, 0);
       process.env.RESEND_API_KEY = 'test_resend';
@@ -1444,6 +1520,48 @@ assert.equal(extractComments({}).length, 0);
     await Promise.all(pending);
     delete process.env.META_APP_SECRET;
     delete process.env.META_VERIFY_TOKEN;
+  }
+
+  // ── telegram-webhook (S3): secret header, owner binding, everything else ignored ──
+  {
+    const { default: tg } = await import('../telegram-webhook.mjs');
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
+    process.env.TELEGRAM_LINK_CODE = 'link_abc';
+    const calls = { upserts: [], telegrams: [] };
+    global.fetch = async (url, opts = {}) => {
+      if (url.includes('/settings') && opts.method === 'POST') { calls.upserts.push(JSON.parse(opts.body)); return { ok: true, json: async () => [] }; }
+      if (url.includes('api.telegram.org')) { calls.telegrams.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({ ok: true, result: { message_id: 1 } }) }; }
+      throw new Error('unexpected fetch: ' + url);
+    };
+    const update = (text, chatId = 555) => ({ update_id: 1, message: { message_id: 9, text,
+      chat: { id: chatId, type: 'private' }, from: { id: chatId, first_name: 'Gaurav' } } });
+    const post = (body, secret = 'tg_secret') => tg(new Request('https://x/webhook/telegram', {
+      method: 'POST', body: JSON.stringify(body), headers: secret ? { 'x-telegram-bot-api-secret-token': secret } : {} }));
+
+    assert.equal((await post(update('/start link_abc'))).status, 403, 'no TELEGRAM_WEBHOOK_SECRET set → reject everything');
+    process.env.TELEGRAM_WEBHOOK_SECRET = 'tg_secret';
+    assert.equal((await post(update('/start link_abc'), null)).status, 403, 'missing header');
+    assert.equal((await post(update('/start link_abc'), 'wrong')).status, 403, 'wrong header');
+    assert.equal(calls.upserts.length, 0);
+
+    // the right link code binds that chat as the owner, and confirms there
+    let r = await post(update('/start link_abc'));
+    assert.equal(r.status, 200);
+    assert.deepEqual(calls.upserts, [{ key: 'telegram_owner', value: JSON.stringify({ chat_id: 555, name: 'Gaurav' }) }]);
+    assert.equal(calls.telegrams.length, 1);
+    assert.equal(calls.telegrams[0].chat_id, 555);
+    assert.match(calls.telegrams[0].text, /^✅ Linked/);
+
+    // wrong code, plain /start, other text, non-message updates → 200, nothing done
+    for (const body of [update('/start nope', 666), update('/start', 666), update('hello', 666), update('hello'), { update_id: 2 }]) {
+      assert.equal((await post(body)).status, 200);
+    }
+    assert.equal(calls.upserts.length + calls.telegrams.length, 2, 'only the one binding');
+    assert.equal((await tg(new Request('https://x/webhook/telegram'))).status, 405);
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_LINK_CODE', 'TELEGRAM_WEBHOOK_SECRET'])
+      delete process.env[k];
   }
 
   // ── send-bot-report: #18 metrics + frequency gate ──
@@ -1624,6 +1742,12 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(await pushLead(db, LEAD, CFG), null);
     assert.equal(calls.hooks.length + calls.patches.length, 0);
     process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+
+    // S3 (Q30): non-price questions the bot left to the team ride in the summary
+    calls = pushMock({ history: HISTORY });
+    await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, team_questions: ['is there parking?', 'open Sunday?'] } }, CFG);
+    assert.equal(calls.hooks[0].body.summary,
+      'Bot handed off (wants_booking) — service LHR FULL BODY P/S\nTeam to confirm: "is there parking?", "open Sunday?"');
 
     // Settle trigger 1 — a handoff pushes; a failed push never blocks the handoff
     process.env.GEMINI_API_KEY = 'test_key';
