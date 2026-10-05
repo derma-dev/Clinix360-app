@@ -2,35 +2,41 @@
 // Netlify Function: telegram-webhook
 // Endpoint: /webhook/telegram  (redirect configured in netlify.toml)
 //
-// Owner alerts (service tracker S3). Telegram POSTs every bot update here once
+// Owner alerts (service tracker S3/S4). Telegram POSTs every bot update here once
 // setWebhook has run with secret_token = TELEGRAM_WEBHOOK_SECRET. That header is
 // our only proof an update came from Telegram (like Meta's HMAC), so no secret
 // set = everything rejected.
 // S3: binding. The owner opens t.me/<bot>?start=<TELEGRAM_LINK_CODE>, which
 // sends "/start <code>" and saves their chat id in settings.telegram_owner.
-// Opening the link from another account moves the alerts there. Everything
-// else is ignored; S4 adds the owner's replies to alerts.
+// Opening the link from another account moves the alerts there.
+// S4: everything else goes to handleOwnerUpdate (the owner's answers to price
+// questions, [Don't save] taps; other chats are ignored there).
 // .mjs (modern syntax) like meta-webhook: the body arrives decoded.
 // ============================================================
 
 import metaService from './utils/meta-service.js';
 
-const { safeEqual, createSupabaseClient, sendTelegram } = metaService;
+const { safeEqual, createSupabaseClient, sendTelegram, handleOwnerUpdate } = metaService;
 
-export default async (req) => {
+export default async (req, context) => {
   if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
   const secret = process.env.TELEGRAM_WEBHOOK_SECRET;
   const got    = req.headers.get('x-telegram-bot-api-secret-token');
   if (!secret || !got || !safeEqual(got, secret)) return new Response('Forbidden', { status: 403 });
 
-  const msg   = (await req.json().catch(() => ({}))).message;
-  const code  = process.env.TELEGRAM_LINK_CODE;
-  const start = /^\/start (\S+)$/.exec(msg?.text || '');
+  const update = await req.json().catch(() => ({}));
+  const msg    = update.message;
+  const code   = process.env.TELEGRAM_LINK_CODE;
+  const start  = /^\/start (\S+)$/.exec(msg?.text || '');
   if (msg?.chat?.id && start && code && safeEqual(start[1], code)) {
     await createSupabaseClient().upsertSetting('telegram_owner',
       JSON.stringify({ chat_id: msg.chat.id, name: msg.from?.first_name || '' }));
     await sendTelegram(msg.chat.id, '✅ Linked. DSkin bot alerts will arrive in this chat.');
     console.log(`[telegram-webhook] owner linked: chat ${msg.chat.id}`);
+  } else {
+    // Ack first, work after (like meta-webhook): the rephrase + IG send can
+    // outlast Telegram's wait, and a retried update would message the customer twice.
+    context.waitUntil(handleOwnerUpdate(update));
   }
   return new Response('ok');
 };

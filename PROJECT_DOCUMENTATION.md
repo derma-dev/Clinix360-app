@@ -794,9 +794,29 @@ botReply
     `/webhook/telegram` rejects any update without the `X-Telegram-Bot-Api-Secret-Token` =
     `TELEGRAM_WEBHOOK_SECRET` header. `/start <TELEGRAM_LINK_CODE>` (the owner opens
     `t.me/<bot>?start=<code>`) saves that chat as `settings.telegram_owner {chat_id, name}` and confirms
-    there; opening it from another account moves the alerts. Everything else is ignored (S4 adds the
-    owner's replies). One-time setup after a publish: `setWebhook` with `url=<site>/webhook/telegram`
+    there; opening it from another account moves the alerts. Every other update goes to
+    `handleOwnerUpdate` after the `200` (`context.waitUntil`, so a slow turn is never retried into a
+    second send). One-time setup after a publish: `setWebhook` with `url=<site>/webhook/telegram`
     and `secret_token`.
+- **The owner's answer → customer → KB** (chatbot-as-a-service S4, Q13/Q26/Q29/Q30). Only the bound
+  owner's chat is heard. The owner **replies** to a ❓ price question → the lead is found by
+  `bot_state.owner_alert_msg_id` (not a reply, or no match → a "reply to a price question" hint). Then:
+  1. **Send** if the customer's last message is < 24 h old (no `HUMAN_AGENT`, Q29): one Gemini call
+     rephrases the answer in the bot's voice and the customer's latest language. **Number guard:** the
+     rephrase must carry exactly the owner's numbers (commas ignored), else the owner's own words go.
+     A failed rephrase also sends their words. Stored as an outgoing `is_bot` row. Window closed → nothing
+     sent, the owner is told.
+  2. **KB, for everyone (Q30):** server port of `applyLearnedKbEntry` (app.js; keep the two in step).
+     A price for the service the question names, else the thread's `qualification.service`, updates
+     that entry (`learned:<YYYY-MM>`, D22); anything else becomes a learned FAQ. Saved even when the
+     window had closed. An unreadable `chatbot_config` is never written back.
+  3. **Lead:** `bot_active: true` (Q26), unless a staff reply came after `handoff_at` (D12 takeover).
+     `bot_state` gains `owner_answered_at`, `kb_candidate_captured: true` (no Teach-the-Bot duplicate)
+     and `kb_saved` (the undo record).
+  4. **Confirmation** to the owner: `✅ Sent to <name>: "<text>"` + `💾 Saved: <service> → ₹<price>`,
+     with a **[🚫 Don't save]** button (`nosave:<lead id>`). A tap restores the entry's old values (or
+     removes the FAQ) unless a newer price has replaced it since, and drops the button. Any failure
+     (e.g. the IG send) is told to the owner: "⚠️ That didn't go through (…)".
 - **Lead push** (chatbot-as-a-service S2, Q7/Q31/Q34): `pushLead` POSTs a settled chat to
   `LEAD_WEBHOOK_URL` (our Make webhook until S15). A chat settles at **any bot handoff** (called at the
   end of `handoffToStaff`) or after **`lead_quiet_hours` with no message** ([bot-hourly](netlify/functions/bot-hourly.js)).
@@ -992,7 +1012,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 |---|---|---|---|---|
 | [get-config](netlify/functions/get-config.js) | `/.netlify/functions/get-config` | GET | — | Returns `{supabaseUrl, supabaseAnonKey}` from env. `Cache-Control: public, max-age=300`. `500` if env missing. |
 | [meta-webhook](netlify/functions/meta-webhook.mjs) | **`/webhook/meta`** | GET / POST | Meta payload | Modern Request/Response syntax (`.mjs` — the project is CommonJS). GET → `verifyWebhook()`, echoes `hub.challenge` as **plain text** (403 on mismatch). POST → HMAC check → `200 {status:'ok'}` **immediately**, then `handleWebhook()` runs under `context.waitUntil` (60 s limit) — a slow bot turn (27 s seen on a first-seen shared post) no longer blows Meta's delivery timeout and triggers retries. |
-| [telegram-webhook](netlify/functions/telegram-webhook.mjs) | **`/webhook/telegram`** | POST | Telegram update | `.mjs` like meta-webhook. `403` unless `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET` (unset = reject all). `/start <TELEGRAM_LINK_CODE>` → `settings.telegram_owner` + "✅ Linked" reply; anything else `200`, ignored (S4: owner replies). |
+| [telegram-webhook](netlify/functions/telegram-webhook.mjs) | **`/webhook/telegram`** | POST | Telegram update | `.mjs` like meta-webhook. `403` unless `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET` (unset = reject all). `/start <TELEGRAM_LINK_CODE>` → `settings.telegram_owner` + "✅ Linked" reply; anything else `200`, then `handleOwnerUpdate` via `waitUntil` (S4: the owner's answers + [Don't save] taps; other chats ignored). |
 | [meta-send](netlify/functions/meta-send.js) | `/.netlify/functions/meta-send` | POST | `{leadId, message}` | Resolves platform from the lead row, sends, then persists. `400` bad input / no recipient id / unsupported source, `404` lead not found, `502` send failure. Max 1000 bytes. |
 | [meta-status](netlify/functions/meta-status.js) | `/.netlify/functions/meta-status` | GET | — | `{instagram:{connected,name}, facebook:{…}, whatsapp:{…}}`. `Cache-Control: no-store`. Never returns tokens. |
 | [send-feedback-email](netlify/functions/send-feedback-email.js) | `/.netlify/functions/send-feedback-email` | POST | `{branch_name, entry_date, feedback_text, submitted_by}` | Resend email to the admin. |
@@ -1228,6 +1248,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-02 | — | **The owner's answer → customer → KB (service tracker S4, Q13/Q26/Q29/Q30).** [telegram-webhook.mjs](netlify/functions/telegram-webhook.mjs) hands every non-binding update to the new `handleOwnerUpdate` after the `200`. The owner's reply to a ❓ price question (mapped by `bot_state.owner_alert_msg_id`) is rephrased by Gemini (number guard: same numbers or the owner's words) and sent if the customer's last message is < 24 h old; the bot resumes unless staff replied since the handoff; the price folds into the KB via a server port of `applyLearnedKbEntry` (plus the thread's service as a fallback), with a **[Don't save]** button that undoes it. Shared `geminiJson` helper (`parseOfferCaption` now uses it; its error reads `Gemini call failed: …`), `telegramApi` behind `sendTelegram`, new `findLeadByAlertMsgId`. See §15. |
 | 2026-10-02 | — | **Owner alerts on Telegram (service tracker S3, Q11/Q12/Q30/Q32).** `sendBotAlert` now sends to the owner's Telegram (`sendTelegram`, new) with the old email as the fallback (no token / no owner linked / send failed). Price `kb_miss` = a question with `force_reply`, its message id kept in `bot_state.owner_alert_msg_id` for S4; `emergency` / `requested` / `llm_error` = FYIs (requested + llm_error are new triggers). Gemini decision gains a required `asks_price`; a non-price `kb_miss` no longer hands off: the bot says the team will confirm and keeps qualifying, the question goes to `bot_state.team_questions` and the lead push summary. Prompt: an unknown price is a kb_miss instead of "shared after consultation"; unpriced KB services render "no price yet". New [telegram-webhook.mjs](netlify/functions/telegram-webhook.mjs) + `/webhook/telegram` redirect: secret-header check, `/start <code>` links the owner (`settings.telegram_owner`). New env `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_LINK_CODE`. See §15. |
 | 2026-10-02 | — | **Lead push → client webhook (service tracker S2, Q7/Q31/Q34).** New `pushLead` in [meta-service.js](netlify/functions/utils/meta-service.js) POSTs settled chats to `LEAD_WEBHOOK_URL` (Make) as `lead` (phone) / `potential_lead` (service, no phone): at every bot handoff, and from the new hourly [bot-hourly.js](netlify/functions/bot-hourly.js) once a chat has been quiet `lead_quiet_hours` (new Settings field, default 2, decimals allowed for tests). Fixed 16-field payload incl. the whole conversation; at most one push per type per customer (`bot_state.lead_pushed`); 3 tries on 429/5xx/network, no retry on other 4xx, one alert email per failing lead + type. `sendBotAlert`'s Resend call moved into a shared `sendAlertEmail`. `findLeadByPlatformId` now also selects `source, instagram_user_id`. Unit: types, upgrade, stamps, payload, retry/no-retry, alert-once, handoff push, failure doesn't block, hourly quiet selection + live-only. See §15. |
 | 2026-10-02 | — | **Console: Cashup + Lead Hub greyed out (service tracker S1, Q3).** `OFF_AREAS` in [app.js](app.js) marks the admin Leads / Reports / Notifications tabs, the Overview Performance card and the "View →" buttons `inert` with a "Not in use" label; `switchAdminTab` ignores them; `openDashboard` / `openCashupForm` refuse the branch dashboard (branch PIN → logout to home, admin → back to the panel). Their loaders (cashup KPIs, alert badges) no longer run on panel open. Nothing deleted, no data touched; one-line revert. See [§11](#11-admin-panel). |

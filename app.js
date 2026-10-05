@@ -1460,6 +1460,7 @@ function firstPriceIn(text) {
 // answer on a recognizable service updates that service entry — being the
 // newest data point it becomes the source of truth (D22). Everything else
 // joins as a learned FAQ entry; a missed detection still carries the answer.
+// Server port (owner's Telegram answers, S4) in meta-service.js: keep in step.
 const KB_TAG_STOPWORDS = new Set(['the','and','for','you','your','with','what','how','why','are','is','ka','ki','ke','hai','kya','mein','of','to','in','kitna','kitni','price','cost','charge']);
 
 function applyLearnedKbEntry(kb, question, answer) {

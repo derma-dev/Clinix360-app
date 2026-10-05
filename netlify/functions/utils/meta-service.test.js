@@ -1537,8 +1537,14 @@ assert.equal(extractComments({}).length, 0);
     };
     const update = (text, chatId = 555) => ({ update_id: 1, message: { message_id: 9, text,
       chat: { id: chatId, type: 'private' }, from: { id: chatId, first_name: 'Gaurav' } } });
-    const post = (body, secret = 'tg_secret') => tg(new Request('https://x/webhook/telegram', {
-      method: 'POST', body: JSON.stringify(body), headers: secret ? { 'x-telegram-bot-api-secret-token': secret } : {} }));
+    // Resolves once the waitUntil work (S4) is done too.
+    const post = async (body, secret = 'tg_secret') => {
+      const pending = [];
+      const r = await tg(new Request('https://x/webhook/telegram', { method: 'POST', body: JSON.stringify(body),
+        headers: secret ? { 'x-telegram-bot-api-secret-token': secret } : {} }), { waitUntil: (p) => pending.push(p) });
+      await Promise.all(pending);
+      return r;
+    };
 
     assert.equal((await post(update('/start link_abc'))).status, 403, 'no TELEGRAM_WEBHOOK_SECRET set → reject everything');
     process.env.TELEGRAM_WEBHOOK_SECRET = 'tg_secret';
@@ -1560,7 +1566,182 @@ assert.equal(extractComments({}).length, 0);
     }
     assert.equal(calls.upserts.length + calls.telegrams.length, 2, 'only the one binding');
     assert.equal((await tg(new Request('https://x/webhook/telegram'))).status, 405);
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_LINK_CODE', 'TELEGRAM_WEBHOOK_SECRET'])
+
+    // ── S4: the owner's answer → customer → KB (Q13 Q26 Q29 Q30) ──
+    process.env.GEMINI_API_KEY = 'test_key';
+    process.env.META_ACCESS_TOKEN = 'ig_token';
+    const ago = (min) => new Date(Date.now() - min * 60e3).toISOString();
+    const KB = () => ({ entries: [{ type: 'service', key: 'LHR FULL BODY P/S' },
+                                  { type: 'service', key: 'HYDRA FACIAL P/S', price: 3000, price_last_quoted: '2026-05', quotes_seen: 2 }] });
+    const ALERTED = () => ({ id: 'L1', customer_name: 'Priya Sharma', branch_id: 'B1', source: 'instagram',
+      instagram_user_id: 'IGSID_9', bot_active: false,
+      bot_state: { qualification: { service: 'LHR FULL BODY P/S' }, handoff_reason: 'kb_miss', handoff_at: ago(60),
+                   kb_miss_question: 'price of laser', owner_alert_msg_id: 701 } });
+    // `rephrase`: the model's text, or 'error'. `history` oldest-first. Patches and
+    // config upserts are applied, so a later [Don't save] sees them.
+    const s4 = ({ rephrase = 'Full body laser is ₹3,500 😊', history, configOk = true, sendFails = false } = {}) => {
+      const st = { lead: ALERTED(), config: { mode: 'live', model: 'm', kb: KB() },
+                   tg: [], sends: [], inserts: [], patches: [], gemini: [], upserts: 0 };
+      const rows = history || [{ direction: 'incoming', message: 'price of laser', created_at: ago(61) },
+                               { direction: 'outgoing', is_bot: true, message: 'Let me check with our team.', created_at: ago(60) }];
+      global.fetch = async (url, opts = {}) => {
+        const json = (v) => ({ ok: true, json: async () => v });
+        if (url.includes('api.telegram.org')) {
+          st.tg.push({ method: url.split('/').pop(), ...JSON.parse(opts.body) });
+          return json({ ok: true, result: { message_id: 900 } });
+        }
+        if (url.includes('settings?key=eq.telegram_owner')) return json([{ value: JSON.stringify({ chat_id: 555 }) }]);
+        if (url.includes('settings?key=eq.chatbot_config'))
+          return configOk ? json([{ value: JSON.stringify(st.config) }]) : { ok: false, json: async () => ({}) };
+        if (url.includes('/settings') && opts.method === 'POST') {
+          const b = JSON.parse(opts.body);
+          if (b.key === 'chatbot_config') { st.config = JSON.parse(b.value); st.upserts++; }
+          return json([]);
+        }
+        if (url.includes('owner_alert_msg_id=eq.'))
+          return json(url.includes('eq.701') ? [st.lead] : []);
+        if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') {
+          const b = JSON.parse(opts.body);
+          st.patches.push(b);
+          Object.assign(st.lead, b);
+          return json([]);
+        }
+        if (url.includes('/leads?id=eq.')) return json([st.lead]);
+        if (url.includes('lead_messages?lead_id=eq.')) return json([...rows].reverse());
+        if (url.includes('/lead_messages') && opts.method === 'POST') { st.inserts.push(JSON.parse(opts.body)); return json([{ id: 'o1' }]); }
+        if (url.includes('generativelanguage.googleapis.com')) {
+          st.gemini.push(JSON.parse(opts.body));
+          if (rephrase === 'error') return { ok: false, status: 503, json: async () => ({ error: { message: 'overloaded' } }) };
+          return json({ candidates: [{ content: { parts: [{ text: JSON.stringify({ text: rephrase }) }] } }] });
+        }
+        if (url.includes('graph.instagram.com')) {
+          if (sendFails) return { ok: false, status: 400, json: async () => ({ error: { message: 'window closed' } }) };
+          st.sends.push(JSON.parse(opts.body));
+          return json({ message_id: 'm1' });
+        }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      return st;
+    };
+    const reply = (text, to = 701, chatId = 555) => ({ update_id: 3, message: { message_id: 20, text,
+      chat: { id: chatId }, from: { id: chatId }, ...(to && { reply_to_message: { message_id: to } }) } });
+    const tap = (msgText = '✅ Sent…') => ({ update_id: 4, callback_query: { id: 'cq1', data: 'nosave:L1',
+      message: { message_id: 900, chat: { id: 555 }, text: msgText } } });
+    const laser = (cfg) => cfg.kb.entries.find(e => e.key === 'LHR FULL BODY P/S');
+
+    // a reply to the price question → rephrased, sent on IG, stored, bot resumes,
+    // price saved for everyone (the thread's service: "price of laser" names no KB key)
+    let st = s4();
+    assert.equal((await post(reply('3500 rs'))).status, 200);
+    assert.deepEqual(st.sends.map(s => s.recipient.id), ['IGSID_9']);
+    assert.equal(st.sends[0].message.text, 'Full body laser is ₹3,500 😊', 'commas aside, the numbers match → rephrased text');
+    assert.match(st.gemini[0].contents[0].parts[0].text, /Customer asked: """price of laser"""[\s\S]*Team's answer: """3500 rs"""/);
+    assert.deepEqual(st.inserts, [{ lead_id: 'L1', branch_id: 'B1', direction: 'outgoing',
+                                    message: 'Full body laser is ₹3,500 😊', is_seen: true, is_bot: true }]);
+    const p = st.patches[0];
+    assert.equal(p.bot_active, true, 'Q26: the bot resumes');
+    assert.equal(p.bot_state.owner_alert_msg_id, 701, 'earlier bot_state kept');
+    assert.ok(p.bot_state.owner_answered_at);
+    assert.equal(p.bot_state.kb_candidate_captured, true, 'no second Teach-the-Bot entry from a later staff reply');
+    assert.equal(laser(st.config).price, 3500);
+    assert.equal(laser(st.config).source, `learned:${new Date().toISOString().slice(0, 7)}`);
+    assert.equal(st.config.mode, 'live', 'the rest of the config survives the KB write');
+    assert.equal(st.tg.length, 1);
+    assert.equal(st.tg[0].chat_id, 555);
+    assert.equal(st.tg[0].text, '✅ Sent to Priya Sharma:\n"Full body laser is ₹3,500 😊"\n' +
+      '💾 Saved: LHR FULL BODY P/S → ₹3500. The bot quotes it to everyone from now on.');
+    assert.deepEqual(st.tg[0].reply_markup.inline_keyboard[0][0], { text: '🚫 Don’t save', callback_data: 'nosave:L1' });
+
+    // [Don't save] → the price goes back to what it was (none), the button goes away;
+    // a second tap has nothing to undo
+    st.tg = [];
+    await post(tap());
+    assert.equal(laser(st.config).price, null, 'back to "no price yet"');
+    assert.deepEqual(st.tg.map(t => t.method), ['answerCallbackQuery', 'editMessageText']);
+    assert.equal(st.tg[0].text, 'Not saved');
+    assert.equal(st.tg[1].text, '✅ Sent…\n🗑 Undone: not saved for other customers.');
+    assert.equal(st.tg[1].reply_markup, undefined);
+    st.tg = [];
+    await post(tap());
+    assert.equal(st.tg[0].text, 'Nothing to undo');
+    assert.equal(st.upserts, 2, 'save + one undo');
+
+    // a newer answer for the same service since → the old button undoes nothing
+    st = s4();
+    await post(reply('3500'));
+    laser(st.config).price = 4000;
+    st.tg = [];
+    await post(tap());
+    assert.equal(laser(st.config).price, 4000);
+    assert.equal(st.tg[0].text, 'Nothing to undo');
+
+    // Q29 number guard: a dropped or changed number, or no rephrase at all → the owner's words
+    for (const rephrase of ['Full body laser is ₹3,000 😊', 'Full body laser is ₹3,500 😊', 'error']) {
+      st = s4({ rephrase });
+      await post(reply('3500, or 6 sessions for 18000'));
+      assert.equal(st.sends[0].message.text, '3500, or 6 sessions for 18000', rephrase);
+    }
+
+    // a question naming a KB service updates that one; an answer with no price → learned FAQ
+    st = s4();
+    st.lead.bot_state.kb_miss_question = 'hydra facial kitna hai';
+    await post(reply('₹3,800'));
+    assert.equal(st.config.kb.entries.find(e => e.key === 'HYDRA FACIAL P/S').price, 3800);
+    assert.equal(laser(st.config).price, undefined);
+    st = s4({ rephrase: 'We don’t do that treatment, sorry!' });
+    st.lead.bot_state = { ...st.lead.bot_state, kb_miss_question: 'tattoo removal cost?', qualification: {} };
+    await post(reply('We don’t do that treatment'));
+    const faq = st.config.kb.entries.at(-1);
+    assert.equal(faq.type, 'faq');
+    assert.deepEqual(faq.tags, ['tattoo', 'removal']);
+    assert.match(st.tg[0].text, /💾 Saved: the bot gives this answer to everyone who asks\.$/);
+    await post(tap());
+    assert.equal(st.config.kb.entries.length, 2, 'FAQ removed again');
+
+    // 24 h window: their last message is 25 h old → nothing sent, no rephrase call,
+    // the owner is told; the price is still saved
+    st = s4({ history: [{ direction: 'incoming', message: 'price of laser', created_at: ago(25 * 60) }] });
+    await post(reply('3500'));
+    assert.equal(st.sends.length + st.inserts.length + st.gemini.length, 0);
+    assert.match(st.tg[0].text, /^⚠️ Not sent: Priya Sharma’s last message is over 24 h old/);
+    assert.equal(laser(st.config).price, 3500);
+
+    // staff replied in the IG app since the handoff → answer still sent, bot stays off (D12)
+    st = s4({ history: [{ direction: 'incoming', message: 'price of laser', created_at: ago(61) },
+                        { direction: 'outgoing', is_bot: false, message: 'Checking!', created_at: ago(30) }] });
+    await post(reply('3500'));
+    assert.equal(st.sends.length, 1);
+    assert.equal(st.patches[0].bot_active, false);
+
+    // settings unreadable → the config is never written back (that would wipe it), no button
+    st = s4({ configOk: false });
+    await post(reply('3500'));
+    assert.equal(st.sends.length, 1, 'the customer still gets the answer');
+    assert.equal(st.upserts, 0);
+    assert.match(st.tg[0].text, /⚠️ Not saved for other customers \(settings unreadable\)\.$/);
+    assert.equal(st.tg[0].reply_markup, undefined);
+    assert.equal(st.patches[0].bot_state.kb_saved, null);
+
+    // a failed IG send → the owner is told, nothing saved or resumed
+    st = s4({ sendFails: true });
+    await post(reply('3500'));
+    assert.match(st.tg[0].text, /^⚠️ That didn’t go through \(Instagram send failed: 400 window closed\)/);
+    assert.equal(st.patches.length + st.upserts, 0);
+
+    // not a reply / a reply to something else → a hint only; other chats → nothing
+    for (const body of [reply('3500', null), reply('3500', 123)]) {
+      st = s4();
+      await post(body);
+      assert.equal(st.sends.length + st.patches.length + st.upserts, 0);
+      assert.match(st.tg[0].text, /^Reply to a ❓ price question/);
+    }
+    st = s4();
+    await post(reply('3500', 701, 666));
+    await post({ update_id: 5, callback_query: { ...tap().callback_query, message: { message_id: 900, chat: { id: 666 }, text: 'x' } } });
+    assert.equal(st.tg.length + st.sends.length + st.patches.length + st.upserts, 0, 'only the bound owner is heard');
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_LINK_CODE', 'TELEGRAM_WEBHOOK_SECRET',
+                     'GEMINI_API_KEY', 'META_ACCESS_TOKEN'])
       delete process.env[k];
   }
 

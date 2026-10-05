@@ -167,6 +167,17 @@ function createSupabaseClient() {
       return rows[0] || null;
     },
 
+    // S4: the lead whose price question (Telegram message id) the owner replied to.
+    async findLeadByAlertMsgId(msgId) {
+      const res = await fetch(
+        `${url}/rest/v1/leads?bot_state->>owner_alert_msg_id=eq.${encodeURIComponent(msgId)}` +
+        `&select=id,customer_name,branch_id,source,bot_state,instagram_user_id,facebook_user_id,whatsapp_user_id&limit=1`,
+        { headers }
+      );
+      if (!res.ok) throw new Error(`lead by alert lookup failed: ${res.status} ${await res.text()}`);
+      return (await res.json())[0] || null;
+    },
+
     // Bot-turn context: the last few messages, oldest-first (final plan §3.2).
     async listRecentMessages(leadId, limit = 10) {
       const res = await fetch(
@@ -1190,10 +1201,9 @@ const OFFER_PARSE_SCHEMA = {
   required: ['service', 'offer_price'],
 };
 
-// Caption → {service, offer_price} matched to a KB service key, or null when
-// the caption has no price / no recognizable service (→ no offer, KB ladder).
-// Throws on HTTP/parse failure — the caller treats that as "no offer".
-async function parseOfferCaption({ model, caption, serviceKeys }) {
+// One structured Gemini call: a system text + one user message → the parsed JSON.
+// Throws on any HTTP or parse failure.
+async function geminiJson({ model, system, user, schema }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('Missing GEMINI_API_KEY env var');
 
@@ -1203,10 +1213,9 @@ async function parseOfferCaption({ model, caption, serviceKeys }) {
       method:  'POST',
       headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        systemInstruction: { parts: [{ text:
-          `You parse Instagram offer-post captions for a dermatology clinic. Match the caption to ONE service key from the list below, or "" when unsure. offer_price = the offer/session price in ₹ as a plain number; 0 when the caption has no clear single price.\nSERVICE KEYS:\n${(serviceKeys || []).join('\n')}` }] },
-        contents: [{ role: 'user', parts: [{ text: `Caption:\n"""${caption}"""` }] }],
-        generationConfig: { responseMimeType: 'application/json', responseSchema: OFFER_PARSE_SCHEMA, temperature: 0 },
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [{ text: user }] }],
+        generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0 },
       }),
     }
   );
@@ -1214,10 +1223,18 @@ async function parseOfferCaption({ model, caption, serviceKeys }) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = data?.error?.message || JSON.stringify(data);
-    throw new Error(`Gemini offer parse failed: ${res.status} ${msg}`);
+    throw new Error(`Gemini call failed: ${res.status} ${msg}`);
   }
-  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-  const d = JSON.parse(text);
+  return JSON.parse(data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '');
+}
+
+// Caption → {service, offer_price} matched to a KB service key, or null when
+// the caption has no price / no recognizable service (→ no offer, KB ladder).
+// Throws on HTTP/parse failure — the caller treats that as "no offer".
+async function parseOfferCaption({ model, caption, serviceKeys }) {
+  const d = await geminiJson({ model, schema: OFFER_PARSE_SCHEMA,
+    system: `You parse Instagram offer-post captions for a dermatology clinic. Match the caption to ONE service key from the list below, or "" when unsure. offer_price = the offer/session price in ₹ as a plain number; 0 when the caption has no clear single price.\nSERVICE KEYS:\n${(serviceKeys || []).join('\n')}`,
+    user: `Caption:\n"""${caption}"""` });
   if (!d?.service || !(d.offer_price > 0) || !(serviceKeys || []).includes(d.service)) return null;
   return { service: d.service, offer_price: Math.round(d.offer_price) };
 }
@@ -1486,21 +1503,24 @@ const escHtml = (s) => String(s).replace(/[&<>"']/g, c => (
 const istStamp = (t) => new Date(t).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata',
   day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
 
-// One Telegram Bot API sendMessage. Plain text, so customer words need no
-// escaping. Throws on any failure (403 = the owner blocked the bot); returns the Message.
-async function sendTelegram(chatId, text, extra = {}) {
+// One Telegram Bot API call. Throws on any failure (403 = the owner blocked the
+// bot); returns its result.
+async function telegramApi(method, body) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN not set');
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chatId, text, ...extra }),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(8000),
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) throw new Error(`Telegram ${res.status} ${data.description || ''}`.trim());
   return data.result;
 }
+
+// Plain text, so customer words need no escaping. Returns the Message.
+const sendTelegram = (chatId, text, extra = {}) => telegramApi('sendMessage', { chat_id: chatId, text, ...extra });
 
 // S3 — the handoffs that alert the owner (Q12 + Q32 emergencies). kb_miss is a
 // price question by now (Q30, see botReply); the rest are FYIs. Medical,
@@ -1679,6 +1699,180 @@ async function pushLead(db, lead, cfg, quiet = false) {
     console.error(`[meta-service] lead push error on lead ${lead.id}:`, e.message);
   }
   return null;
+}
+
+// ── The owner's answer → customer → KB · service tracker S4 (Q13 Q26 Q29 Q30) ──
+// The owner replies in Telegram to a ❓ price question (sendBotAlert) → the
+// answer is rephrased in the bot's voice → sent to the customer if their last
+// message is < 24 h old → the bot resumes → the price joins the KB for
+// everyone, with a [Don't save] button for one-off prices (a personal discount).
+
+// Q29 number guard: both texts must carry the same numbers, digit-group commas
+// ignored ("₹3,500" = "3500"). Any mismatch sends the owner's own words.
+const numbersIn = (t) => [...new Set((String(t).match(/\d[\d,]*(?:\.\d+)?/g) || [])
+  .map(n => n.replace(/,/g, '')))].sort().join(' ');
+
+const REPHRASE_SCHEMA = { type: 'OBJECT', properties: { text: { type: 'STRING' } }, required: ['text'] };
+
+async function rephraseOwnerAnswer(model, answer, question, latest) {
+  try {
+    const d = await geminiJson({ model, schema: REPHRASE_SCHEMA,
+      system: 'You are the Instagram DM assistant of Derma Skin and Hair Solutions, a dermatology clinic. The clinic team has answered a customer’s question. Pass the answer on to the customer: warm, 1–3 sentences, in the language and script of the customer’s latest message (English → English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi). Keep every number exactly as the team wrote it, in digits. Add nothing the team didn’t say, and don’t say who on the team answered.',
+      user: `Customer asked: """${question || ''}"""\nCustomer's latest message: """${latest || ''}"""\nTeam's answer: """${answer}"""` });
+    const text = String(d?.text || '').trim();
+    return text && numbersIn(text) === numbersIn(answer) ? text : answer;
+  } catch (e) {
+    console.warn('[meta-service] owner answer rephrase failed (sending their words):', e.message);
+    return answer;
+  }
+}
+
+// First plausible price in an answer. Port of firstPriceIn in app.js, keep in step.
+function firstPriceIn(text) {
+  const t = String(text || '').toLowerCase()
+    .replace(/(\d),(\d)/g, '$1$2')
+    .replace(/\d{6,}/g, ' ')
+    .replace(/\b\d{5}[\s-]\d{5}\b/g, ' ');
+  for (const m of t.matchAll(/(?:₹|rs\.?\s*|inr\s*)?(\d{1,5})(\s*k)?\b/g)) {
+    const n = parseInt(m[1], 10) * (m[2] ? 1000 : 1);
+    if (n >= 500 && n <= 60000) return n;
+  }
+  return null;
+}
+
+const KB_TAG_STOPWORDS = new Set(['the','and','for','you','your','with','what','how','why','are','is','ka','ki','ke','hai','kya','mein','of','to','in','kitna','kitni','price','cost','charge']);
+
+// Port of applyLearnedKbEntry in app.js (keep in step): a price for a
+// recognizable service updates that entry (D22: the newest price wins),
+// anything else joins as a learned FAQ. New here: `service` (the thread's
+// qualified KB service) when the question doesn't name one ("price?" after a
+// share), and the returned undo record for [Don't save]. Mutates kb.
+function applyLearnedKbEntry(kb, question, answer, service) {
+  const month = new Date().toISOString().slice(0, 7);
+  kb.entries = kb.entries || [];
+  const q = (question || '').toLowerCase();
+  const keyWords = k => k.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+  const svc = kb.entries.find(e => e.type === 'service'
+    && keyWords(e.key).length > 0 && keyWords(e.key).every(w => q.includes(w)))
+    || kb.entries.find(e => e.type === 'service' && e.key === service);
+  const price = firstPriceIn(answer);
+  if (svc && price) {
+    // null, not undefined: the record goes through JSON in bot_state.
+    const undo = { key: svc.key, price, prev: { price: svc.price ?? null, price_last_quoted: svc.price_last_quoted ?? null,
+                                               quotes_seen: svc.quotes_seen ?? null, source: svc.source ?? null } };
+    svc.price = price;
+    svc.price_last_quoted = month;
+    svc.quotes_seen = (svc.quotes_seen || 0) + 1;
+    svc.source = `learned:${month}`;
+    return undo;
+  }
+  const id = `learned-${Date.now()}`;
+  kb.entries.push({
+    type: 'faq',
+    id,
+    tags: (question || '').toLowerCase().split(/[^a-z0-9]+/)
+      .filter(w => w.length > 2 && !KB_TAG_STOPWORDS.has(w)).slice(0, 6),
+    a: answer,
+    learned: month,
+  });
+  return { faq_id: id };
+}
+
+// [Don't save]: put back what applyLearnedKbEntry changed. false = nothing to
+// undo (already undone, or a newer answer has replaced that price since).
+function undoLearnedKbEntry(kb, undo) {
+  const entries = kb?.entries || [];
+  if (undo?.faq_id) {
+    const i = entries.findIndex(e => e.id === undo.faq_id);
+    return i >= 0 && entries.splice(i, 1).length === 1;
+  }
+  const svc = entries.find(e => e.type === 'service' && e.key === undo?.key);
+  if (!svc || svc.price !== undo.price) return false;
+  Object.assign(svc, undo.prev);
+  return true;
+}
+
+async function relayOwnerAnswer(msg) {
+  const db   = createSupabaseClient();
+  const lead = msg.reply_to_message && await db.findLeadByAlertMsgId(msg.reply_to_message.message_id);
+  if (!lead) {
+    await sendTelegram(msg.chat.id, 'Reply to a ❓ price question (swipe left on it) so I know which customer it’s for.');
+    return;
+  }
+  const answer = msg.text.trim();
+  const bs     = lead.bot_state || {};
+  const name   = lead.customer_name || 'the customer';
+  const cfg    = await getSettingJson('chatbot_config');
+  const rows   = await db.listRecentMessages(lead.id, 10);
+  const lastIn = rows.filter(isIncomingRow).pop();
+  const out    = [];
+
+  if (lastIn && Date.now() - Date.parse(lastIn.created_at) < 24 * 3600e3) {
+    const text = await rephraseOwnerAnswer(cfg?.model, answer, bs.kb_miss_question, lastIn.message);
+    await sendByPlatform(lead.source, lead[idColumnFor(lead.source)], text);
+    await db.insertMessage({ lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
+                             message: text, is_seen: true, is_bot: true });
+    out.push(`✅ Sent to ${name}:\n"${text}"`);
+  } else {
+    out.push(`⚠️ Not sent: ${name}’s last message is over 24 h old, and Instagram lets the bot reply only within 24 h.`);
+  }
+
+  // Q30: saved for everyone, even when the window had closed. An unread config
+  // is never written back: a partial row would wipe the bot's settings.
+  let undo = null;
+  try {
+    if (!cfg) throw new Error('settings unreadable');
+    cfg.kb = cfg.kb || {};
+    undo = applyLearnedKbEntry(cfg.kb, bs.kb_miss_question, answer, bs.qualification?.service);
+    await db.upsertSetting('chatbot_config', JSON.stringify(cfg));
+    out.push(undo.key ? `💾 Saved: ${undo.key} → ₹${undo.price}. The bot quotes it to everyone from now on.`
+                      : '💾 Saved: the bot gives this answer to everyone who asks.');
+  } catch (e) {
+    undo = null;
+    out.push(`⚠️ Not saved for other customers (${e.message}).`);
+  }
+
+  // Q26: the bot picks the chat back up, unless staff have replied since the
+  // handoff (a human reply is a takeover, D12). kb_candidate_captured: the owner
+  // already taught the KB, so a later staff reply doesn't queue it again (D17).
+  // ponytail: one undo record per lead; a second answer to the same question
+  // replaces it, so the first answer's button then undoes the second.
+  const staffSince = rows.some(m => !isIncomingRow(m) && !m.is_bot
+                                 && Date.parse(m.created_at) > Date.parse(bs.handoff_at));
+  await db.updateLead(lead.id, { bot_active: !staffSince, bot_state: { ...bs,
+    owner_answered_at: new Date().toISOString(), kb_candidate_captured: true, kb_saved: undo } });
+
+  await sendTelegram(msg.chat.id, out.join('\n'), undo
+    ? { reply_markup: { inline_keyboard: [[{ text: '🚫 Don’t save', callback_data: `nosave:${lead.id}` }]] } } : {});
+}
+
+async function undoOwnerKbSave(cq) {
+  const db   = createSupabaseClient();
+  const id   = /^nosave:(.+)$/.exec(cq.data || '')?.[1];
+  const lead = id && await db.getLeadById(id);
+  const cfg  = lead && await getSettingJson('chatbot_config');
+  const done = !!cfg && undoLearnedKbEntry(cfg.kb, lead.bot_state?.kb_saved);
+  if (done) await db.upsertSetting('chatbot_config', JSON.stringify(cfg));
+  await telegramApi('answerCallbackQuery', { callback_query_id: cq.id, text: done ? 'Not saved' : 'Nothing to undo' });
+  // An edit without reply_markup also drops the button.
+  await telegramApi('editMessageText', { chat_id: cq.message.chat.id, message_id: cq.message.message_id,
+    text: `${cq.message.text}\n${done ? '🗑 Undone: not saved for other customers.' : '↩️ Nothing to undo (a newer answer replaced it).'}` });
+}
+
+// telegram-webhook hands every update except the owner binding here. Only the
+// bound owner's chat is heard. Never throws; a failure is told to the owner.
+async function handleOwnerUpdate(update) {
+  const msg = update?.message, cq = update?.callback_query;
+  const chatId = msg?.chat?.id ?? cq?.message?.chat?.id;
+  const owner  = chatId && await getSettingJson('telegram_owner');
+  if (!owner?.chat_id || owner.chat_id !== chatId) return;
+  try {
+    if (cq) await undoOwnerKbSave(cq);
+    else if (msg.text) await relayOwnerAnswer(msg);
+  } catch (e) {
+    console.error('[meta-service] owner update failed:', e.message);
+    await sendTelegram(chatId, `⚠️ That didn’t go through (${e.message}). Please answer them in the Instagram app.`).catch(() => {});
+  }
 }
 
 // D17 teach-the-bot capture — called by meta-send on EVERY staff send: the
@@ -1934,6 +2128,7 @@ module.exports = {
   pushLead,
   leadPushDue,
   sendTelegram,
+  handleOwnerUpdate,
   parseOfferCaption,
   resolveOffer,
   isOfferFresh,
