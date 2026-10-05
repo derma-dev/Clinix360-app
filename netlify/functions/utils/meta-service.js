@@ -221,8 +221,8 @@ function createSupabaseClient() {
         headers: { ...headers, Prefer: 'resolution=merge-duplicates' },
         body:   JSON.stringify({ key, value }),
       });
+      // This Prefer drops return=representation, so the 201 has no body: never parse it.
       if (!res.ok) throw new Error(`settings upsert failed: ${res.status} ${await res.text()}`);
-      return res.json();
     },
 
     // Used to build the branch buttons on the comment DM, and to match the
@@ -2005,6 +2005,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       } catch (err) {
         // D13 — an LLM failure never silences the thread: canned handoff in live,
         // one error row in shadow.
+        console.error('[meta-service] Gemini failed → llm_error handoff:', err.message);
         llmError = err.message;
         decision = { reason: 'llm_error', reply: '', kb_covers: false, handoff: true, category: 'lead' };
       }

@@ -1164,6 +1164,13 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.filter(c => c.url.includes('/kb_candidates')).length, 1, 'only ONE candidate per thread');
     }
 
+    // 14b) settings upsert: PostgREST's 201 has an EMPTY body here. Parsing it
+    //      threw → Telegram /start 502'd and "✅ Linked" never came (live, 2026-10-05).
+    {
+      global.fetch = async () => ({ ok: true, status: 201, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } });
+      await createSupabaseClient().upsertSetting('telegram_owner', '{"chat_id":1}');
+    }
+
     // 15) offer ladder (D9/D10, Step 14): fresh → LIVE OFFER block; stale →
     //     STALE block; cache miss → one parse, cached, remembered on bot_state
     {
