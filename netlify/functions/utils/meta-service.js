@@ -167,10 +167,12 @@ function createSupabaseClient() {
       return rows[0] || null;
     },
 
-    // S4: the lead whose price question (Telegram message id) the owner replied to.
+    // S4: the lead whose price question (Telegram message id) the owner replied
+    // to, or its S6 reminder.
     async findLeadByAlertMsgId(msgId) {
+      const id = encodeURIComponent(msgId);
       const res = await fetch(
-        `${url}/rest/v1/leads?bot_state->>owner_alert_msg_id=eq.${encodeURIComponent(msgId)}` +
+        `${url}/rest/v1/leads?or=(bot_state->>owner_alert_msg_id.eq.${id},bot_state->>owner_reminder_msg_id.eq.${id})` +
         `&select=id,customer_name,branch_id,source,bot_state,instagram_user_id,facebook_user_id,whatsapp_user_id&limit=1`,
         { headers }
       );
@@ -542,6 +544,7 @@ function extractComments(payload) {
           // unverified; defensive until a real comment is tested.
           parentId:  v.parent_id && v.parent_id !== v.media?.id ? v.parent_id : null,
           accountId: v.recipient_id || entry.id, // OUR ig account id
+          mediaId:   v.media?.id,                // the commented post (S7: its offer price)
         });
         continue;
       }
@@ -814,13 +817,16 @@ async function sendWhatsAppMessage(recipientId, text) {
 // is then customer-initiated. Rules live in settings.comment_rules:
 //   [{ keyword: 'price', public: 'Check your DM', dm: 'Hi! … Which branch?' }]
 // First keyword hit wins; keyword '*' is the catch-all, tried only if nothing
-// else matched. Matching is case-insensitive substring. One rule may list
+// else matched. Matching is case-insensitive, at the start of a word: "rates"
+// hits "rate", but "great" doesn't, nor "facebook" "book" (S7: the Q27 keywords
+// would DM everyone writing "Great results!"). One rule may list
 // comma-separated alternatives ("price, cost, kitna") so Hinglish variants
 // share one DM instead of duplicating the copy across rules.
 
 function matchCommentRule(text, rules) {
   const t = (text || '').toLowerCase();
-  const hit = (r) => r.keyword.split(',').some(k => (k = k.trim().toLowerCase()) && t.includes(k));
+  const hit = (r) => r.keyword.split(',').some(k => (k = k.trim().toLowerCase())
+    && new RegExp(`(?<![a-z0-9])${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`).test(t));
   return rules.find(r => r?.keyword && r.keyword !== '*' && hit(r))
       || rules.find(r => r?.keyword === '*')
       || null;
@@ -956,6 +962,24 @@ async function replyToComment(commentId, text) {
   return data;
 }
 
+// S7 — the commented post: caption → its offer (resolveOffer, cached per post
+// like a shared post) and permalink → the lead's post_url. One Graph call. Throws
+// when the post can't be fetched; an offer that can't be parsed is just null.
+async function fetchCommentPost(cfg, mediaId) {
+  const token = process.env.META_ACCESS_TOKEN;
+  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
+  const res = await fetch(`https://graph.instagram.com/v21.0/${encodeURIComponent(mediaId)}` +
+                          `?fields=caption,permalink&access_token=${encodeURIComponent(token)}`);
+  const post = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`IG media fetch failed: ${res.status} ${post?.error?.message || ''}`);
+  let offer = null;
+  try {
+    offer = await resolveOffer(cfg, { title: post.caption, mediaId });
+    await persistOfferCache(offer);
+  } catch (e) { console.warn('[meta-service] comment post offer failed (continuing without):', e.message); }
+  return { url: post.permalink || '', offer };
+}
+
 async function processComment(c) {
   if (!c.commentId || !c.text || !c.fromId) {
     console.log('[meta-service] Skipping comment event — missing id, text or from.id');
@@ -980,9 +1004,38 @@ async function processComment(c) {
     return;
   }
 
+  // S7 — follows the bot mode (D24): off → nothing, shadow → log, live → send.
+  const cfg  = (await getSettingJson('chatbot_config')) || {};
+  const mode = ['live', 'shadow'].includes(cfg.mode) ? cfg.mode : 'off';
+  if (mode === 'off') {
+    console.log(`[meta-service] Comment ${c.commentId}: bot mode off — left alone`);
+    return;
+  }
+
   const db       = createSupabaseClient();
   const isFb     = c.platform === 'facebook';
   const branches = await db.listBranches();
+  // Looked up while the DM goes out, so a slow first parse never delays it.
+  // Instagram only (Facebook is off, Q6).
+  const postP = !isFb && c.mediaId
+    ? fetchCommentPost(cfg, c.mediaId).catch(e => {
+        console.warn(`[meta-service] Comment ${c.commentId}: post lookup failed (no offer, no post_url) — ${e.message}`);
+        return {};
+      })
+    : Promise.resolve({});
+
+  // Shadow: one bot_shadow_log row with what live would send. No lead: without
+  // the DM there's no messaging id to file it under.
+  if (mode === 'shadow') {
+    const post = await postP;
+    await db.insertShadowLog({
+      lead_id: null, message_id: c.commentId, platform: c.platform,
+      decision: { comment: c.text, rule: rule.keyword, public: rule.public || '', dm: rule.dm || '',
+                  buttons: branches.slice(0, 3).map(b => b.name), post_url: post.url || '', offer: post.offer || null },
+    });
+    console.log(`[meta-service] Comment ${c.commentId}: shadow — logged, nothing sent`);
+    return;
+  }
 
   // DM first, on purpose. Meta rejects a second private reply to the same comment,
   // so a redelivered webhook throws here and we never double-post the public reply.
@@ -1023,6 +1076,16 @@ async function processComment(c) {
     // meta-send): this is the comment automation, and the bot continuing the
     // qualification right after "which branch?" is the intended flow.
   });
+
+  // S7 — the lead remembers where it came from (pushLead's source + post_url) and
+  // the post's offer, which the bot quotes after the branch tap (offerFromBotState).
+  // Re-read: a quick tap's bot turn may have written bot_state meanwhile.
+  // ponytail: a tap before a first-seen post finishes parsing (~seconds) misses the offer.
+  const post = await postP;
+  const bs = { ...(await db.getLeadById(lead.id))?.bot_state, source: `${c.platform}_comment`, post_url: post.url || '' };
+  if (post.offer) bs.last_offer = { service: post.offer.service, offer_price: post.offer.offer_price,
+                                    last_seen: post.offer.last_seen, source_caption: post.offer.source_caption };
+  await db.updateLead(lead.id, { bot_state: bs });
 }
 
 // ── Branch routing from the customer's reply ──────────────────
@@ -1429,7 +1492,7 @@ function buildHandoffSummary(reason, botState, ev) {
   if (reason === 'medical' || reason === 'emergency') {
     return `${head}\nCustomer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
   }
-  if (reason === 'kb_miss') {
+  if (reason === 'kb_miss' || reason === 'owner_no_reply') {
     return `${head}\nBot didn't know: "${String(ev?.messageText || '').slice(0, 300)}"`;
   }
   return head;
@@ -1451,6 +1514,8 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     // A capped thread gets the same hold copy — going silent after 10 bot turns
     // would be a dead end (D13 spirit). A dedicated canned.turn_cap wins if set.
     if (decision.reason === 'turn_cap')  text = cannedCopy(cfg, 'turn_cap') || cannedCopy(cfg, 'llm_error');
+    // S6: the owner never answered the price; a config saved before S6 lacks this copy.
+    if (decision.reason === 'owner_no_reply') text = cannedCopy(cfg, 'owner_no_reply') || cannedCopy(cfg, 'llm_error');
     if (!text) text = String(decision.reply || '').trim() || null;
   }
   if (firstBotTurn && text) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
@@ -1470,9 +1535,11 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   const nextState = { ...botState, handoff_summary: summary,
                       handoff_reason: decision.reason, handoff_at: new Date().toISOString(),
                       // D17 — the question rides in bot_state so meta-send can capture
-                      // the staff answer to it without re-deriving anything.
+                      // the staff answer to it without re-deriving anything. A new
+                      // question also resets the S6 timer stamps of the last one.
                       ...(decision.reason === 'kb_miss'
-                        ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500) } : {}) };
+                        ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500),
+                            owner_answered_at: null, owner_reminded_at: null, owner_reminder_msg_id: null } : {}) };
   // S3 — owner alert (Q12 Q32). A price question keeps its Telegram message id so
   // the owner's reply maps back to this lead (S4). Sent before the write below so
   // the id lands in the same bot_state that pushLead later stamps.
@@ -1492,7 +1559,9 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   });
   console.log(`[meta-service] handoffToStaff: lead ${lead.id} reason=${decision.reason} — "${summary.split('\n')[0]}"`);
   // S2 — a handoff settles the chat: push it to the client's webhook (never throws).
-  await pushLead(db, { ...lead, category, bot_state: nextState }, cfg);
+  // S6 — except a price question the owner can still answer: that chat settles at
+  // their answer (the bot resumes) or at the 20 h fallback (owner_no_reply).
+  if (!ownerQuestionOpen(nextState)) await pushLead(db, { ...lead, category, bot_state: nextState }, cfg);
   return { handoff: decision.reason, summary };
 }
 
@@ -1661,7 +1730,7 @@ async function pushLead(db, lead, cfg, quiet = false) {
     // to the first payload it sees.
     const payload = {
       lead_type:        type,
-      source:           lead.source || 'instagram',
+      source:           bs.source || lead.source || 'instagram',   // S7: 'instagram_comment'
       ig_user_id:       lead.instagram_user_id || '',
       name:             lead.customer_name || '',
       phone:            q.phone || '',
@@ -1677,7 +1746,7 @@ async function pushLead(db, lead, cfg, quiet = false) {
                         (bs.team_questions?.length ? `\nTeam to confirm: ${bs.team_questions.map(x => `"${x}"`).join(', ')}` : ''),
       conversation:     conversationText(rows),
       conversation_url: profile?.username ? `https://ig.me/m/${profile.username}` : '',
-      post_url:         '',                                   // S7: comment leads
+      post_url:         bs.post_url || '',                    // S7: the post a comment lead came from
       created_at:       lead.created_at || '',
     };
     const r = await postLeadWebhook(url, payload);
@@ -1792,6 +1861,9 @@ function undoLearnedKbEntry(kb, undo) {
   return true;
 }
 
+const staffRepliedSince = (rows, t) => rows.some(m => !isIncomingRow(m) && !m.is_bot
+                                                   && Date.parse(m.created_at) > Date.parse(t));
+
 async function relayOwnerAnswer(msg) {
   const db   = createSupabaseClient();
   const lead = msg.reply_to_message && await db.findLeadByAlertMsgId(msg.reply_to_message.message_id);
@@ -1837,9 +1909,7 @@ async function relayOwnerAnswer(msg) {
   // already taught the KB, so a later staff reply doesn't queue it again (D17).
   // ponytail: one undo record per lead; a second answer to the same question
   // replaces it, so the first answer's button then undoes the second.
-  const staffSince = rows.some(m => !isIncomingRow(m) && !m.is_bot
-                                 && Date.parse(m.created_at) > Date.parse(bs.handoff_at));
-  await db.updateLead(lead.id, { bot_active: !staffSince, bot_state: { ...bs,
+  await db.updateLead(lead.id, { bot_active: !staffRepliedSince(rows, bs.handoff_at), bot_state: { ...bs,
     owner_answered_at: new Date().toISOString(), kb_candidate_captured: true, kb_saved: undo } });
 
   await sendTelegram(msg.chat.id, out.join('\n'), undo
@@ -1872,6 +1942,63 @@ async function handleOwnerUpdate(update) {
   } catch (e) {
     console.error('[meta-service] owner update failed:', e.message);
     await sendTelegram(chatId, `⚠️ That didn’t go through (${e.message}). Please answer them in the Instagram app.`).catch(() => {});
+  }
+}
+
+// ── Owner timeouts · service tracker S6 (Q14) ──
+// bot-hourly checks every open price question: no answer after
+// owner_remind_hours (default 2) → one reminder the owner can reply to; after
+// owner_fallback_hours (default 20, inside Instagram's 24 h window) → the bot
+// tells the customer the team will get in touch, and the lead is pushed with
+// reason owner_no_reply. A late answer is still relayed while the window is open.
+
+// Open = a Telegram question (an emailed one has no reply path) that nobody has
+// answered and that hasn't fallen back yet (the fallback changes handoff_reason).
+const ownerQuestionOpen = (bs) => bs?.handoff_reason === 'kb_miss' && !!bs.owner_alert_msg_id && !bs.owner_answered_at;
+
+// Pure: 'remind' | 'fallback' | null for this lead at `now`.
+function ownerTimerDue(bs, now, cfg) {
+  if (!ownerQuestionOpen(bs)) return null;
+  const h = (now - Date.parse(bs.handoff_at)) / 3600e3;
+  if (h >= Number(cfg?.owner_fallback_hours ?? 20)) return 'fallback';
+  if (h >= Number(cfg?.owner_remind_hours ?? 2) && !bs.owner_reminded_at) return 'remind';
+  return null;
+}
+
+// Never throws, so one bad lead can't stop the hourly run. A failed reminder
+// isn't stamped, so the next run tries again.
+async function runOwnerTimer(db, lead, cfg, now = Date.now()) {
+  const bs  = lead.bot_state || {};
+  const due = ownerTimerDue(bs, now, cfg);
+  if (!due) return null;
+  try {
+    // Staff replied in the IG app since the handoff → they have the chat (D12):
+    // no reminder, no fallback. Closing the question lets the quiet push settle it.
+    if (staffRepliedSince(await db.listRecentMessages(lead.id, 10), bs.handoff_at)) {
+      await db.updateLead(lead.id, { bot_state: { ...bs, owner_answered_at: new Date(now).toISOString() } });
+      return 'staff';
+    }
+    if (due === 'remind') {
+      const owner = await getSettingJson('telegram_owner');
+      if (!owner?.chat_id) throw new Error('no owner linked');
+      const by = Date.parse(bs.handoff_at) + Number(cfg?.owner_fallback_hours ?? 20) * 3600e3;
+      const m = await sendTelegram(owner.chat_id,
+        `⏰ Still waiting for a price: ${lead.customer_name || 'A customer'}${qualificationBits(bs.qualification)}\n` +
+        `"${String(bs.kb_miss_question || '').slice(0, 300)}"\n\nReply to this message with the price and I’ll pass it on. ` +
+        `No answer by ${istStamp(by)} → they’re told the team will get in touch.`,
+        { reply_markup: { force_reply: true, input_field_placeholder: 'The price…' } });
+      await db.updateLead(lead.id, { bot_state: { ...bs, owner_reminded_at: new Date(now).toISOString(),
+                                                  owner_reminder_msg_id: m.message_id } });
+    } else {
+      const platform = lead.source || 'instagram';
+      await handoffToStaff(db, lead, { senderId: lead[idColumnFor(platform)], messageText: bs.kb_miss_question },
+                           platform, cfg, { reason: 'owner_no_reply', category: lead.category }, bs, false);
+    }
+    console.log(`[meta-service] owner timer: lead ${lead.id} ${due}`);
+    return due;
+  } catch (e) {
+    console.error(`[meta-service] owner timer (${due}) failed on lead ${lead.id}:`, e.message);
+    return null;
   }
 }
 
@@ -2130,6 +2257,9 @@ module.exports = {
   leadPushDue,
   sendTelegram,
   handleOwnerUpdate,
+  ownerQuestionOpen,
+  ownerTimerDue,
+  runOwnerTimer,
   parseOfferCaption,
   resolveOffer,
   isOfferFresh,

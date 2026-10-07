@@ -773,18 +773,21 @@
               <textarea id="chatbot-canned-llm_error" class="text-input" rows="2" placeholder="Hold reply when the bot errors out" style="margin:0;resize:vertical"></textarea>
               <textarea id="chatbot-canned-disclosure" class="text-input" rows="2" placeholder="Prepended to the bot's first message — discloses it's an assistant" style="margin:0;resize:vertical"></textarea>
               <textarea id="chatbot-canned-refusal_ok" class="text-input" rows="2" placeholder="Reply when the customer declines to share their WhatsApp number" style="margin:0;resize:vertical"></textarea>
+              <textarea id="chatbot-canned-owner_no_reply" class="text-input" rows="2" placeholder="Sent when the owner hasn't answered a price question by the fallback time" style="margin:0;resize:vertical"></textarea>
               <div style="font-weight:600;font-size:13px;margin-top:6px">Limits</div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <input type="number" id="chatbot-offer-stale-days" class="text-input" placeholder="30" min="0" style="margin:0;width:130px" title="Days a shared-post offer price stays quotable before falling back to the KB range">
                 <input type="number" id="chatbot-turn-cap" class="text-input" placeholder="10" min="1" style="margin:0;width:130px" title="Max bot replies per conversation before handing off to staff">
                 <input type="number" id="chatbot-age-cap-days" class="text-input" placeholder="7" min="1" style="margin:0;width:130px" title="Hand off if the conversation is older than this many days">
                 <input type="number" id="chatbot-lead-quiet-hours" class="text-input" placeholder="2" min="0.05" step="any" style="margin:0;width:130px" title="Hours without a new message before the chat is sent to the lead webhook">
+                <input type="number" id="chatbot-owner-remind-hours" class="text-input" placeholder="2" min="0.01" step="any" style="margin:0;width:130px" title="Hours without an owner answer to a price question before one Telegram reminder">
+                <input type="number" id="chatbot-owner-fallback-hours" class="text-input" placeholder="20" min="0.01" max="23" step="any" style="margin:0;width:130px" title="Hours without an owner answer before the customer is told the team will get in touch (max 23: Instagram's 24 h window)">
               </div>
-              <div style="font-size:11px;color:#9ca3af">Offer stale days · turn cap · conversation age cap (days) · lead push after quiet (hours)</div>
+              <div style="font-size:11px;color:#9ca3af">Offer stale days · turn cap · conversation age cap (days) · lead push after quiet (hours) · owner reminder (hours) · owner fallback (hours)</div>
               <div style="font-weight:600;font-size:13px;margin-top:6px">Alerts &amp; report</div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
-                <input type="email" id="chatbot-alert-email" class="text-input" placeholder="hospitalitybee@gmail.com" style="margin:0;flex:1;min-width:200px" title="Gets emergency / kb_miss alerts and the metrics report">
-                <select id="chatbot-report-frequency" class="text-input" style="margin:0;width:150px" title="Bot metrics email (sent 9 am IST; weekly = Mondays)">
+                <input type="email" id="chatbot-alert-email" class="text-input" placeholder="hospitalitybee@gmail.com" style="margin:0;flex:1;min-width:200px" title="Gets the owner alerts by email when Telegram fails">
+                <select id="chatbot-report-frequency" class="text-input" style="margin:0;width:150px" title="Bot metrics report to the owner's Telegram (sent 9 am IST; weekly = Mondays)">
                   <option value="off">Report: off</option>
                   <option value="daily">Report: daily</option>
                   <option value="weekly">Report: weekly</option>

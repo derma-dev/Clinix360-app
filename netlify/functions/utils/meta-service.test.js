@@ -423,6 +423,14 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(matchCommentRule('Kitna hai ye?', multi), multi[0]);
   assert.equal(matchCommentRule('laser COST?', multi), multi[0]);
   assert.equal(matchCommentRule('nice post', multi), null, 'an empty part must not match everything');
+
+  // S7: word-start matching, so the Q27 keywords don't fire inside other words
+  const q27 = [{ keyword: 'price, cost, rate, kitna, kitne, charges, fees, details, info, interested, book, dm', dm: 'x' }];
+  for (const s of ['Great results 😍', 'so accurate!', 'tagging @admin_x', 'saw it on facebook'])
+    assert.equal(matchCommentRule(s, q27), null, s);
+  for (const s of ['rates?', 'DM me', 'booking kaise karu', 'Price??', 'pls share info', 'kitne ka hai', '#price'])
+    assert.equal(matchCommentRule(s, q27), q27[0], s);
+  assert.equal(matchCommentRule('cost (approx)?', [{ keyword: 'cost (approx', dm: 'x' }])?.dm, 'x', 'regex characters are literal');
 }
 
 // ── Branch routing from the reply (real branch names) ────────
@@ -1605,8 +1613,11 @@ assert.equal(extractComments({}).length, 0);
           if (b.key === 'chatbot_config') { st.config = JSON.parse(b.value); st.upserts++; }
           return json([]);
         }
-        if (url.includes('owner_alert_msg_id=eq.'))
-          return json(url.includes('eq.701') ? [st.lead] : []);
+        if (url.includes('or=(bot_state->>owner_alert_msg_id.eq.')) {             // the question, or its S6 reminder
+          const id = Number(/owner_alert_msg_id\.eq\.(\d+),bot_state->>owner_reminder_msg_id\.eq\.\1\)/.exec(url)[1]);
+          const bs = st.lead.bot_state;
+          return json([bs.owner_alert_msg_id, bs.owner_reminder_msg_id].includes(id) ? [st.lead] : []);
+        }
         if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') {
           const b = JSON.parse(opts.body);
           st.patches.push(b);
@@ -1672,6 +1683,13 @@ assert.equal(extractComments({}).length, 0);
     await post(tap());
     assert.equal(st.tg[0].text, 'Nothing to undo');
     assert.equal(st.upserts, 2, 'save + one undo');
+
+    // S6: a reply to the reminder works like a reply to the question
+    st = s4();
+    st.lead.bot_state.owner_reminder_msg_id = 702;
+    await post(reply('3500', 702));
+    assert.equal(st.sends.length, 1);
+    assert.equal(laser(st.config).price, 3500);
 
     // a newer answer for the same service since → the old button undoes nothing
     st = s4();
@@ -1781,6 +1799,26 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(reportWindowDays('weekly', 2), null);
     assert.equal(reportWindowDays('off', 1), null);
     assert.equal(reportWindowDays(undefined, 1), null, 'unset = off');
+
+    // S8 (Q22): the report goes to the owner's Telegram as plain text
+    const { reportText } = require('../send-bot-report');
+    assert.equal(reportText(m, 1), [
+      '⚠️ 📊 DSkin DM Assistant — daily report (last 24 hours)',
+      '',
+      'Handoffs to staff: 6',
+      'Complete handoffs: 2 (33.3%) · phone + service + branch, target ≥60%',
+      'Medical / emergency: 2',
+      'Bot didn’t know (kb_miss): 1 · answer them in Settings → Teach the Bot',
+      'Turn cap reached: 1',
+      'Missed medical: 1 · ⚠️ must be 0, check these threads',
+      'Bot messages sent: 12',
+      '',
+      'Change or stop this report in Settings → Chatbot → Report.',
+    ].join('\n'));
+    const quiet = reportText(computeBotMetrics([], [], 0), 7);
+    assert.ok(quiet.startsWith('📊 DSkin DM Assistant — weekly report (last 7 days)'), 'no ⚠️ when nothing was missed');
+    assert.ok(quiet.includes('\nComplete handoffs: 0 · phone'), 'no % when there were no handoffs');
+    assert.ok(quiet.includes('\nMissed medical: 0 · target 0\n'));
   }
 
   // ── S2 lead push → client webhook (Q7 Q31 Q34) ──
@@ -1982,6 +2020,7 @@ assert.equal(extractComments({}).length, 0);
         if (url.includes('settings?key=eq.chatbot_config'))
           return { ok: true, json: async () => [{ value: JSON.stringify({ mode, lead_quiet_hours: quietHours }) }] };
         if (url.includes('lead_messages?created_at=gt.')) { calls.msgQueries.push(url); return { ok: true, json: async () => msgs }; }
+        if (url.includes('leads?bot_state->>handoff_reason=eq.kb_miss')) return { ok: true, json: async () => [] };   // S6: no open owner questions
         if (url.includes('/leads?id=in.(')) return { ok: true, json: async () => leads.filter(l => url.includes(l.id)) };
         if (url.includes('lead_messages?lead_id=eq.')) return { ok: true, json: async () => [] };
         if (url.includes('graph.instagram.com')) return { ok: true, json: async () => ({ username: 'u' }) };
@@ -2009,6 +2048,283 @@ assert.equal(extractComments({}).length, 0);
 
     global.setTimeout = realSetTimeout;
     for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
+      delete process.env[k];
+  }
+
+  // ── S6 owner timeouts (Q14): 2 h reminder, 20 h fallback ──
+  {
+    const { ownerTimerDue, handoffToStaff } = require('./meta-service');
+    const { handler: hourly } = require('../bot-hourly');
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.META_ACCESS_TOKEN = 'ig_token';
+    process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
+    process.env.RESEND_API_KEY = 'test_resend';
+    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+    const H = 3600e3;
+
+    // Fake clock: the price question went to the owner at T0
+    const T0 = Date.parse('2026-10-06T04:00:00Z');
+    const ASKED = { handoff_reason: 'kb_miss', handoff_at: new Date(T0).toISOString(), owner_alert_msg_id: 701 };
+    assert.equal(ownerTimerDue(ASKED, T0 + 1.9 * H, {}), null);
+    assert.equal(ownerTimerDue(ASKED, T0 + 2 * H, {}), 'remind');
+    assert.equal(ownerTimerDue({ ...ASKED, owner_reminded_at: 't' }, T0 + 3 * H, {}), null, 'one reminder');
+    assert.equal(ownerTimerDue({ ...ASKED, owner_reminded_at: 't' }, T0 + 20 * H, {}), 'fallback');
+    assert.equal(ownerTimerDue(ASKED, T0 + 20 * H, {}), 'fallback', 'a missed reminder never delays the fallback');
+    assert.equal(ownerTimerDue({ ...ASKED, owner_answered_at: 't' }, T0 + 20 * H, {}), null, 'answered → skipped');
+    assert.equal(ownerTimerDue({ ...ASKED, owner_alert_msg_id: null }, T0 + 20 * H, {}), null, 'emailed alert → no timers');
+    assert.equal(ownerTimerDue({ ...ASKED, handoff_reason: 'owner_no_reply' }, T0 + 21 * H, {}), null, 'one fallback');
+    const MINUTES = { owner_remind_hours: 2 / 60, owner_fallback_hours: 5 / 60 };   // the live test
+    assert.equal(ownerTimerDue(ASKED, T0 + 2 * 60e3, MINUTES), 'remind');
+    assert.equal(ownerTimerDue(ASKED, T0 + 5 * 60e3, MINUTES), 'fallback');
+
+    // DB mock: patches apply to `leads`; `msgs[id]` oldest-first
+    const ago = (h) => new Date(Date.now() - h * H).toISOString();
+    const mk = (id, h, extra = {}) => ({ id, customer_name: `Cust ${id}`, branch_id: 'B1', category: 'lead',
+      source: 'instagram', instagram_user_id: `IG_${id}`, created_at: ago(h + 0.1),
+      bot_state: { qualification: { service: 'LHR FULL BODY P/S' }, handoff_reason: 'kb_miss', handoff_at: ago(h),
+                   handoff_summary: 'Bot handed off (kb_miss) — service LHR FULL BODY P/S',
+                   kb_miss_question: 'price of laser', owner_alert_msg_id: 700, ...extra } });
+    const hold = (h) => [{ direction: 'incoming', message: 'price of laser', created_at: ago(h + 0.01) },
+                         { direction: 'outgoing', is_bot: true, message: 'Let me check with our team.', created_at: ago(h) }];
+    const CANNED = { owner_no_reply: 'Our team will get in touch here soon 🙏', llm_error: 'Connecting you to our team 🙏' };
+    const s6 = ({ leads = [], msgs = {}, cfg = {}, owner = { chat_id: 555 } }) => {
+      const st = { leads, tg: [], sends: [], inserts: [], hooks: [], alerts: [] };
+      const json = (v) => ({ ok: true, json: async () => v });
+      const open = (l) => l.bot_state.handoff_reason === 'kb_miss' && l.bot_state.owner_alert_msg_id && !l.bot_state.owner_answered_at;
+      global.fetch = async (url, opts = {}) => {
+        if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify({ mode: 'live', canned: CANNED, ...cfg }) }]);
+        if (url.includes('settings?key=eq.telegram_owner')) return json(owner ? [{ value: JSON.stringify(owner) }] : []);
+        if (url.includes('api.telegram.org')) { st.tg.push(JSON.parse(opts.body)); return json({ ok: true, result: { message_id: 900 } }); }
+        if (url.includes('api.resend.com')) { st.alerts.push(JSON.parse(opts.body)); return json({}); }
+        if (url.includes('leads?bot_state->>handoff_reason=eq.kb_miss&bot_state->>owner_alert_msg_id=not.is.null&bot_state->>owner_answered_at=is.null'))
+          return json(st.leads.filter(open));
+        if (url.includes('lead_messages?created_at=gt.'))
+          return json(Object.entries(msgs).flatMap(([lead_id, rows]) => rows.map(m => ({ lead_id, created_at: m.created_at }))));
+        if (url.includes('/leads?id=in.(')) return json(st.leads.filter(l => url.includes(l.id)));
+        if (url.includes('/branches?')) return json([{ id: 'B1', name: 'Janakpuri' }]);
+        if (url.includes('lead_messages?lead_id=eq.')) return json([...(msgs[/lead_id=eq\.([^&]+)/.exec(url)[1]] || [])].reverse());
+        if (url.includes('/lead_messages') && opts.method === 'POST') { st.inserts.push(JSON.parse(opts.body)); return json([{ id: 'o1' }]); }
+        if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') {
+          Object.assign(st.leads.find(l => l.id === /id=eq\.([^&]+)/.exec(url)[1]) || {}, JSON.parse(opts.body));
+          return json([]);
+        }
+        if (url.includes('graph.instagram.com') && url.includes('fields=')) return json({ username: 'u' });
+        if (url.includes('graph.instagram.com')) { st.sends.push(JSON.parse(opts.body)); return json({ message_id: 'm' }); }
+        if (url.startsWith('https://hook.make.test')) { st.hooks.push(JSON.parse(opts.body)); return { ok: true, status: 200 }; }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      return st;
+    };
+
+    // One hourly run: R (3 h, unanswered) → reminder · F (21 h, reminded) → fallback ·
+    // S (3 h, staff replied in the IG app) → closed, nothing sent · N (1 h) → nothing yet
+    const R = mk('R', 3), F = mk('F', 21, { owner_reminded_at: ago(19) }), S = mk('S', 3), N = mk('N', 1);
+    const msgs = { R: hold(3), F: hold(21), N: hold(1),
+                   S: [...hold(3), { direction: 'outgoing', is_bot: false, message: 'Checking!', created_at: ago(1) }] };
+    let st = s6({ leads: [R, F, S, N], msgs });
+    await hourly();
+
+    assert.equal(st.tg.length, 1, 'one reminder, for R only');
+    assert.equal(st.tg[0].chat_id, 555);
+    assert.deepEqual(st.tg[0].text.split('\n').slice(0, 2),
+      ['⏰ Still waiting for a price: Cust R — service LHR FULL BODY P/S', '"price of laser"']);
+    assert.match(st.tg[0].text, /Reply to this message with the price.* No answer by \d{1,2} \w{3}, \d\d:\d\d → they’re told the team will get in touch\.$/);
+    assert.equal(st.tg[0].reply_markup.force_reply, true, 'answerable like the question itself');
+    assert.equal(R.bot_state.owner_reminder_msg_id, 900, 'the owner’s reply to it maps back (S4)');
+    assert.ok(R.bot_state.owner_reminded_at);
+    assert.equal(R.bot_state.kb_miss_question, 'price of laser', 'rest of bot_state kept');
+
+    assert.deepEqual(st.sends.map(s => [s.recipient.id, s.message.text]), [['IG_F', 'Our team will get in touch here soon 🙏']],
+      'only F’s customer hears from the bot');
+    assert.equal(st.inserts.length, 1);
+    assert.equal(st.inserts[0].is_bot, true);
+    assert.equal(F.bot_state.handoff_reason, 'owner_no_reply');
+    assert.equal(st.hooks.length, 1, 'only F is pushed: R’s question is still open, so R hasn’t settled');
+    assert.equal(st.hooks[0].ig_user_id, 'IG_F');
+    assert.equal(st.hooks[0].lead_type, 'potential_lead');
+    assert.equal(st.hooks[0].reason, 'owner_no_reply');
+    assert.equal(st.hooks[0].summary, 'Bot handed off (owner_no_reply) — service LHR FULL BODY P/S\nBot didn\'t know: "price of laser"');
+
+    assert.ok(S.bot_state.owner_answered_at, 'staff reply closes S’s question');
+    assert.equal(N.bot_state.owner_reminded_at, undefined);
+
+    // The next run: nothing repeats
+    st.tg.length = st.sends.length = st.hooks.length = 0;
+    await hourly();
+    assert.equal(st.tg.length + st.sends.length + st.hooks.length, 0, 'one reminder, one fallback, one push');
+
+    // A config saved before S6 has no owner_no_reply copy → the llm_error hold copy
+    st = s6({ leads: [mk('G', 21)], msgs: { G: hold(21) }, cfg: { canned: { llm_error: 'Connecting you to our team 🙏' } } });
+    await hourly();
+    assert.equal(st.sends[0].message.text, 'Connecting you to our team 🙏');
+
+    // The owner unlinked → the reminder isn't stamped, so the next run tries again
+    st = s6({ leads: [mk('U', 3)], msgs: { U: hold(3) }, owner: null });
+    await hourly();
+    assert.equal(st.leads[0].bot_state.owner_reminded_at, undefined);
+
+    // Not live → nothing
+    st = s6({ leads: [mk('X', 21)], msgs: { X: hold(21) }, cfg: { mode: 'shadow' } });
+    await hourly();
+    assert.equal(st.sends.length + st.tg.length + st.hooks.length, 0);
+
+    // A price question the owner can answer doesn't settle the chat at the handoff;
+    // an emailed one (no reply path) does. A new question resets the last one's stamps.
+    const db = createSupabaseClient();
+    const prev = { ...mk('Q', 30).bot_state, handoff_reason: 'qualified',
+                   owner_answered_at: 'old', owner_reminded_at: 'old', owner_reminder_msg_id: 5 };
+    const price = () => handoffToStaff(db, { ...mk('Q', 0), bot_state: prev }, { senderId: 'IG_Q', messageText: 'hydra price?' },
+                                        'instagram', { mode: 'live', canned: {} }, { reason: 'kb_miss', category: 'lead' }, prev, false);
+    const q = mk('Q', 0);
+    st = s6({ leads: [q] });
+    await price();
+    assert.equal(st.tg.length, 1);
+    assert.equal(st.hooks.length, 0, 'waiting on the owner → not pushed yet');
+    assert.deepEqual([q.bot_state.owner_alert_msg_id, q.bot_state.owner_answered_at, q.bot_state.owner_reminded_at,
+                      q.bot_state.owner_reminder_msg_id], [900, null, null, null]);
+    st = s6({ leads: [mk('Q', 0)], owner: null });
+    await price();
+    assert.equal(st.alerts.length, 1, 'no owner linked → emailed');
+    assert.equal(st.hooks.length, 1, 'nobody can answer it in Telegram → settled now, as before S6');
+    assert.equal(st.hooks[0].reason, 'kb_miss');
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'META_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
+      delete process.env[k];
+  }
+
+  // ── S7 comment automation in the service (Q6 Q27) ──
+  {
+    const { handleWebhook, pushLead } = require('./meta-service');
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.META_ACCESS_TOKEN = 'ig_token';
+    process.env.META_BRANCH_ID = 'FALLBACK';
+    process.env.GEMINI_API_KEY = 'test_key';
+    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+    const RULES = [{ keyword: 'price, cost, rate, kitna, kitne, charges, fees, details, info, interested, book, dm',
+                     public: 'Sent you a DM 💬', dm: 'Hi! Thanks for asking 😊 Which branch is closest to you — Janakpuri, Kirti Nagar or Dwarka?' }];
+    const POST_URL = 'https://www.instagram.com/p/ABC123/';
+    const TURN = { category: 'lead', is_medical: false, reply: 'It’s ₹9999 per session, as in the post! Which day suits you?',
+                   kb_covers: true, asks_price: true, handoff: false, reason: 'qualified',
+                   qualification: { service: 'LHR FULL BODY P/S', branch: 'Janakpuri' } };
+    const s7 = ({ mode = 'live', media = true, offerCache = null } = {}) => {
+      const st = { leads: [], msgs: [], shadow: [], dms: [], publics: [], sends: [], cache: [], hooks: [], media: 0, parses: 0, turns: [] };
+      const json = (v) => ({ ok: true, json: async () => v });
+      global.fetch = async (url, opts = {}) => {
+        const body = opts.body ? JSON.parse(opts.body) : null;
+        if (url.includes('settings?key=eq.integrations')) return json([]);
+        if (url.includes('settings?key=eq.comment_rules')) return json([{ value: JSON.stringify(RULES) }]);
+        if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify({ mode, canned: {},
+          kb: { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 }] } }) }]);
+        if (url.includes('settings?key=eq.offer_cache')) return json(offerCache ? [{ value: JSON.stringify(offerCache) }] : []);
+        if (url.endsWith('/rest/v1/settings')) { st.cache.push(body); return { ok: true, status: 201 }; }
+        if (url.includes('/branches?')) return json([{ id: 'DWK', name: 'Dwarka Sec 12' }, { id: 'JPR', name: 'Janakpuri' }, { id: 'KN', name: 'Kirti Nagar' }]);
+        if (url.includes('graph.instagram.com/v21.0/MEDIA_1?fields=caption,permalink')) {
+          st.media++;
+          return media ? json({ caption: 'Full body laser this month: ₹9,999 per session!', permalink: POST_URL })
+                       : { ok: false, status: 400, json: async () => ({ error: { message: 'bad media id' } }) };
+        }
+        if (url.includes('graph.instagram.com') && url.includes('fields=')) return json({ name: 'Riya Sharma', username: 'riya.s' });
+        if (url.includes('/C1/replies')) { st.publics.push(body); return json({ id: 'R1' }); }
+        if (url.includes('graph.instagram.com') && body?.recipient?.comment_id) { st.dms.push(body); return json({ recipient_id: 'IGSID_C', message_id: 'pm1' }); }
+        if (url.includes('graph.instagram.com')) { st.sends.push(body); return json({ message_id: 'm' }); }
+        if (url.includes('generativelanguage.googleapis.com')) {
+          const parse = body.systemInstruction.parts[0].text.startsWith('You parse');
+          parse ? st.parses++ : st.turns.push(body);
+          return json({ candidates: [{ content: { parts: [{ text: JSON.stringify(parse
+            ? { service: 'LHR FULL BODY P/S', offer_price: 9999 } : TURN) }] } }] });
+        }
+        if (url.includes('/leads?instagram_user_id=eq.IGSID_C')) return json(st.leads.slice(0, 1));
+        if (url.endsWith('/rest/v1/leads') && opts.method === 'POST') {
+          const l = { id: 'LC', bot_state: null, created_at: new Date().toISOString(), ...body };
+          st.leads.push(l); return json([l]);
+        }
+        if (url.includes('/leads?id=eq.LC') && opts.method === 'PATCH') { Object.assign(st.leads[0], body); return json([]); }
+        if (url.includes('/leads?id=eq.LC')) return json(st.leads.slice(0, 1));
+        if (url.includes('lead_messages?lead_id=eq.')) return json([...st.msgs].reverse());
+        if (url.includes('/lead_messages') && opts.method === 'POST') {
+          const m = { id: `msg${st.msgs.length}`, created_at: new Date().toISOString(), ...body };
+          st.msgs.push(m); return json([m]);
+        }
+        if (url.includes('/bot_shadow_log')) { st.shadow.push(body); return json([{}]); }
+        if (url.startsWith('https://hook.make.test')) { st.hooks.push(body); return { ok: true, status: 200 }; }
+        throw new Error('unexpected fetch: ' + url);
+      };
+      return st;
+    };
+    const comment = (text) => ({ object: 'instagram', entry: [{ id: 'IG_ACCOUNT', changes: [{ field: 'comments', value: {
+      id: 'C1', text, from: { id: 'IGSCOPED_1', username: 'riya.s' }, media: { id: 'MEDIA_1', media_product_type: 'FEED' } } }] }] });
+
+    // Live: DM with branch buttons + public reply, as before; the lead now carries
+    // where it came from and the post's offer (parsed once, then cached)
+    let st = s7();
+    await handleWebhook(comment('Price kya hai?'));
+    assert.equal(st.dms.length, 1);
+    assert.deepEqual(st.dms[0].message.attachment.payload.buttons.map(b => b.title), ['Dwarka Sec 12', 'Janakpuri', 'Kirti Nagar']);
+    assert.deepEqual(st.publics, [{ message: 'Sent you a DM 💬' }]);
+    const lead = st.leads[0];
+    assert.equal(lead.instagram_user_id, 'IGSID_C', 'filed under the messaging id, not the comment’s from.id');
+    assert.equal(lead.bot_state.source, 'instagram_comment');
+    assert.equal(lead.bot_state.post_url, POST_URL);
+    assert.deepEqual([lead.bot_state.last_offer.service, lead.bot_state.last_offer.offer_price], ['LHR FULL BODY P/S', 9999]);
+    assert.equal(st.parses, 1);
+    assert.equal(st.cache.length, 1);
+    assert.equal(st.cache[0].key, 'offer_cache', 'the post joins the offer cache');
+    assert.deepEqual(st.msgs.map(m => m.message), ['[comment] Price kya hai?', RULES[0].dm]);
+
+    // The branch tap: routed, and the bot's turn gets the post's offer as quotable
+    await handleWebhook({ object: 'instagram', entry: [{ messaging: [{ sender: { id: 'IGSID_C' }, recipient: { id: 'IG_ACCOUNT' },
+      postback: { mid: 'pb1', title: 'Janakpuri', payload: 'BRANCH:JPR' } }] }] });
+    assert.equal(lead.branch_id, 'JPR');
+    assert.ok(st.turns[0].systemInstruction.parts.some(p => p.text.startsWith('LIVE OFFER (quotable)') && p.text.includes('₹9999')),
+      'the bot quotes the post’s offer price');
+    assert.equal(st.sends.length, 1);
+    assert.match(st.sends[0].message.text, /₹9999/);
+
+    // The lead push carries the comment fields
+    assert.equal(await pushLead(createSupabaseClient(), lead, {}, true), 'potential_lead');
+    assert.equal(st.hooks[0].source, 'instagram_comment');
+    assert.equal(st.hooks[0].post_url, POST_URL);
+    assert.equal(st.hooks[0].price_quoted, '₹9999 (post offer)');
+
+    // A post already in the cache isn't parsed again; a post that can't be fetched
+    // costs the offer and post_url, never the DM
+    st = s7({ offerCache: { offers: { MEDIA_1: { service: 'LHR FULL BODY P/S', offer_price: 8888, last_seen: new Date().toISOString() } } } });
+    await handleWebhook(comment('cost?'));
+    assert.equal(st.parses, 0);
+    assert.equal(st.leads[0].bot_state.last_offer.offer_price, 8888);
+    st = s7({ media: false });
+    st.leads.push({ id: 'LC', branch_id: 'JPR', bot_active: true, bot_state: { turn_count: 3 } });   // a returning customer
+    await handleWebhook(comment('cost?'));
+    assert.equal(st.leads[0].bot_state.turn_count, 3, 'the rest of bot_state is kept');
+    assert.equal(st.dms.length, 1);
+    assert.equal(st.leads[0].bot_state.source, 'instagram_comment');
+    assert.equal(st.leads[0].bot_state.post_url, '');
+    assert.equal(st.leads[0].bot_state.last_offer, undefined);
+
+    // "Great results 😍" matches no keyword → left alone (no catch-all, Q27)
+    st = s7();
+    await handleWebhook(comment('Great results 😍'));
+    assert.equal(st.dms.length + st.publics.length + st.leads.length + st.media, 0);
+
+    // Shadow: one log row with what live would send; nothing sent, no lead
+    st = s7({ mode: 'shadow' });
+    await handleWebhook(comment('Price kya hai?'));
+    assert.equal(st.dms.length + st.publics.length + st.sends.length + st.leads.length + st.msgs.length, 0);
+    assert.equal(st.shadow.length, 1);
+    assert.deepEqual({ ...st.shadow[0], decision: { ...st.shadow[0].decision, offer: undefined } }, {
+      lead_id: null, message_id: 'C1', platform: 'instagram',
+      decision: { comment: 'Price kya hai?', rule: RULES[0].keyword, public: 'Sent you a DM 💬', dm: RULES[0].dm,
+                  buttons: ['Dwarka Sec 12', 'Janakpuri', 'Kirti Nagar'], post_url: POST_URL, offer: undefined } });
+    assert.equal(st.shadow[0].decision.offer.offer_price, 9999, 'the offer the bot would quote');
+
+    // Off: nothing at all, not even the post lookup
+    st = s7({ mode: 'off' });
+    await handleWebhook(comment('Price kya hai?'));
+    assert.equal(st.dms.length + st.publics.length + st.leads.length + st.shadow.length + st.media, 0);
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'GEMINI_API_KEY', 'LEAD_WEBHOOK_URL'])
       delete process.env[k];
   }
 

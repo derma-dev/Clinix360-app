@@ -175,7 +175,7 @@ netlify/functions/
   send-automation-report.js     → automation: emails a .doc report (Resend attachment)
   send-automation-webhook.js    → automation: POSTs a formatted text report to a webhook
   check-automations.js          → cron (0 18 * * * UTC = 23:30 IST): fires scheduled automations
-  send-bot-report.js            → cron (30 3 * * * UTC = 09:00 IST): chatbot metrics email (daily/weekly/off)
+  send-bot-report.js            → cron (30 3 * * * UTC = 09:00 IST): chatbot metrics report → owner's Telegram (daily/weekly/off)
   utils/meta-service.js         → shared Meta logic: verify, parse, store, send, comment automation + branch routing
   utils/meta-service.test.js    → the ONLY test in the repo (node, assert, no framework)
 
@@ -800,7 +800,8 @@ botReply
     and `secret_token`.
 - **The owner's answer → customer → KB** (chatbot-as-a-service S4, Q13/Q26/Q29/Q30). Only the bound
   owner's chat is heard. The owner **replies** to a ❓ price question → the lead is found by
-  `bot_state.owner_alert_msg_id` (not a reply, or no match → a "reply to a price question" hint). Then:
+  `bot_state.owner_alert_msg_id`, or `owner_reminder_msg_id` for an S6 reminder (not a reply, or no match → a
+  "reply to a price question" hint). Then:
   1. **Send** if the customer's last message is < 24 h old (no `HUMAN_AGENT`, Q29): one Gemini call
      rephrases the answer in the bot's voice and the customer's latest language. **Number guard:** the
      rephrase must carry exactly the owner's numbers (commas ignored), else the owner's own words go.
@@ -817,9 +818,24 @@ botReply
      with a **[🚫 Don't save]** button (`nosave:<lead id>`). A tap restores the entry's old values (or
      removes the FAQ) unless a newer price has replaced it since, and drops the button. Any failure
      (e.g. the IG send) is told to the owner: "⚠️ That didn't go through (…)".
+- **Owner timeouts** (chatbot-as-a-service S6, Q14): [bot-hourly](netlify/functions/bot-hourly.js) checks every
+  open price question (`handoff_reason: 'kb_miss'`, a Telegram `owner_alert_msg_id`, no `owner_answered_at`)
+  via `runOwnerTimer`, timed from `handoff_at`:
+  - **`owner_remind_hours`** (default 2): one Telegram reminder, `⏰ Still waiting for a price: <name> …`,
+    with `force_reply`, so the owner can answer it directly. Stamps `owner_reminded_at` +
+    `owner_reminder_msg_id`. A failed send isn't stamped, so the next run retries.
+  - **`owner_fallback_hours`** (default 20; Settings caps it at 23 so it lands inside the 24 h window): a
+    `handoffToStaff` with reason **`owner_no_reply`**. The customer gets `canned.owner_no_reply` (else the
+    `llm_error` copy), and the lead is pushed with `reason: owner_no_reply`. The new `handoff_reason` closes
+    the question. A late owner answer is still relayed while the 24 h window is open.
+  - **Staff replied** in the IG app since the handoff → no reminder, no fallback; `owner_answered_at` is
+    stamped so the quiet push settles the chat.
+  - A new price question resets `owner_answered_at` / `owner_reminded_at` / `owner_reminder_msg_id`.
+  - An emailed question (Telegram failed) has no reply path: no timers, and it settles at once as before.
 - **Lead push** (chatbot-as-a-service S2, Q7/Q31/Q34): `pushLead` POSTs a settled chat to
   `LEAD_WEBHOOK_URL` (our Make webhook until S15). A chat settles at **any bot handoff** (called at the
-  end of `handoffToStaff`) or after **`lead_quiet_hours` with no message** ([bot-hourly](netlify/functions/bot-hourly.js)).
+  end of `handoffToStaff`; except a price question the owner can still answer in Telegram, which settles at
+  their answer or the S6 fallback, and is skipped by the quiet check meanwhile) or after **`lead_quiet_hours` with no message** ([bot-hourly](netlify/functions/bot-hourly.js)).
   Type: `lead` = phone known · `potential_lead` = service but no phone · nothing for
   collab / sales / misc or an empty chat. At most twice per customer: a `potential_lead`, then a `lead`
   once a phone arrives. `bot_state.lead_pushed {<type>: time}` stamps each sent type, so redeliveries,
@@ -828,7 +844,8 @@ botReply
   preferred_time, price_quoted, reason, summary, conversation, conversation_url, post_url, created_at`.
   `conversation` = whole thread, `[2 Oct, 10:15] Customer|Bot|Staff: …` per line; `price_quoted` = a
   fresh post offer, else the KB "from" price; `conversation_url` = `ig.me/m/<username>` (one profile
-  fetch); `post_url` stays `''` until S7. Delivery: 3 tries with backoff on 429 / 5xx / network (8 s
+  fetch); comment leads (S7) send `source: 'instagram_comment'` and the post's `post_url`, both from
+  `bot_state` (`''` / the lead's `source` otherwise). Delivery: 3 tries with backoff on 429 / 5xx / network (8 s
   timeout each); other 4xx aren't retried. A failure is not stamped (the hourly run retries for 2 days)
   and emails the operator once per lead + type (`bot_state.lead_push_alerted`). Never throws: a failed
   push can't block the reply or the handoff.
@@ -837,19 +854,23 @@ botReply
   phone+service+location (target ≥60%), safety/kb_miss/turn_cap handoff counts, the
   missed-medical invariant (target 0 — no is_bot message newer than the last inbound on
   a medical/emergency-handoff thread), bot message volume.
-- **Metrics email** (pre-Step 19, client asked for daily analytics):
+- **Metrics report** (pre-Step 19, client asked for daily analytics; Telegram since S8 / Q22):
   [send-bot-report.js](netlify/functions/send-bot-report.js) — one scheduled function
   (`30 3 * * *` = 9:00 IST) reads `chatbot_config.report_frequency` each run: `daily` →
-  emails the last 24 h, `weekly` → Mondays only, last 7 days, `off`/unset → nothing. Same
-  numbers as the SQL file (kept for ad-hoc runs), computed over REST, sent via Resend to
-  `alert_email`. Set in Settings → Chatbot → Alerts & report.
+  the last 24 h, `weekly` → Mondays only, last 7 days, `off`/unset → nothing. Same
+  numbers as the SQL file (kept for ad-hoc runs), computed over REST, sent as one plain-text
+  Telegram message to the owner (`settings.telegram_owner`; none linked or the send fails → logged,
+  no email). Set in Settings → Chatbot → Alerts & report.
 - Unit suite: `node netlify/functions/utils/meta-service.test.js` covers the §8.1
   invariants (guard order, classifier-first, phone, non-lead, handoff, shadow never-send /
   never-mutate / one-row-even-on-error, disclosure, crash-swallow) plus the offer ladder
   (fresh/stale/miss/no-match/parse-failure/follow-up/shadow), the kb_candidates capture,
   the vision inline_data/failure paths, and the Step 17/18 set (soft-booking summary +
   prompt markers, turn/age cap boundary), the S2 lead push, and the S3 owner alerts (price question vs
-  non-price, FYIs, once per incident, email fallback, telegram-webhook secret/binding).
+  non-price, FYIs, once per incident, email fallback, telegram-webhook secret/binding), the S4 owner
+  answers and the S6 owner timeouts (fake clock, one reminder, one fallback, staff reply, quiet skip),
+  and the S7 comment flow (mode gate, post offer → branch tap → quoted, cache, lookup failure, payload fields),
+  and the S8 report text.
 
 ### Instagram comment automation (comment → DM → branch routing)
 
@@ -870,10 +891,14 @@ customer comments  → POST /webhook/meta  (object='instagram', changes[].field=
       ├ skip our own comment (from.id === entry.id)  ← infinite-loop guard
       ├ skip threaded replies (value.parent_id)
       ├ matchCommentRule(text, settings.comment_rules)
+      ├ chatbot_config.mode (S7): off → stop · shadow → one bot_shadow_log row, send nothing
+      ├ meanwhile: GET graph.instagram.com/v21.0/{media.id}?fields=caption,permalink
+      │      → resolveOffer (offer_cache, else one parse) — a failure only loses the offer
       ├ 1. PRIVATE REPLY  POST graph.instagram.com/v21.0/{IG}/messages
       │      { recipient:{comment_id}, message:{ attachment: button template } }
       ├ 2. PUBLIC REPLY   POST graph.instagram.com/v21.0/{comment_id}/replies
-      └ 3. lead on META_BRANCH_ID + timeline: "[comment] <text>" in, the DM out
+      └ 3. lead on META_BRANCH_ID + timeline: "[comment] <text>" in, the DM out;
+           bot_state { source:'instagram_comment', post_url, last_offer }
 
 ── B. their answer ─────────────────────────────────────────────────────────
 customer taps [Dwarka] (or types "dwarka")
@@ -886,7 +911,18 @@ customer taps [Dwarka] (or types "dwarka")
 ```
 
 **Rules** live in `settings.comment_rules` (JSON), edited in **Admin → Settings → Comment
-Automation**. Case-insensitive substring, first hit wins, `*` is the catch-all tried last.
+Automation**. Case-insensitive, matched at the **start of a word** ("rates" hits `rate`, "great"
+doesn't; "facebook" doesn't hit `book`), first hit wins, `*` is the catch-all tried last.
+The service runs **one** rule, the client-approved Q27 copy, with **no** catch-all (it would DM every
+"😍", and Meta allows one DM per comment): keywords `price, cost, rate, kitna, kitne, charges, fees,
+details, info, interested, book, dm` → public "Sent you a DM 💬" → DM "Hi! Thanks for asking 😊 Which
+branch is closest to you — Janakpuri, Kirti Nagar or Dwarka?".
+
+**Follows the bot mode (S7):** `live` sends as below; `shadow` writes one `bot_shadow_log` row
+(`lead_id: null`, `message_id` = comment id, `decision` = `{comment, rule, public, dm, buttons, post_url,
+offer}`) and sends nothing; `off` leaves comments alone. **Post price (S7, Instagram only):** the
+commented post's caption goes through the same `resolveOffer` as a shared post, and the offer lands in
+`bot_state.last_offer`, so the bot's reply to the branch tap quotes it as a LIVE OFFER.
 One rule's keyword may list comma-separated alternatives (`price, cost, kitna`) — Hinglish
 variants share one DM instead of duplicating the copy.
 No match → the comment is left completely alone.
@@ -1021,8 +1057,8 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | [send-automation-report](netlify/functions/send-automation-report.js) | `/.netlify/functions/send-automation-report` | POST | `{automation_id, date_from, date_to}` | Builds a styled HTML→`.doc`, base64-attaches it to a Resend email, updates `last_sent_at`. |
 | [send-automation-webhook](netlify/functions/send-automation-webhook.js) | `/.netlify/functions/send-automation-webhook` | POST | `{automation_id, date_from, date_to}` | Builds a per-branch plain-text block `{report: "…"}`, POSTs to `webhook_url`, **3 retries** w/ backoff, updates `last_sent_at`, `502` on final failure. |
 | [check-automations](netlify/functions/check-automations.js) | scheduled | cron | — | `schedule('0 18 * * *')`. Fires due scheduled automations (see [§13](#13-report-automations)). |
-| [bot-hourly](netlify/functions/bot-hourly.js) | scheduled | cron | — | `schedule('0 * * * *')`, live mode only. Chats with no message for `chatbot_config.lead_quiet_hours` (default 2) → `pushLead` (lead push, see §15). S6 adds owner-question timeouts here. Trigger by hand from the Netlify UI to test. |
-| [send-bot-report](netlify/functions/send-bot-report.js) | scheduled | cron | — | `schedule('30 3 * * *')`. Chatbot metrics email to `chatbot_config.alert_email` per `report_frequency` (daily / weekly on Mondays / off). |
+| [bot-hourly](netlify/functions/bot-hourly.js) | scheduled | cron | — | `schedule('0 * * * *')`, live mode only. Chats with no message for `chatbot_config.lead_quiet_hours` (default 2) → `pushLead` (lead push, see §15). First, open owner price questions → `runOwnerTimer` (S6: reminder after `owner_remind_hours`, `owner_no_reply` fallback after `owner_fallback_hours`). Trigger by hand from the Netlify UI to test. |
+| [send-bot-report](netlify/functions/send-bot-report.js) | scheduled | cron | — | `schedule('30 3 * * *')`. Chatbot metrics report to the owner's Telegram (`settings.telegram_owner`) per `report_frequency` (daily / weekly on Mondays / off). |
 
 **Webhook payload emitted by `send-automation-webhook`** (one string, per branch):
 
@@ -1068,7 +1104,7 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 | `payment_modes` | JSON array `[{code,label}, …]` |
 | `integrations` | JSON flags `{"instagram":true,"facebook":true,"whatsapp":true}` — only an explicit `false` disables |
 | `comment_rules` | JSON array `[{keyword, public, dm}, …]` — Instagram & Facebook comment automation ([§15](#instagram-comment-automation-comment--dm--branch-routing)) |
-| `chatbot_config` | JSON object — chatbot config (final plan §5): `mode` ('off'/'shadow'/'live'), `model`, `kb {entries, prices_verified_at}`, `locality_map`, `canned` (7 replies), `offer_stale_days`, `turn_cap`, `conversation_age_cap_days`, `lead_quiet_hours` (lead push, default 2). Created on first Settings save; absent row = code defaults with `mode:'off'`. |
+| `chatbot_config` | JSON object — chatbot config (final plan §5): `mode` ('off'/'shadow'/'live'), `model`, `kb {entries, prices_verified_at}`, `locality_map`, `canned` (8 replies), `offer_stale_days`, `turn_cap`, `conversation_age_cap_days`, `lead_quiet_hours` (lead push, default 2), `owner_remind_hours` / `owner_fallback_hours` (S6, default 2 / 20). Created on first Settings save; absent row = code defaults with `mode:'off'`. |
 | `offer_cache` | JSON object — share→offer cache (D9/D10, Step 14): `{offers: {<media_id>: {service, offer_price, last_seen, source_caption}}}`, capped at 50 newest, written only by the webhook; humans never edit it. |
 
 **Indexes**: `idx_leads_branch`, `idx_leads_instagram_user`, `idx_leads_facebook_user`,
@@ -1248,6 +1284,9 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-06 | — | **Daily report → Telegram (service tracker S8, Q22).** [send-bot-report.js](netlify/functions/send-bot-report.js) sends the same numbers as one plain-text Telegram message to the owner (`sendTelegram` → `settings.telegram_owner`) instead of the Resend email; ⚠️ in front when missed medical > 0. No owner linked / send failed → logged (500 / 502), no email fallback. `reportHtml` → `reportText`. Settings tooltips updated (alert email = Telegram fallback for alerts only). |
+| 2026-10-06 | — | **Comment automation in the service (service tracker S7, Q6/Q27).** `processComment` follows `chatbot_config.mode`: off → nothing, shadow → one `bot_shadow_log` row (`lead_id: null`) with what it would send, live → as before. Instagram comments now carry `media.id`; the post's caption + permalink are fetched (one Graph call, alongside the DM) and the caption goes through `resolveOffer` (+ `offer_cache`), so the lead's `bot_state` gets `last_offer`, `source: 'instagram_comment'` and `post_url`, and the bot quotes the post's offer after the branch tap. `pushLead` sends `source` / `post_url` from `bot_state`. `matchCommentRule` matches at the start of a word (no more "great" → `rate`). Test DB `comment_rules` = the approved Q27 rule. See §15. |
+| 2026-10-06 | — | **Owner timeouts (service tracker S6, Q14).** [bot-hourly.js](netlify/functions/bot-hourly.js) now runs `runOwnerTimer` on every open owner price question first: one Telegram reminder (answerable, `force_reply`) after `owner_remind_hours` (2), and after `owner_fallback_hours` (20) an `owner_no_reply` handoff: the customer gets the new `canned.owner_no_reply` copy and the lead is pushed with `reason: owner_no_reply`. A Telegram price question no longer settles the chat at the handoff, and the quiet check skips it until it's answered or falls back. A staff reply since the handoff closes it. `findLeadByAlertMsgId` also matches the reminder's message id. New Settings fields: owner reminder / fallback hours (decimals, fallback ≤ 23) and the owner-no-reply copy. See §15. |
 | 2026-10-02 | — | **The owner's answer → customer → KB (service tracker S4, Q13/Q26/Q29/Q30).** [telegram-webhook.mjs](netlify/functions/telegram-webhook.mjs) hands every non-binding update to the new `handleOwnerUpdate` after the `200`. The owner's reply to a ❓ price question (mapped by `bot_state.owner_alert_msg_id`) is rephrased by Gemini (number guard: same numbers or the owner's words) and sent if the customer's last message is < 24 h old; the bot resumes unless staff replied since the handoff; the price folds into the KB via a server port of `applyLearnedKbEntry` (plus the thread's service as a fallback), with a **[Don't save]** button that undoes it. Shared `geminiJson` helper (`parseOfferCaption` now uses it; its error reads `Gemini call failed: …`), `telegramApi` behind `sendTelegram`, new `findLeadByAlertMsgId`. See §15. |
 | 2026-10-02 | — | **Owner alerts on Telegram (service tracker S3, Q11/Q12/Q30/Q32).** `sendBotAlert` now sends to the owner's Telegram (`sendTelegram`, new) with the old email as the fallback (no token / no owner linked / send failed). Price `kb_miss` = a question with `force_reply`, its message id kept in `bot_state.owner_alert_msg_id` for S4; `emergency` / `requested` / `llm_error` = FYIs (requested + llm_error are new triggers). Gemini decision gains a required `asks_price`; a non-price `kb_miss` no longer hands off: the bot says the team will confirm and keeps qualifying, the question goes to `bot_state.team_questions` and the lead push summary. Prompt: an unknown price is a kb_miss instead of "shared after consultation"; unpriced KB services render "no price yet". New [telegram-webhook.mjs](netlify/functions/telegram-webhook.mjs) + `/webhook/telegram` redirect: secret-header check, `/start <code>` links the owner (`settings.telegram_owner`). New env `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_LINK_CODE`. See §15. |
 | 2026-10-02 | — | **Lead push → client webhook (service tracker S2, Q7/Q31/Q34).** New `pushLead` in [meta-service.js](netlify/functions/utils/meta-service.js) POSTs settled chats to `LEAD_WEBHOOK_URL` (Make) as `lead` (phone) / `potential_lead` (service, no phone): at every bot handoff, and from the new hourly [bot-hourly.js](netlify/functions/bot-hourly.js) once a chat has been quiet `lead_quiet_hours` (new Settings field, default 2, decimals allowed for tests). Fixed 16-field payload incl. the whole conversation; at most one push per type per customer (`bot_state.lead_pushed`); 3 tries on 429/5xx/network, no retry on other 4xx, one alert email per failing lead + type. `sendBotAlert`'s Resend call moved into a shared `sendAlertEmail`. `findLeadByPlatformId` now also selects `source, instagram_user_id`. Unit: types, upgrade, stamps, payload, retry/no-retry, alert-once, handoff push, failure doesn't block, hourly quiet selection + live-only. See §15. |

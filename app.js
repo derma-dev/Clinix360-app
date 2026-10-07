@@ -1273,11 +1273,14 @@ const DEFAULT_CHATBOT_CONFIG = {
     llm_error:     'Let me connect you with our team right away — they will help you here. 🙏',
     disclosure:    'Hi! I am the clinic’s assistant 🤖 — I can help with prices, services and bookings, and our team joins in whenever needed.',
     refusal_ok:    'No problem at all — our team will continue here. 🙏',
+    owner_no_reply:'Thanks for waiting! Our team will get in touch with you here about this soon. 🙏',
   },
   offer_stale_days: 30,              // D10
   turn_cap: 10,                      // pending open #17
   conversation_age_cap_days: 7,
   lead_quiet_hours: 2,               // S2: a chat this long without a message settles → lead push (bot-hourly)
+  owner_remind_hours: 2,             // S6: unanswered owner price question → one Telegram reminder
+  owner_fallback_hours: 20,          // S6: still unanswered → customer gets canned.owner_no_reply, lead pushed
   alert_email: '',                   // '' = default admin address (server side)
   report_frequency: 'off',           // 'off' | 'daily' | 'weekly' — send-bot-report cron
 };
@@ -1317,6 +1320,8 @@ function renderChatbotConfig() {
   set('chatbot-turn-cap', cfg.turn_cap);
   set('chatbot-age-cap-days', cfg.conversation_age_cap_days);
   set('chatbot-lead-quiet-hours', cfg.lead_quiet_hours);
+  set('chatbot-owner-remind-hours', cfg.owner_remind_hours);
+  set('chatbot-owner-fallback-hours', cfg.owner_fallback_hours);
   set('chatbot-alert-email', cfg.alert_email || '');
   set('chatbot-report-frequency', cfg.report_frequency || 'off');
 
@@ -1362,6 +1367,9 @@ function collectChatbotConfigFromForm() {
     conversation_age_cap_days: int('chatbot-age-cap-days', 1, DEFAULT_CHATBOT_CONFIG.conversation_age_cap_days),
     // decimals allowed so a live test can use minutes (0.05 h = 3 min)
     lead_quiet_hours: Math.max(0.05, parseFloat(val('chatbot-lead-quiet-hours')) || DEFAULT_CHATBOT_CONFIG.lead_quiet_hours),
+    owner_remind_hours: Math.max(0.01, parseFloat(val('chatbot-owner-remind-hours')) || DEFAULT_CHATBOT_CONFIG.owner_remind_hours),
+    // under 24 h: the fallback message must land inside Instagram's reply window
+    owner_fallback_hours: Math.min(23, Math.max(0.01, parseFloat(val('chatbot-owner-fallback-hours')) || DEFAULT_CHATBOT_CONFIG.owner_fallback_hours)),
     alert_email:      (val('chatbot-alert-email') || '').trim(),
     report_frequency: val('chatbot-report-frequency') || 'off',
   };
