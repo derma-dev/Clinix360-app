@@ -245,7 +245,19 @@ CREATE TABLE IF NOT EXISTS bot_shadow_log (
   created_at timestamptz DEFAULT now()
 );
 
--- RLS disabled everywhere (PIN-based app security):
+-- Server-only secrets (service tracker S9): key 'instagram' = the connected
+-- account's token { token, ig_user_id, username, refreshed_at, expires_at }.
+-- RLS ON with NO policy + no grants: the anon key (which the browser holds) gets
+-- nothing; only SUPABASE_SERVICE_ROLE_KEY (bypasses RLS) reads or writes it.
+-- Never give this table a policy, and keep it out of SUPABASE_ENABLE_RLS.sql's loop.
+CREATE TABLE IF NOT EXISTS secrets (
+  key   text PRIMARY KEY,
+  value jsonb NOT NULL
+);
+ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON secrets FROM anon, authenticated;
+
+-- RLS disabled everywhere else (PIN-based app security):
 ALTER TABLE branches            DISABLE ROW LEVEL SECURITY;
 ALTER TABLE cashup_entries      DISABLE ROW LEVEL SECURITY;
 ALTER TABLE cashup_summaries    DISABLE ROW LEVEL SECURITY;

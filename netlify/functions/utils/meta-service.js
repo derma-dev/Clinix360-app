@@ -237,16 +237,132 @@ function createSupabaseClient() {
   };
 }
 
+// ── Instagram token: Connect link + secure storage · service tracker S9 (Q16 Q20 Q28) ──
+// The account owner opens the Connect link (ig-connect.js) → Instagram login →
+// code → long-lived token (60 days) → secrets.instagram → the account is
+// subscribed to our webhooks. `secrets` has RLS on and no anon policy, so only
+// the server key (SUPABASE_SERVICE_ROLE_KEY) reads it; the public key the
+// browser holds can't. ig-token-refresh.js renews it daily once it's > 50 days old.
+// META_ACCESS_TOKEN stays as the fallback, so the test setup works unconnected.
+const IG_SCOPES = 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments';
+const IG_WEBHOOK_FIELDS = 'messages,messaging_postbacks,comments';
+const IG_REFRESH_AFTER_MS = 50 * 86400e3;
+const IG_TOKEN_LIFE_S = 60 * 86400;        // when Meta's answer has no expires_in
+const enc = encodeURIComponent;
+const isoAt = (t) => new Date(t).toISOString();
+
+// The service key bypasses RLS. Returns null when it isn't set (→ env fallback).
+function secretsApi(query, opts = {}) {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) return null;
+  return fetch(`${url}/rest/v1/secrets${query}`, { ...opts,
+    headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...opts.headers } });
+}
+
+// { token, ig_user_id, username, refreshed_at, expires_at } or null.
+async function readIgSecret() {
+  const res = await secretsApi('?key=eq.instagram&select=value&limit=1');
+  if (!res) return null;
+  if (!res.ok) throw new Error(`secrets read failed: ${res.status} ${await res.text()}`);
+  return (await res.json())[0]?.value || null;
+}
+
+async function saveIgSecret(value) {
+  const res = await secretsApi('', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates' },
+                                     body: JSON.stringify({ key: 'instagram', value }) });
+  if (!res) throw new Error('SUPABASE_SERVICE_ROLE_KEY not set');
+  if (!res.ok) throw new Error(`secrets save failed: ${res.status} ${await res.text()}`);
+}
+
+// Graph answers errors as { error: { message } } (graph.instagram.com) or
+// { error_message } (api.instagram.com). Never echoes the token.
+async function igJson(res, what) {
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || d.error) throw new Error(`${what} failed: ${res.status} ${d.error?.message || d.error_message || ''}`.trim());
+  return d;
+}
+
+// Fallback order: the connected account's token (secrets, unexpired) → env
+// META_ACCESS_TOKEN → throw. igId: the DB token is resolved by `me`.
+let lastIgTokenSource = null;
+async function getIgToken() {
+  let s = null;
+  try { s = await readIgSecret(); }
+  catch (e) { console.warn('[meta-service] IG token from DB failed, using env:', e.message); }
+  const fromDb = !!s?.token && !(Date.parse(s.expires_at) <= Date.now());
+  const token  = fromDb ? s.token : process.env.META_ACCESS_TOKEN;
+  if (!token) throw new Error('No Instagram token: connect Instagram or set META_ACCESS_TOKEN');
+  const source = fromDb ? `db (@${s.username || s.ig_user_id})` : 'env';
+  if (source !== lastIgTokenSource) console.log(`[meta-service] IG token from ${source}`);
+  lastIgTokenSource = source;
+  return { token, igId: fromDb ? 'me' : (process.env.META_IG_ID || 'me') };
+}
+
+const igAuthorizeUrl = (redirectUri, state) => 'https://www.instagram.com/oauth/authorize' +
+  `?client_id=${enc(process.env.IG_APP_ID || '')}&redirect_uri=${enc(redirectUri)}` +
+  `&response_type=code&scope=${IG_SCOPES}&state=${enc(state)}`;
+
+// Login code → short-lived token → long-lived → account → saved → subscribed.
+// Saved before subscribing, so a failed subscribe still leaves a working token.
+async function connectInstagram(code, redirectUri, now = Date.now()) {
+  const id = process.env.IG_APP_ID, secret = process.env.IG_APP_SECRET;
+  if (!id || !secret) throw new Error('IG_APP_ID / IG_APP_SECRET not set');
+  const short = await igJson(await fetch('https://api.instagram.com/oauth/access_token', { method: 'POST',
+    body: new URLSearchParams({ client_id: id, client_secret: secret, grant_type: 'authorization_code',
+                                redirect_uri: redirectUri, code }) }), 'code exchange');
+  const shortToken = (short.data?.[0] || short).access_token;   // docs show both shapes
+  const long = await igJson(await fetch('https://graph.instagram.com/access_token?grant_type=ig_exchange_token' +
+    `&client_secret=${enc(secret)}&access_token=${enc(shortToken)}`), 'long-lived exchange');
+  const me = await igJson(await fetch('https://graph.instagram.com/v21.0/me?fields=user_id,username' +
+    `&access_token=${enc(long.access_token)}`), 'account lookup');
+  const s = { token: long.access_token, ig_user_id: String(me.user_id || ''), username: me.username || '',
+              refreshed_at: isoAt(now), expires_at: isoAt(now + (long.expires_in || IG_TOKEN_LIFE_S) * 1000) };
+  await saveIgSecret(s);
+  await igJson(await fetch(`https://graph.instagram.com/v21.0/me/subscribed_apps?subscribed_fields=${IG_WEBHOOK_FIELDS}` +
+    `&access_token=${enc(s.token)}`, { method: 'POST' }), 'webhook subscribe');
+  console.log(`[meta-service] Instagram connected: @${s.username} (${s.ig_user_id}), token until ${s.expires_at}`);
+  return s;
+}
+
+const igTokenDue = (s, now) => !!s?.token && now - Date.parse(s.refreshed_at) > IG_REFRESH_AFTER_MS;
+
+// Daily (ig-token-refresh.js). Never throws. A failure alerts the owner's
+// Telegram (email if that fails) every day until it works or they reconnect.
+async function refreshIgToken(now = Date.now()) {
+  let s = null;
+  try {
+    s = await readIgSecret();
+    if (!igTokenDue(s, now)) return 'not due';
+    const d = await igJson(await fetch('https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token' +
+      `&access_token=${enc(s.token)}`), 'token refresh');
+    await saveIgSecret({ ...s, token: d.access_token, refreshed_at: isoAt(now),
+                         expires_at: isoAt(now + (d.expires_in || IG_TOKEN_LIFE_S) * 1000) });
+    console.log('[meta-service] IG token refreshed');
+    return 'refreshed';
+  } catch (e) {
+    console.error('[meta-service] IG token refresh failed:', e.message);
+    const text = `⚠️ Instagram token refresh failed (${e.message}).` +
+      (s?.expires_at ? ` The token stops working on ${istStamp(s.expires_at)}.` : '') +
+      ' Open the Connect Instagram link again before then, or the bot stops replying on Instagram.';
+    try {
+      const owner = await getSettingJson('telegram_owner');
+      if (!owner?.chat_id) throw new Error('no owner linked');
+      await sendTelegram(owner.chat_id, text);
+    } catch (e2) {
+      await sendAlertEmail(null, '⚠️ Instagram token refresh failed', 'Instagram token refresh failed', text,
+        `Sent by email because the Telegram alert failed (${e2.message}).`);
+    }
+    return 'failed';
+  }
+}
+
 // ── Fetch a DM sender's Instagram profile ─────────────────────
 // Uses the User Profile API. Consent is auto-granted once the user DMs us.
 // Returns { name, username, profile_pic, id } or null on any failure.
 async function fetchInstagramProfile(igsid) {
-  const token = process.env.META_ACCESS_TOKEN;
-  if (!token) {
-    console.warn('[meta-service] META_ACCESS_TOKEN not set — cannot fetch IG profile');
-    return null;
-  }
   try {
+    const { token } = await getIgToken();
     const res = await fetch(
       `https://graph.instagram.com/v21.0/${encodeURIComponent(igsid)}` +
       `?fields=name,username,profile_pic&access_token=${encodeURIComponent(token)}`
@@ -715,10 +831,7 @@ async function processEcho(ev, platform, settleMs = 5000) {
 // POST https://graph.instagram.com/v21.0/me/messages
 // Note: 24-hour window — you may only reply within 24h of the user's last message.
 async function sendInstagramMessage(recipientId, text) {
-  const token = process.env.META_ACCESS_TOKEN;
-  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
-
-  const igId = process.env.META_IG_ID || 'me';
+  const { token, igId } = await getIgToken();
   const res  = await fetch(`https://graph.instagram.com/v21.0/${igId}/messages`, {
     method:  'POST',
     headers: {
@@ -860,12 +973,9 @@ function buildBranchButtonMessage(text, branches = []) {
 }
 
 async function sendCommentPrivateReply(commentId, text, branches = []) {
-  const token = process.env.META_ACCESS_TOKEN;
-  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
+  const { token, igId } = await getIgToken();
 
   const { message } = buildBranchButtonMessage(text, branches);
-
-  const igId = process.env.META_IG_ID || 'me';
   const res  = await fetch(`https://graph.instagram.com/v21.0/${igId}/messages`, {
     method:  'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -941,8 +1051,7 @@ async function replyToFacebookComment(commentId, text) {
 
 // Public reply posted underneath the comment. Needs instagram_business_manage_comments.
 async function replyToComment(commentId, text) {
-  const token = process.env.META_ACCESS_TOKEN;
-  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
+  const { token } = await getIgToken();
 
   const res = await fetch(
     `https://graph.instagram.com/v21.0/${encodeURIComponent(commentId)}/replies`,
@@ -966,8 +1075,7 @@ async function replyToComment(commentId, text) {
 // like a shared post) and permalink → the lead's post_url. One Graph call. Throws
 // when the post can't be fetched; an offer that can't be parsed is just null.
 async function fetchCommentPost(cfg, mediaId) {
-  const token = process.env.META_ACCESS_TOKEN;
-  if (!token) throw new Error('Missing META_ACCESS_TOKEN env var');
+  const { token } = await getIgToken();
   const res = await fetch(`https://graph.instagram.com/v21.0/${encodeURIComponent(mediaId)}` +
                           `?fields=caption,permalink&access_token=${encodeURIComponent(token)}`);
   const post = await res.json().catch(() => ({}));
@@ -2263,4 +2371,10 @@ module.exports = {
   parseOfferCaption,
   resolveOffer,
   isOfferFresh,
+  // S9 Instagram connect + token storage
+  getIgToken,
+  igAuthorizeUrl,
+  connectInstagram,
+  igTokenDue,
+  refreshIgToken,
 };

@@ -870,7 +870,12 @@ botReply
   non-price, FYIs, once per incident, email fallback, telegram-webhook secret/binding), the S4 owner
   answers and the S6 owner timeouts (fake clock, one reminder, one fallback, staff reply, quiet skip),
   and the S7 comment flow (mode gate, post offer → branch tap → quoted, cache, lookup failure, payload fields),
-  and the S8 report text.
+  and the S8 report text, and S9 (authorize link, code exchange → saved via the service key → subscribed,
+  token fallback order DB → env → throw, 50-day refresh window, failed refresh → Telegram alert).
+- **Instagram token (S9):** every IG Graph call takes its token from `getIgToken()`: the account connected
+  through the Connect link ([ig-connect](netlify/functions/ig-connect.js), stored in `secrets.instagram`
+  with its expiry), else `META_ACCESS_TOKEN`. The log says which (`IG token from db (@user)` / `from env`).
+  [ig-token-refresh](netlify/functions/ig-token-refresh.js) renews it daily once > 50 days old.
 
 ### Instagram comment automation (comment → DM → branch routing)
 
@@ -1049,6 +1054,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | [get-config](netlify/functions/get-config.js) | `/.netlify/functions/get-config` | GET | — | Returns `{supabaseUrl, supabaseAnonKey}` from env. `Cache-Control: public, max-age=300`. `500` if env missing. |
 | [meta-webhook](netlify/functions/meta-webhook.mjs) | **`/webhook/meta`** | GET / POST | Meta payload | Modern Request/Response syntax (`.mjs` — the project is CommonJS). GET → `verifyWebhook()`, echoes `hub.challenge` as **plain text** (403 on mismatch). POST → HMAC check → `200 {status:'ok'}` **immediately**, then `handleWebhook()` runs under `context.waitUntil` (60 s limit) — a slow bot turn (27 s seen on a first-seen shared post) no longer blows Meta's delivery timeout and triggers retries. |
 | [telegram-webhook](netlify/functions/telegram-webhook.mjs) | **`/webhook/telegram`** | POST | Telegram update | `.mjs` like meta-webhook. `403` unless `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET` (unset = reject all). `/start <TELEGRAM_LINK_CODE>` → `settings.telegram_owner` + "✅ Linked" reply; anything else `200`, then `handleOwnerUpdate` via `waitUntil` (S4: the owner's answers + [Don't save] taps; other chats ignored). |
+| [ig-connect](netlify/functions/ig-connect.js) | `/.netlify/functions/ig-connect` | GET | `?start=<IG_CONNECT_CODE>` / Instagram's `?code&state` | S9 Connect link. `start` → `302` to Instagram login (`state` = the code); the callback → `connectInstagram`: short → long-lived token (60 d) → `secrets.instagram` → `me/subscribed_apps` (`messages,messaging_postbacks,comments`). Plain-text result page. `403` without the code (unset = always). |
 | [meta-send](netlify/functions/meta-send.js) | `/.netlify/functions/meta-send` | POST | `{leadId, message}` | Resolves platform from the lead row, sends, then persists. `400` bad input / no recipient id / unsupported source, `404` lead not found, `502` send failure. Max 1000 bytes. |
 | [meta-status](netlify/functions/meta-status.js) | `/.netlify/functions/meta-status` | GET | — | `{instagram:{connected,name}, facebook:{…}, whatsapp:{…}}`. `Cache-Control: no-store`. Never returns tokens. |
 | [send-feedback-email](netlify/functions/send-feedback-email.js) | `/.netlify/functions/send-feedback-email` | POST | `{branch_name, entry_date, feedback_text, submitted_by}` | Resend email to the admin. |
@@ -1057,6 +1063,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | [send-automation-report](netlify/functions/send-automation-report.js) | `/.netlify/functions/send-automation-report` | POST | `{automation_id, date_from, date_to}` | Builds a styled HTML→`.doc`, base64-attaches it to a Resend email, updates `last_sent_at`. |
 | [send-automation-webhook](netlify/functions/send-automation-webhook.js) | `/.netlify/functions/send-automation-webhook` | POST | `{automation_id, date_from, date_to}` | Builds a per-branch plain-text block `{report: "…"}`, POSTs to `webhook_url`, **3 retries** w/ backoff, updates `last_sent_at`, `502` on final failure. |
 | [check-automations](netlify/functions/check-automations.js) | scheduled | cron | — | `schedule('0 18 * * *')`. Fires due scheduled automations (see [§13](#13-report-automations)). |
+| [ig-token-refresh](netlify/functions/ig-token-refresh.js) | scheduled | cron | — | `schedule('0 4 * * *')`. `refreshIgToken`: renews the connected IG token once it's > 50 days old; a failure keeps the old token and alerts the owner's Telegram (email if that fails), daily until fixed. |
 | [bot-hourly](netlify/functions/bot-hourly.js) | scheduled | cron | — | `schedule('0 * * * *')`, live mode only. Chats with no message for `chatbot_config.lead_quiet_hours` (default 2) → `pushLead` (lead push, see §15). First, open owner price questions → `runOwnerTimer` (S6: reminder after `owner_remind_hours`, `owner_no_reply` fallback after `owner_fallback_hours`). Trigger by hand from the Netlify UI to test. |
 | [send-bot-report](netlify/functions/send-bot-report.js) | scheduled | cron | — | `schedule('30 3 * * *')`. Chatbot metrics report to the owner's Telegram (`settings.telegram_owner`) per `report_frequency` (daily / weekly on Mondays / off). |
 
@@ -1110,7 +1117,8 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 **Indexes**: `idx_leads_branch`, `idx_leads_instagram_user`, `idx_leads_facebook_user`,
 `idx_leads_whatsapp_user`, `idx_lead_notes_lead`, `idx_lead_messages_lead`.
 
-**RLS is DISABLED on every table.** Migrations are run by hand in the Supabase SQL editor —
+**RLS is DISABLED on every table**, except **`secrets`** (S9: `key` text PK, `value` jsonb; RLS on, no
+policy, anon/authenticated grants revoked), which only `SUPABASE_SERVICE_ROLE_KEY` can touch. Migrations are run by hand in the Supabase SQL editor —
 there is no migration framework in the repo.
 
 ### ⚠️ Known schema-file drift — trust the code, not the SQL file
@@ -1137,13 +1145,16 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 |---|---|---|
 | `SUPABASE_URL` | all DB-touching functions | Supabase project URL |
 | `SUPABASE_ANON_KEY` | all DB-touching functions | Public anon key (also served to the browser) |
+| `SUPABASE_SERVICE_ROLE_KEY` | `getIgToken()` / Connect / refresh (meta-service) | **Secret**, server-only. The only key that can read the `secrets` table (RLS on, no anon policy). Unset = IG token from env only |
 | `RESEND_API_KEY` | 5 email functions + bot alert fallback | Resend API key — **secret** |
 | `META_APP_ID` | meta-service `getConfig()` | Meta app id |
 | `META_APP_SECRET` | `verifyMetaSignature()` | HMAC-verifies the `X-Hub-Signature-256` on every webhook POST (see [§20](#20-security-model-quirks--known-issues)) |
 | `META_VERIFY_TOKEN` | `verifyWebhook()` | Webhook GET handshake — shared by IG, FB **and** WA |
-| `META_ACCESS_TOKEN` | IG profile fetch + IG send | Instagram token (`IGAA…`) |
+| `META_ACCESS_TOKEN` | IG profile fetch + IG send (fallback) | Instagram token (`IGAA…`). Since S9 only used when no unexpired connected token is in `secrets` |
+| `IG_APP_ID` / `IG_APP_SECRET` | ig-connect, `connectInstagram()` | The **Instagram** app id/secret (API setup with Instagram login), not `META_APP_ID` |
+| `IG_CONNECT_CODE` | ig-connect | Gates the Connect link `<site>/.netlify/functions/ig-connect?start=<code>`. Unset = connect disabled. Change it to stop anyone else connecting |
 | `META_PAGE_ACCESS_TOKEN` | FB profile fetch + FB send | Facebook **Page** access token |
-| `META_IG_ID` | IG send (optional) | Defaults to `me` |
+| `META_IG_ID` | IG send (optional) | Defaults to `me`. Ignored for a connected (DB) token, which always uses `me` |
 | `META_BRANCH_ID` | `processIncomingMessage()` | Branch UUID every inbound lead attaches to |
 | `WHATSAPP_PHONE_NUMBER_ID` | WA send + WA status | Numeric **phone number ID**, not the number |
 | `WHATSAPP_ACCESS_TOKEN` | WA send + WA status | **Use a System User token with expiry Never** — the dashboard token dies in 24 h |
@@ -1152,7 +1163,7 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 | `TELEGRAM_BOT_TOKEN` | `sendTelegram()` (owner alerts) | @BotFather token — **secret**. Unset = alerts go by email |
 | `TELEGRAM_WEBHOOK_SECRET` | telegram-webhook | Must match `secret_token` given to `setWebhook`; unset = the webhook rejects everything |
 | `TELEGRAM_LINK_CODE` | telegram-webhook | Owner opens `t.me/<bot>?start=<code>` to receive alerts. Change it to stop anyone else re-linking |
-| `URL` | check-automations | Injected by Netlify; falls back to the hardcoded site URL |
+| `URL` | check-automations, ig-connect | Injected by Netlify; check-automations falls back to the hardcoded site URL, ig-connect to the request host (builds the OAuth redirect URI) |
 | `INTERNAL_FUNCTION_SECRET` | check-automations → send-automation-* | Shared secret authorizing the cron's calls to the (now PIN/secret-gated) send endpoints. **Required** for scheduled automations to fire. |
 
 > **Env vars are read at deploy time — after adding or changing one you must trigger a
@@ -1237,6 +1248,9 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
   enforced at the app/PIN layer only** — the anon key is not a security boundary; anyone who
   opens devtools can read and write the database directly. (Tightening this needs Supabase
   Auth or moving writes to the service_role — deferred, see [§22](#22-roadmap--open-items).)
+- **Exception: `secrets` (S9)** holds the connected Instagram token. RLS on with **no** policy, so
+  the anon key reads nothing; only the server's `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS) can. The
+  `SUPABASE_ENABLE_RLS.sql` loop skips it. Never give it a policy.
 - The anon key is public *by design* and safe to ship. **Never commit** the Netlify deploy
   token or `RESEND_API_KEY`.
 - **`X-Hub-Signature-256` is now verified (2026-08-13).** `META_APP_SECRET` HMAC-checks the
@@ -1284,6 +1298,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-08 | — | **Connect Instagram + secure token storage (service tracker S9, Q16/Q20/Q28).** New `secrets` table (RLS on, no anon policy; SQL in [SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql), and [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql) now skips it) read only with the new `SUPABASE_SERVICE_ROLE_KEY`. New [ig-connect.js](netlify/functions/ig-connect.js) (Connect link gated by `IG_CONNECT_CODE` → Instagram login → `connectInstagram`: long-lived token → `secrets.instagram` → webhook subscription) and scheduled [ig-token-refresh.js](netlify/functions/ig-token-refresh.js) (`refreshIgToken` > 50 days; failure → Telegram alert). `getIgToken()` replaces the 6 `META_ACCESS_TOKEN` reads (5 in meta-service + meta-status); env stays the fallback. New env `SUPABASE_SERVICE_ROLE_KEY`, `IG_APP_ID`, `IG_APP_SECRET`, `IG_CONNECT_CODE`. See §15. |
 | 2026-10-06 | — | **Daily report → Telegram (service tracker S8, Q22).** [send-bot-report.js](netlify/functions/send-bot-report.js) sends the same numbers as one plain-text Telegram message to the owner (`sendTelegram` → `settings.telegram_owner`) instead of the Resend email; ⚠️ in front when missed medical > 0. No owner linked / send failed → logged (500 / 502), no email fallback. `reportHtml` → `reportText`. Settings tooltips updated (alert email = Telegram fallback for alerts only). |
 | 2026-10-06 | — | **Comment automation in the service (service tracker S7, Q6/Q27).** `processComment` follows `chatbot_config.mode`: off → nothing, shadow → one `bot_shadow_log` row (`lead_id: null`) with what it would send, live → as before. Instagram comments now carry `media.id`; the post's caption + permalink are fetched (one Graph call, alongside the DM) and the caption goes through `resolveOffer` (+ `offer_cache`), so the lead's `bot_state` gets `last_offer`, `source: 'instagram_comment'` and `post_url`, and the bot quotes the post's offer after the branch tap. `pushLead` sends `source` / `post_url` from `bot_state`. `matchCommentRule` matches at the start of a word (no more "great" → `rate`). Test DB `comment_rules` = the approved Q27 rule. See §15. |
 | 2026-10-06 | — | **Owner timeouts (service tracker S6, Q14).** [bot-hourly.js](netlify/functions/bot-hourly.js) now runs `runOwnerTimer` on every open owner price question first: one Telegram reminder (answerable, `force_reply`) after `owner_remind_hours` (2), and after `owner_fallback_hours` (20) an `owner_no_reply` handoff: the customer gets the new `canned.owner_no_reply` copy and the lead is pushed with `reason: owner_no_reply`. A Telegram price question no longer settles the chat at the handoff, and the quiet check skips it until it's answered or falls back. A staff reply since the handoff closes it. `findLeadByAlertMsgId` also matches the reminder's message id. New Settings fields: owner reminder / fallback hours (decimals, fallback ≤ 23) and the owner-no-reply copy. See §15. |

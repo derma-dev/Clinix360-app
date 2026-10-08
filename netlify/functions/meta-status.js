@@ -1,14 +1,15 @@
 // ============================================================
 // Netlify Function: meta-status
 // Read-only connection check for the admin "Connected Accounts" panel.
-// Pings the Graph API per platform using the env token and reports
+// Pings the Graph API per platform using the server-side token and reports
 // { connected, name }. No secret ever leaves the server.
 // ============================================================
 
+const { getIgToken } = require('./utils/meta-service');
+
 async function checkInstagram() {
-  const token = process.env.META_ACCESS_TOKEN;
-  if (!token) return { connected: false };
   try {
+    const { token } = await getIgToken();   // S9: the connected account, else env
     const res = await fetch(`https://graph.instagram.com/me?fields=user_id,username&access_token=${encodeURIComponent(token)}`);
     if (!res.ok) return { connected: false };
     const d = await res.json();

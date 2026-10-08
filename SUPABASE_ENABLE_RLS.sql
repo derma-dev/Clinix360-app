@@ -30,6 +30,7 @@ BEGIN
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'public' AND c.relkind = 'r'
+      AND c.relname <> 'secrets'   -- server-only (S9): must never get the allow-all policy
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t.relname);
     EXECUTE format('DROP POLICY IF EXISTS allow_anon_all ON %I;', t.relname);

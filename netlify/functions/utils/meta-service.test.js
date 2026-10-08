@@ -2328,6 +2328,122 @@ assert.equal(extractComments({}).length, 0);
       delete process.env[k];
   }
 
+  // ── S9 Instagram connect + secure token storage (Q16 Q20 Q28) ──
+  {
+    const { getIgToken, igAuthorizeUrl, connectInstagram, igTokenDue, refreshIgToken, sendInstagramMessage } = require('./meta-service');
+    const DAY = 86400e3, NOW = Date.parse('2026-10-08T00:00:00Z');
+    const isoDaysAgo = (d, now) => new Date(now - d * DAY).toISOString();
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.IG_APP_ID = 'APP1';
+    process.env.IG_APP_SECRET = 'APPSECRET';
+    const s9 = ({ secret = null, secretsStatus = 200, failAt = null } = {}) => {
+      const st = { secret, saved: [], calls: [], tg: [], mails: [], secretHeaders: [] };
+      const json = (v, status = 200) => ({ ok: status < 400, status, json: async () => v, text: async () => JSON.stringify(v) });
+      global.fetch = async (url, opts = {}) => {
+        st.calls.push(String(url));
+        if (failAt && String(url).includes(failAt)) return json({ error: { message: 'Invalid OAuth access token' } }, 400);
+        if (url.startsWith('http://supabase.test/rest/v1/secrets')) {
+          st.secretHeaders.push(opts.headers.apikey);
+          if (opts.method === 'POST') { const b = JSON.parse(opts.body); st.saved.push(b); st.secret = b.value; return json(null, 201); }
+          return json(secretsStatus === 200 ? (st.secret ? [{ value: st.secret }] : []) : { message: 'no' }, secretsStatus);
+        }
+        if (url.includes('settings?key=eq.telegram_owner')) return json([{ value: JSON.stringify({ chat_id: 42 }) }]);
+        if (url.includes('api.telegram.org')) { st.tg.push(JSON.parse(opts.body)); return json({ ok: true, result: { message_id: 1 } }); }
+        if (url.includes('api.resend.com')) { st.mails.push(JSON.parse(opts.body)); return json({}); }
+        if (url === 'https://api.instagram.com/oauth/access_token') {
+          st.exchange = Object.fromEntries(opts.body);
+          return json({ data: [{ access_token: 'SHORT', user_id: '111', permissions: 'instagram_business_basic' }] });
+        }
+        if (url.includes('graph.instagram.com/access_token?grant_type=ig_exchange_token')) return json({ access_token: 'LONG', token_type: 'bearer', expires_in: 5184000 });
+        if (url.includes('graph.instagram.com/v21.0/me?fields=user_id,username')) return json({ user_id: 17841400000, username: 'dskin.test' });
+        if (url.includes('/me/subscribed_apps')) { st.subscribed = opts.method; return json({ success: true }); }
+        if (url.includes('refresh_access_token')) return json({ access_token: 'LONG2', expires_in: 5184000 });
+        if (url.includes('graph.instagram.com')) { st.send = { url, auth: opts.headers?.Authorization }; return json({ message_id: 'm' }); }
+        throw new Error('unexpected fetch ' + url);
+      };
+      return st;
+    };
+
+    // Authorize link: our app, the exact redirect URI, all three scopes, the state
+    const au = new URL(igAuthorizeUrl('https://site.test/.netlify/functions/ig-connect', 'CODE_1'));
+    assert.equal(au.origin + au.pathname, 'https://www.instagram.com/oauth/authorize');
+    assert.deepEqual([au.searchParams.get('client_id'), au.searchParams.get('redirect_uri'), au.searchParams.get('state'),
+                      au.searchParams.get('response_type')],
+                     ['APP1', 'https://site.test/.netlify/functions/ig-connect', 'CODE_1', 'code']);
+    assert.match(au.searchParams.get('scope'), /instagram_business_manage_messages/);
+    assert.match(au.searchParams.get('scope'), /instagram_business_manage_comments/);
+
+    // Code exchange: code → short → long-lived → account → saved (service key) → subscribed
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
+    let st = s9();
+    const s = await connectInstagram('AUTHCODE', 'https://site.test/cb', NOW);
+    assert.deepEqual(st.exchange, { client_id: 'APP1', client_secret: 'APPSECRET', grant_type: 'authorization_code',
+                                    redirect_uri: 'https://site.test/cb', code: 'AUTHCODE' });
+    assert.ok(st.calls.some(u => u.includes('ig_exchange_token') && u.includes('access_token=SHORT')));
+    assert.deepEqual(st.saved, [{ key: 'instagram', value: { token: 'LONG', ig_user_id: '17841400000', username: 'dskin.test',
+      refreshed_at: '2026-10-08T00:00:00.000Z', expires_at: '2026-12-07T00:00:00.000Z' } }]);
+    assert.deepEqual(st.secretHeaders, ['service_key'], 'secrets go through the service key, never the anon key');
+    assert.equal(st.subscribed, 'POST');
+    assert.ok(st.calls.some(u => u.includes('subscribed_fields=messages,messaging_postbacks,comments') && u.includes('access_token=LONG')));
+    assert.equal(s.username, 'dskin.test');
+    // A failed step throws with Meta's reason, and nothing is saved
+    st = s9({ failAt: 'ig_exchange_token' });
+    await assert.rejects(connectInstagram('AUTHCODE', 'https://site.test/cb', NOW), /long-lived exchange failed: 400 Invalid OAuth/);
+    assert.equal(st.saved.length, 0);
+
+    // Fallback order: DB token → env → throw
+    process.env.META_ACCESS_TOKEN = 'env_token';
+    process.env.META_IG_ID = 'ENV_IG';
+    const fresh = { token: 'DB_TOKEN', ig_user_id: '1784', username: 'dskin.test',
+                    refreshed_at: new Date(Date.now() - DAY).toISOString(), expires_at: new Date(Date.now() + 59 * DAY).toISOString() };
+    s9({ secret: fresh });
+    assert.deepEqual(await getIgToken(), { token: 'DB_TOKEN', igId: 'me' });
+    st = s9({ secret: fresh });
+    await sendInstagramMessage('IGSID_1', 'hi');
+    assert.deepEqual(st.send, { url: 'https://graph.instagram.com/v21.0/me/messages', auth: 'Bearer DB_TOKEN' }, 'sends use the DB token');
+    s9({ secret: { ...fresh, expires_at: new Date(Date.now() - 1000).toISOString() } });
+    assert.deepEqual(await getIgToken(), { token: 'env_token', igId: 'ENV_IG' }, 'expired DB token → env');
+    s9();
+    assert.equal((await getIgToken()).token, 'env_token', 'not connected → env');
+    s9({ secret: fresh, secretsStatus: 404 });
+    assert.equal((await getIgToken()).token, 'env_token', 'secrets unreadable (no table yet) → env');
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    st = s9({ secret: fresh });
+    assert.equal((await getIgToken()).token, 'env_token', 'no service key → env, DB not asked');
+    assert.equal(st.calls.length, 0);
+    delete process.env.META_ACCESS_TOKEN;
+    await assert.rejects(getIgToken(), /No Instagram token/);
+    delete process.env.META_IG_ID;
+
+    // Refresh window: only past 50 days, only a stored token
+    assert.equal(igTokenDue({ token: 't', refreshed_at: isoDaysAgo(50, NOW) }, NOW), false);
+    assert.equal(igTokenDue({ token: 't', refreshed_at: isoDaysAgo(50.1, NOW) }, NOW), true);
+    assert.equal(igTokenDue(null, NOW), false);
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
+    process.env.TELEGRAM_BOT_TOKEN = 'tg';
+    const old = { ...fresh, refreshed_at: isoDaysAgo(51, NOW), expires_at: isoDaysAgo(-9, NOW) };
+    st = s9({ secret: { ...fresh, refreshed_at: isoDaysAgo(10, NOW) } });
+    assert.equal(await refreshIgToken(NOW), 'not due');
+    assert.equal(st.saved.length + st.tg.length, 0);
+    st = s9({ secret: old });
+    assert.equal(await refreshIgToken(NOW), 'refreshed');
+    assert.ok(st.calls.some(u => u.includes('grant_type=ig_refresh_token') && u.includes('access_token=DB_TOKEN')));
+    assert.deepEqual(st.saved[0].value, { ...old, token: 'LONG2', refreshed_at: '2026-10-08T00:00:00.000Z', expires_at: '2026-12-07T00:00:00.000Z' });
+    // A failed refresh keeps the old token and alerts the owner's Telegram
+    st = s9({ secret: old, failAt: 'refresh_access_token' });
+    assert.equal(await refreshIgToken(NOW), 'failed');
+    assert.equal(st.saved.length, 0);
+    assert.equal(st.tg.length, 1);
+    assert.equal(st.tg[0].chat_id, 42);
+    assert.match(st.tg[0].text, /Instagram token refresh failed \(token refresh failed: 400 Invalid OAuth access token\)/);
+    assert.match(st.tg[0].text, /stops working on 17 Oct/);
+    assert.ok(!st.tg[0].text.includes('DB_TOKEN'), 'the token never appears in an alert');
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'IG_APP_ID', 'IG_APP_SECRET', 'TELEGRAM_BOT_TOKEN'])
+      delete process.env[k];
+  }
+
   global.fetch = realFetch;
   console.log('meta-service: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });
