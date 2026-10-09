@@ -26,7 +26,7 @@ for (const line of fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split(/\r?\n
   if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
 }
 
-const { classifyInbound, callAssistant, parseOfferCaption } = require('../netlify/functions/utils/meta-service');
+const { classifyInbound, callAssistant, settleDecision, parseOfferCaption } = require('../netlify/functions/utils/meta-service');
 
 const CORPUS = path.join(ROOT, 'artifacts', 'data', 'ig_export_history.jsonl');
 const args = process.argv.slice(2);
@@ -111,6 +111,10 @@ async function withBackoff(fn) {
         await sleep(wait);
         continue;   // a quota wait doesn't consume a retry attempt
       }
+      // Any other quota 429 (no retry time, or "retry in 17h…") = the daily cap
+      // (free tier: 500/day per model): stop, don't burn the sample as error rows.
+      if (/\b429\b/.test(msg) && /exceeded your current quota/i.test(msg))
+        throw new QuotaExceeded(msg.split('\n')[0]);
       if (!/\b(429|5\d\d)\b/.test(msg) || a >= 4) throw e;
       console.warn(`  [replay] ${msg.split('\n')[0]} — backoff ${2 ** a * 2000}ms`);
       await sleep(2 ** a * 2000);
@@ -142,7 +146,7 @@ function staffReplyAfter(messages, i) {
 async function replayThread(thread, cfg, append) {
   const cap = Number(cfg.turn_cap ?? 10);
   const ageCapMs = Number(cfg.conversation_age_cap_days ?? 7) * 86400000;
-  let turns = 0, firstAt = null, ageResetAt = null, lastOffer = null;
+  let turns = 0, firstAt = null, ageResetAt = null, lastOffer = null, leadCategory = null;
 
   const msgs = thread.messages;
   for (let i = 0; i < msgs.length; i++) {
@@ -197,8 +201,9 @@ async function replayThread(thread, cfg, append) {
           let decision = await withBackoff(() =>
             callAssistant({ model: cfg.model, kb: cfg.kb, history, inboundText, offer }));
           row.latency_ms = Date.now() - t0;
-          // Layer 2 — is_medical overrides the model's own reply (same as botReply).
-          if (decision.is_medical) decision = { safety_net: 'medical', reason: 'medical', reply: '', handoff: true };
+          // Same post-model rules as botReply (is_medical, misc ack, Q30 price-only kb_miss).
+          decision = settleDecision(decision, leadCategory, cfg);
+          if (decision.category === 'lead') leadCategory = 'lead';
           row.decision = offer ? { ...decision, offer } : decision;
           // Counter ticks only on a drafted normal lead reply (live ticks on sends;
           // handoff/non-lead turns are terminal there and don't tick).
@@ -241,13 +246,14 @@ const RUN = new Date().toISOString();
   const cfg = await loadConfig();
   console.log(`[replay] config: model=${cfg.model} mode=${cfg.mode} turn_cap=${cfg.turn_cap} age_cap=${cfg.conversation_age_cap_days}d kb=${cfg.kb?.entries?.length} entries`);
 
-  // Resume: skip threads whose last row is marked done.
+  // Resume: skip threads whose last row is marked done. A stopped run leaves one
+  // half-replayed thread; its rows are dropped so the redo can't duplicate them.
   const done = new Set();
   if (fs.existsSync(OUT)) {
-    for (const l of fs.readFileSync(OUT, 'utf8').split('\n')) {
-      if (!l.trim()) continue;
-      try { const r = JSON.parse(l); if (r.done) done.add(r.thread_id); } catch {}
-    }
+    const lines = fs.readFileSync(OUT, 'utf8').split('\n').filter(l => l.trim());
+    const ids = lines.map(l => { try { const r = JSON.parse(l); if (r.done) done.add(r.thread_id); return r.thread_id; } catch { return null; } });
+    const kept = lines.filter((l, i) => done.has(ids[i]));
+    if (kept.length < lines.length) fs.writeFileSync(OUT, kept.map(l => l + '\n').join(''));
   }
   const todo = selected.filter(t => !done.has(t.thread_id));
   console.log(`[replay] output ${path.relative(ROOT, OUT)} · resumable (${done.size} threads already done, ${todo.length} to go)`);

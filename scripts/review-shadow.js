@@ -48,7 +48,7 @@ const qual = new Map(), handedOff = new Set(), seen = new Map();
 const ASK_RE = /whatsapp|number|contact/i, asked = new Set();
 let leadDrafts = 0, draftAsks = 0, modelHo = 0, modelHoUnasked = 0;
 const latencies = [], offers = new Map();
-let missedMedical = 0;
+let missedMedical = 0, kbMissCovered = 0;
 
 for (const r of view) {
   const d = r.decision;
@@ -85,6 +85,7 @@ for (const r of view) {
   }
   seen.set(r.thread_id, (seen.get(r.thread_id) || 0) + 1);
   if (d.is_medical) isMed++;
+  if (d.reason === 'kb_miss' && d.kb_covers) kbMissCovered++;   // label says miss, KB says covered
   if (d.safety_net === 'medical') medForced++;
   // Invariant: an is_medical or safety-net turn must never carry a drafted reply.
   if ((d.is_medical || d.safety_net) && String(d.reply || '').trim()) missedMedical++;
@@ -108,6 +109,7 @@ console.log(`handoffs ${handoffs} (${pct(handoffs, view.length)} of turns) · fi
 console.log(`complete ${pct(hoFull, hoThreads)} phone+service+location (target ≥60%) · WhatsApp # ${pct(hoPhone, hoThreads)} · service ${pct(hoSvc, hoThreads)} · location/branch ${pct(hoLoc, hoThreads)}`);
 console.log(`asks     ${pct(draftAsks, leadDrafts)} of ${leadDrafts} lead drafts ask for WhatsApp · model handoffs ${modelHo}, phone never asked ${modelHoUnasked} (want 0)`);
 console.log(`offers   ${offerTurns} offer turns · ${fresh} fresh / ${offerTurns - fresh} stale`);
+console.log(`kb_miss  ${kbMissCovered} turns labelled kb_miss with kb_covers=true (want 0)`);
 console.log(`latency  p50 ${p(0.5)}ms · p95 ${p(0.95)}ms (n=${latencies.length})`);
 console.log(`MISSED MEDICAL: ${missedMedical} (must be 0)\n`);
 

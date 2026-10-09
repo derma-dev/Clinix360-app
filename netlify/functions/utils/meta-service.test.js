@@ -1770,30 +1770,40 @@ assert.equal(extractComments({}).length, 0);
       delete process.env[k];
   }
 
-  // ── send-bot-report: #18 metrics + frequency gate ──
+  // ── send-bot-report: report numbers + frequency gate ──
   {
     const { computeBotMetrics, reportWindowDays } = require('../send-bot-report');
     const q = (o) => ({ qualification: o });
-    const handoffs = [
-      { id: 'a', bot_state: { ...q({ phone: '9876543210', service: 'laser', branch: 'b1' }), handoff_reason: 'qualified' } },
-      { id: 'b', bot_state: { ...q({ phone: '9876543210', service: 'laser', location: 'Adajan' }), handoff_reason: 'wants_booking' } },
-      { id: 'c', bot_state: { ...q({ service: 'laser' }), handoff_reason: 'kb_miss' } },
-      { id: 'd', bot_state: { handoff_reason: 'medical' } },
-      { id: 'e', bot_state: { handoff_reason: 'emergency' } },
-      { id: 'f', bot_state: { handoff_reason: 'turn_cap' } },
+    const SINCE = '2026-10-08T03:30:00.000Z', IN = '2026-10-08T10:00:00.000Z', OLD = '2026-10-01T10:00:00.000Z';
+    const stamped = [
+      { bot_state: { handoff_at: IN, handoff_reason: 'qualified' } },
+      { bot_state: { handoff_at: IN, handoff_reason: 'kb_miss', owner_asked_at: IN } },                   // asked, open
+      { bot_state: { handoff_at: IN, handoff_reason: 'qualified', owner_asked_at: IN, owner_answered_at: IN } }, // asked + answered
+      { bot_state: { handoff_at: IN, handoff_reason: 'owner_no_reply', owner_asked_at: OLD } },           // asked yesterday, fell back today
+      { bot_state: { handoff_at: IN, handoff_reason: 'medical' } },
+      { bot_state: { handoff_at: IN, handoff_reason: 'emergency' } },
+      { bot_state: { handoff_at: IN, handoff_reason: 'turn_cap' } },
+      { bot_state: { handoff_at: OLD, handoff_reason: 'turn_cap', lead_pushed: { potential_lead: OLD, lead: IN } } }, // old handoff not counted; 1 push
+      { bot_state: { lead_pushed: { potential_lead: IN }, lead_push_alerted: { lead: IN } } },            // 1 push + 1 failed
+      { bot_state: { lead_pushed: { lead: IN }, lead_push_alerted: { lead: IN } } },                      // failed, then retried OK
     ];
-    const messages = [
-      // d: earlier bot reply, then the medical inbound → not missed
-      { lead_id: 'd', is_bot: true,  direction: 'outgoing', created_at: '2026-09-23T10:00:00Z' },
-      { lead_id: 'd', is_bot: false, direction: 'incoming', created_at: '2026-09-23T10:01:00Z' },
-      // e: bot replied AFTER the emergency inbound → missed
-      { lead_id: 'e', is_bot: false, direction: 'incoming', created_at: '2026-09-23T10:00:00Z' },
-      { lead_id: 'e', is_bot: true,  direction: 'outgoing', created_at: '2026-09-23T10:00:05Z' },
+    const chats = [
+      { id: 'a', category: 'lead', bot_state: q({ phone: '9876543210', service: 'laser', branch: 'Dwarka' }) },  // complete
+      { id: 'b', category: 'lead', bot_state: q({ phone: '9876543210', service: 'PRP', location: 'Adajan' }) },  // complete
+      { id: 'c', category: 'lead', bot_state: q({ phone: '9876543210', service: 'laser' }) },  // potential: no branch
+      { id: 'd', category: 'lead', bot_state: q({ service: 'laser', branch: 'Dwarka' }) },     // potential: no phone
+      { id: 'e', category: 'lead', bot_state: q({ phone: '9876543210' }) },                    // general: no service
+      { id: 'f', bot_state: null },                                                            // general: unset category = lead
+      { id: 'g', category: 'collab', bot_state: q({ service: 'laser' }) },                     // not a customer
     ];
-    const m = computeBotMetrics(handoffs, messages, 12);
-    assert.deepEqual(m, { handoffs: 6, complete: 2, pct_complete: 33.3, safety: 2, kb_miss: 1,
-                          turn_cap: 1, missed_medical: 1, bot_messages: 12 });
-    assert.equal(computeBotMetrics([], [], 0).pct_complete, null, 'no handoffs → no % (not NaN)');
+    const m = computeBotMetrics({ chats, stamped, commentIds: ['d', 'f'], botMessages: 12 }, SINCE);
+    assert.deepEqual(m, { chats: 7, complete: 2, potential: 2, general: 2, comment_dms: 2, comment_leads: 1,
+                          top_services: 'laser 3 · PRP 1', branches: 'Dwarka 2 · Adajan 1 · no branch yet 1',
+                          pushed: 3, push_failed: 1, price_asked: 2, price_answered: 1, price_no_reply: 1,
+                          safety: 2, kb_miss: 1, turn_cap: 1, bot_messages: 12 });
+    const empty = computeBotMetrics({ chats: [], stamped: [], commentIds: [], botMessages: 0 }, SINCE);
+    assert.equal(empty.top_services, 'none');
+    assert.equal(empty.branches, 'none');
     assert.equal(reportWindowDays('daily', 3), 1);
     assert.equal(reportWindowDays('weekly', 1), 7, 'weekly fires Mondays');
     assert.equal(reportWindowDays('weekly', 2), null);
@@ -1803,22 +1813,27 @@ assert.equal(extractComments({}).length, 0);
     // S8 (Q22): the report goes to the owner's Telegram as plain text
     const { reportText } = require('../send-bot-report');
     assert.equal(reportText(m, 1), [
-      '⚠️ 📊 DSkin DM Assistant — daily report (last 24 hours)',
+      '📊 DSkin DM Assistant — daily report (last 24 hours)',
       '',
-      'Handoffs to staff: 6',
-      'Complete handoffs: 2 (33.3%) · phone + service + branch, target ≥60%',
+      'Chats: 7',
+      'Complete leads: 2 · phone + service + branch',
+      'Potential leads: 2 · interested, details missing',
+      'General enquiries: 2 · asked a question, no service',
+      'From comments: 2 DMs · 1 became leads',
+      'Top services: laser 3 · PRP 1',
+      'Leads per branch: Dwarka 2 · Adajan 1 · no branch yet 1',
+      '',
+      'Leads sent to Make: 3 · ⚠️ 1 failed, check the webhook',
+      'Price questions to you: 2 · 1 answered · 1 no reply in time',
       'Medical / emergency: 2',
-      'Bot didn’t know (kb_miss): 1 · answer them in Settings → Teach the Bot',
+      'Bot didn’t know (kb_miss): 1',
       'Turn cap reached: 1',
-      'Missed medical: 1 · ⚠️ must be 0, check these threads',
       'Bot messages sent: 12',
       '',
       'Change or stop this report in Settings → Chatbot → Report.',
     ].join('\n'));
-    const quiet = reportText(computeBotMetrics([], [], 0), 7);
-    assert.ok(quiet.startsWith('📊 DSkin DM Assistant — weekly report (last 7 days)'), 'no ⚠️ when nothing was missed');
-    assert.ok(quiet.includes('\nComplete handoffs: 0 · phone'), 'no % when there were no handoffs');
-    assert.ok(quiet.includes('\nMissed medical: 0 · target 0\n'));
+    assert.ok(reportText(empty, 7).includes('\nLeads sent to Make: 0\n'), 'no ⚠️ when nothing failed');
+    assert.ok(reportText(empty, 7).startsWith('📊 DSkin DM Assistant — weekly report (last 7 days)'));
   }
 
   // ── S2 lead push → client webhook (Q7 Q31 Q34) ──

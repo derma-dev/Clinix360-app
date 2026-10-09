@@ -1645,8 +1645,9 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
                       // D17 — the question rides in bot_state so meta-send can capture
                       // the staff answer to it without re-deriving anything. A new
                       // question also resets the S6 timer stamps of the last one.
+                      // owner_asked_at outlives a later handoff, for the report's count.
                       ...(decision.reason === 'kb_miss'
-                        ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500),
+                        ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500), owner_asked_at: new Date().toISOString(),
                             owner_answered_at: null, owner_reminded_at: null, owner_reminder_msg_id: null } : {}) };
   // S3 — owner alert (Q12 Q32). A price question keeps its Telegram message id so
   // the owner's reply maps back to this lead (S4). Sent before the write below so
@@ -2181,6 +2182,27 @@ async function yieldsToBurst(db, leadId, inboundRow, decision) {
   return false;
 }
 
+// The rules applied to the model's decision before acting on it. Shared with
+// scripts/replay-shadow.js so replay measures what live would do.
+function settleDecision(decision, leadCategory, cfg) {
+  if (decision.is_medical) return { safety_net: 'medical', reason: 'medical', reply: '', handoff: true };
+  // A lead's "Ok" / "Thanx" / 👍🏻 comes back misc. On a thread already filed
+  // as a lead that's an acknowledgement, not a non-lead: keep it a lead and
+  // drop the non_lead handoff, so the normal-turn path sends the model's
+  // reply (or nothing, bot still on). A real handoff reason still hands off.
+  if (leadCategory === 'lead' && decision.category === 'misc') {
+    decision = { ...decision, category: 'lead', ...(decision.reason === 'non_lead' && { handoff: false }) };
+  }
+  // Q30 — the owner is asked about unknown PRICES only. Any other question the
+  // KB can't answer: no handoff, the bot says the team will confirm it and keeps
+  // qualifying, and the question goes in the lead summary (team_questions).
+  if (decision.reason === 'kb_miss' && !decision.asks_price) {
+    decision = { ...decision, handoff: false,
+                 reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss') };
+  }
+  return decision;
+}
+
 async function botReply(lead, ev, platform, inboundRow = null) {
   const t0 = Date.now();
   try {
@@ -2244,23 +2266,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
         llmError = err.message;
         decision = { reason: 'llm_error', reply: '', kb_covers: false, handoff: true, category: 'lead' };
       }
-      if (decision.is_medical) {
-        decision = { safety_net: 'medical', reason: 'medical', reply: '', handoff: true };
-      }
-      // A lead's "Ok" / "Thanx" / 👍🏻 comes back misc. On a thread already filed
-      // as a lead that's an acknowledgement, not a non-lead: keep it a lead and
-      // drop the non_lead handoff, so the normal-turn path sends the model's
-      // reply (or nothing, bot still on). A real handoff reason still hands off.
-      if (lead.category === 'lead' && decision.category === 'misc') {
-        decision = { ...decision, category: 'lead', ...(decision.reason === 'non_lead' && { handoff: false }) };
-      }
-      // Q30 — the owner is asked about unknown PRICES only. Any other question the
-      // KB can't answer: no handoff, the bot says the team will confirm it and keeps
-      // qualifying, and the question goes in the lead summary (team_questions below).
-      if (decision.reason === 'kb_miss' && !decision.asks_price) {
-        decision = { ...decision, handoff: false,
-                     reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss') };
-      }
+      decision = settleDecision(decision, lead.category, cfg);
     }
 
     // D19/D24 — shadow: log exactly one row, send nothing, mutate nothing.
@@ -2355,6 +2361,7 @@ module.exports = {
   // chatbot (final plan §3.2/§3.5)
   classifyInbound,
   callAssistant,
+  settleDecision,
   botReply,
   sendByPlatform,
   normalizePhone,
