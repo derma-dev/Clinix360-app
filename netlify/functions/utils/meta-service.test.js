@@ -1571,15 +1571,18 @@ assert.equal(extractComments({}).length, 0);
     let r = await post(update('/start link_abc'));
     assert.equal(r.status, 200);
     assert.deepEqual(calls.upserts, [{ key: 'telegram_owner', value: JSON.stringify({ chat_id: 555, name: 'Gaurav' }) }]);
-    assert.equal(calls.telegrams.length, 1);
+    assert.equal(calls.telegrams.length, 2);
     assert.equal(calls.telegrams[0].chat_id, 555);
-    assert.match(calls.telegrams[0].text, /^✅ Linked/);
+    assert.match(calls.telegrams[0].text, /^✅ Linked[\s\S]*\/mode/);
+    assert.deepEqual(calls.telegrams[1], { commands: [{ command: 'mode', description: 'Switch the bot off / shadow / live' }] },
+                     'S11b: /mode in the bot menu');
+    calls.telegrams = [];
 
     // wrong code, plain /start, other text, non-message updates → 200, nothing done
     for (const body of [update('/start nope', 666), update('/start', 666), update('hello', 666), update('hello'), { update_id: 2 }]) {
       assert.equal((await post(body)).status, 200);
     }
-    assert.equal(calls.upserts.length + calls.telegrams.length, 2, 'only the one binding');
+    assert.equal(calls.upserts.length + calls.telegrams.length, 1, 'only the one binding');
     assert.equal((await tg(new Request('https://x/webhook/telegram'))).status, 405);
 
     // ── S4: the owner's answer → customer → KB (Q13 Q26 Q29 Q30) ──
@@ -1613,6 +1616,7 @@ assert.equal(extractComments({}).length, 0);
           if (b.key === 'chatbot_config') { st.config = JSON.parse(b.value); st.upserts++; }
           return json([]);
         }
+        if (url.includes('bot_shadow_log?fix_prompt_msg_id=eq.')) return json([]);  // not an S11a ✏️ reply
         if (url.includes('or=(bot_state->>owner_alert_msg_id.eq.')) {             // the question, or its S6 reminder
           const id = Number(/owner_alert_msg_id\.eq\.(\d+),bot_state->>owner_reminder_msg_id\.eq\.\1\)/.exec(url)[1]);
           const bs = st.lead.bot_state;
@@ -2457,6 +2461,285 @@ assert.equal(extractComments({}).length, 0);
 
     for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'IG_APP_ID', 'IG_APP_SECRET', 'TELEGRAM_BOT_TOKEN'])
       delete process.env[k];
+  }
+
+  // ── S11a: shadow drafts → the owner's daily Telegram digest ──
+  {
+    const { draftDigest, sendDraftDigest, handleOwnerUpdate } = require('./meta-service');
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
+    const json = (v) => ({ ok: true, json: async () => v });
+    const T = (min) => new Date(Date.parse('2026-10-12T14:00:00Z') + min * 60e3).toISOString();
+    const inMsg  = (lead_id, min, message, mid = null) => ({ lead_id, direction: 'incoming', message, created_at: T(min), external_message_id: mid });
+    const outMsg = (lead_id, min, message) => ({ lead_id, direction: 'outgoing', message, is_bot: false, created_at: T(min) });
+    const row = (id, lead_id, min, decision, message_id = null) => ({ id, lead_id, message_id, created_at: T(min), decision });
+    const reply = (text, extra = {}) => ({ reply: text, handoff: false, category: 'lead', ...extra });
+    const LEADS = [{ id: 'L1', customer_name: 'Priya S.', bot_state: { qualification: { service: 'HYDRA FACIAL P/S' } } },
+                   { id: 'L2', customer_name: 'Rahul M.', bot_state: {} },
+                   { id: 'L3', customer_name: 'Neha K.', bot_state: {} },
+                   { id: 'L4', customer_name: 'Aman P.', bot_state: {} }];
+    const MSGS = [
+      inMsg('L1', 0, 'hydrafacial price?', 'mid1'), inMsg('L1', 1, 'and at bopal?', 'mid2'), outMsg('L1', 5, '2500 mam, which day you want?'),
+      inMsg('L2', 0, 'hi'), inMsg('L2', 10, 'full body laser how many sittings'), outMsg('L2', 12, '6-8 sitting sir'), inMsg('L2', 20, 'ok'),
+      inMsg('L3', 30, 'do you have branch in vadodara'),
+      inMsg('L4', 40, 'my skin is burning'),
+    ];
+    const ROWS = [
+      // after 'and at bopal?' arrived, but the Meta id says it answered the first message
+      row(1, 'L1', 1.5, reply('Hydrafacial is ₹2,499 per session 😊', { qualification: { branch: 'Satellite' }, asks_price: true }), 'mid1'),
+      row(2, 'L2', 10.1, reply('Most people need 6–8 sessions.', { offer: { service: 'LHR', offer_price: 9999 } })),
+      row(3, 'L2', 20.1, reply('Great, anything else?')),
+      row(4, 'L3', 30.1, reply('We have branches in Satellite, Bopal and Maninagar.')),
+      row(5, 'L4', 40.1, { safety_net: 'medical', reason: 'medical', reply: '', handoff: true }),
+      row(6, 'L3', 31, { reason: 'qualified', reply: 'Booking you in!', handoff: true, category: 'lead' }),
+    ];
+
+    // one draft per conversation, the one most worth checking first: price mismatch
+    // with staff (L1) → offer (L2, over its plain later turn) → first message (L3);
+    // no draft from the safety net or a handoff (L4 drops out)
+    const d = draftDigest(ROWS, MSGS, LEADS);
+    assert.equal(d.text,
+      '📝 Bot drafts for today — 3 of 3 conversations\n' +
+      'Nothing was sent. Tap ✅ if the draft is fine, ✏️ to correct it.\n\n' +
+      '1) Priya S. · HYDRA FACIAL P/S · Satellite\n   Customer: "hydrafacial price?"\n' +
+      '   Bot: "Hydrafacial is ₹2,499 per session 😊"\n   Staff sent: "2500 mam, which day you want?"\n\n' +
+      '2) Rahul M.\n   Customer: "full body laser how many sittings"\n' +
+      '   Bot: "Most people need 6–8 sessions."\n   Staff sent: "6-8 sitting sir"\n\n' +
+      '3) Neha K.\n   Customer: "do you have branch in vadodara"\n' +
+      '   Bot: "We have branches in Satellite, Bopal and Maninagar."\n   Staff sent: (no reply yet)');
+    assert.deepEqual(d.keyboard, [
+      [{ text: '1 ✅', callback_data: 'sd:good:1' }, { text: '1 ✏️', callback_data: 'sd:fix:1' },
+       { text: '2 ✅', callback_data: 'sd:good:2' }, { text: '2 ✏️', callback_data: 'sd:fix:2' }],
+      [{ text: '3 ✅', callback_data: 'sd:good:4' }, { text: '3 ✏️', callback_data: 'sd:fix:4' }]]);
+    assert.equal(draftDigest([ROWS[4], ROWS[5]], MSGS, LEADS), null, 'no drafts → no digest');
+
+    // at most 8, and always inside Telegram's 4,096 characters
+    const many = Array.from({ length: 12 }, (_, i) => `M${i}`);
+    let big = draftDigest(many.map((l, i) => row(100 + i, l, 1, reply('Sure!'))), many.map(l => inMsg(l, 0, 'hi')), []);
+    assert.equal(big.shown, 8);
+    assert.match(big.text, /^📝 Bot drafts for today — 8 of 12 conversations/);
+    assert.equal(big.keyboard.length, 4);
+    big = draftDigest(many.map((l, i) => row(100 + i, l, 1, reply('x'.repeat(2000)))), many.map(l => inMsg(l, 0, 'y'.repeat(900))), []);
+    assert.ok(big.shown >= 1 && big.shown < 8 && big.text.length <= 4096, `${big.shown} shown, ${big.text.length} chars`);
+
+    // sendDraftDigest: one message to the owner, and every row looked at is
+    // stamped (a second run by hand sends nothing new)
+    const tg = [];
+    global.fetch = async (url, opts = {}) => {
+      if (url.includes('settings?key=eq.telegram_owner')) return json([{ value: JSON.stringify({ chat_id: 555 }) }]);
+      if (url.includes('api.telegram.org')) { tg.push(JSON.parse(opts.body)); return json({ ok: true, result: { message_id: 950 } }); }
+      throw new Error('unexpected fetch: ' + url);
+    };
+    const NOW = Date.parse('2026-10-12T14:30:00Z');
+    const fakeDb = (rows) => { const s = { since: [], stamps: [] }; return Object.assign(s, {
+      listShadowDrafts: async (since) => { s.since.push(since); return rows; },
+      listMessagesSince: async () => MSGS, listLeadsByIds: async () => LEADS,
+      updateShadowLog: async (filter, data) => { s.stamps.push([filter, data]); } }); };
+    let fdb = fakeDb(ROWS);
+    assert.equal(await sendDraftDigest(fdb, NOW), 3);
+    assert.deepEqual(fdb.since, ['2026-10-11T14:30:00.000Z'], 'the last 24 h');
+    assert.equal(tg.length, 1);
+    assert.equal(tg[0].chat_id, 555);
+    assert.equal(tg[0].text, d.text);
+    assert.deepEqual(tg[0].reply_markup.inline_keyboard, d.keyboard);
+    assert.deepEqual(fdb.stamps, [['id=in.(1,2,3,4,5,6)', { digest_at: '2026-10-12T14:30:00.000Z' }]]);
+    fdb = fakeDb([ROWS[4]]);
+    assert.equal(await sendDraftDigest(fdb, NOW), 0);
+    assert.equal(tg.length, 1, 'no draft → no message');
+    assert.deepEqual(fdb.stamps, [['id=in.(5)', { digest_at: '2026-10-12T14:30:00.000Z' }]], 'still stamped');
+    fdb = fakeDb([]);
+    assert.equal(await sendDraftDigest(fdb, NOW), 0);
+    assert.equal(fdb.stamps.length + tg.length, 1, 'nothing to look at → nothing done');
+
+    // ✅ / ✏️ / the owner's fix / [Don't save]
+    const st = { rows: ROWS.map(r => ({ ...r })), tg: [], cands: [], upserts: 0, nextMsg: 950,
+                 config: { mode: 'shadow', kb: { entries: [{ type: 'service', key: 'HYDRA FACIAL P/S', price: 3000 }] } } };
+    global.fetch = async (url, opts = {}) => {
+      if (url.includes('settings?key=eq.telegram_owner')) return json([{ value: JSON.stringify({ chat_id: 555 }) }]);
+      if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify(st.config) }]);
+      if (url.includes('/settings') && opts.method === 'POST') { st.config = JSON.parse(JSON.parse(opts.body).value); st.upserts++; return json([]); }
+      if (url.includes('api.telegram.org')) {
+        st.tg.push({ method: url.split('/').pop(), ...JSON.parse(opts.body) });
+        return json({ ok: true, result: { message_id: st.nextMsg++ } });
+      }
+      const sh = /bot_shadow_log\?(id|fix_prompt_msg_id)=eq\.(\d+)/.exec(url);
+      if (sh && opts.method === 'PATCH') { Object.assign(st.rows.find(r => r.id === Number(sh[2])), JSON.parse(opts.body)); return { ok: true }; }
+      if (sh) return json(st.rows.filter(r => r[sh[1]] === Number(sh[2])));
+      if (url.includes('lead_messages?lead_id=in.(')) return json(MSGS.filter(m => url.includes(`(${m.lead_id})`)));
+      if (url.includes('leads?id=in.(')) return json(LEADS.filter(l => url.includes(`(${l.id})`)));
+      if (url.includes('/kb_candidates') && opts.method === 'POST') { st.cands.push(JSON.parse(opts.body)); return json([]); }
+      throw new Error('unexpected fetch: ' + url);
+    };
+    const R = (id) => st.rows.find(r => r.id === id);
+    const tap = (data, chatId = 555) => handleOwnerUpdate({ callback_query: { id: 'cq', data,
+      message: { message_id: 900, chat: { id: chatId }, text: '✏️ Noted.' } } });
+    const ownerReply = (text, to) => handleOwnerUpdate({ message: { message_id: 30, text, chat: { id: 555 }, reply_to_message: { message_id: to } } });
+    const hydra = () => st.config.kb.entries[0];
+
+    await tap('sd:good:4');
+    assert.equal(R(4).owner_verdict, 'good');
+    assert.ok(R(4).reviewed_at);
+    assert.deepEqual(st.tg.map(t => [t.method, t.text]), [['answerCallbackQuery', '👍 Marked good']]);
+
+    // a price question's fix with a price → saved to the KB, with [Don't save]
+    st.tg = [];
+    st.nextMsg = 950;
+    await tap('sd:fix:1');
+    assert.equal(st.tg[0].method, 'sendMessage');
+    assert.equal(st.tg[0].text, '✏️ What should the bot have said to Priya S.?\nBot\'s draft: "Hydrafacial is ₹2,499 per session 😊"\n(Reply to this message)');
+    assert.equal(st.tg[0].reply_markup.force_reply, true);
+    assert.equal(R(1).fix_prompt_msg_id, 950);
+    assert.equal(st.tg[1].method, 'answerCallbackQuery');
+    st.tg = [];
+    await ownerReply('It is 2500 now', 950);
+    assert.equal(hydra().price, 2500);
+    assert.equal(R(1).owner_verdict, 'fix');
+    assert.equal(R(1).owner_fix, 'It is 2500 now');
+    assert.equal(R(1).kb_saved.key, 'HYDRA FACIAL P/S');
+    assert.equal(st.cands.length, 0);
+    assert.equal(st.tg[0].text, '✏️ Noted. 💾 Saved: HYDRA FACIAL P/S → ₹2500. The bot quotes it to everyone from now on.');
+    assert.deepEqual(st.tg[0].reply_markup.inline_keyboard, [[{ text: '🚫 Don’t save', callback_data: 'sdnosave:1' }]]);
+    st.tg = [];
+    await tap('sdnosave:1');
+    assert.equal(hydra().price, 3000, 'undone');
+    assert.equal(st.tg[0].text, 'Not saved');
+
+    // anything else → Teach the bot (pending), the KB untouched; ✏️ after ✅ changes the verdict
+    for (const [id, text, question] of [[4, 'Say Vadodara has no branch yet, nearest is Satellite', 'do you have branch in vadodara'],
+                                        [2, 'Offer is 9999 for 6 sessions', 'full body laser how many sittings']]) {   // a price, but not a price question
+      st.tg = [];
+      const upserts = st.upserts;
+      await tap(`sd:fix:${id}`);
+      await ownerReply(text, R(id).fix_prompt_msg_id);
+      assert.deepEqual(st.cands.at(-1), { lead_id: id === 4 ? 'L3' : 'L2', question, answer: text });
+      assert.equal(st.upserts, upserts, 'KB untouched');
+      assert.equal(R(id).owner_verdict, 'fix');
+      assert.equal(st.tg.at(-1).text, '✏️ Noted. 📥 Added to Teach the bot in the dashboard. The bot uses it once it’s approved there.');
+      assert.equal(st.tg.at(-1).reply_markup, undefined);
+    }
+
+    // a gone row, and another chat → nothing changes
+    st.tg = [];
+    await tap('sd:good:99');
+    assert.equal(st.tg[0].text, 'That draft is gone');
+    st.tg = [];
+    await tap('sd:good:3', 666);
+    assert.equal(st.tg.length + (R(3).owner_verdict ? 1 : 0), 0);
+
+    // bot-hourly: shadow → the digest at draft_digest_hour (IST) only, nothing else
+    const { handler: hourly } = require('../bot-hourly');
+    const istHour = new Date(Date.now() + 5.5 * 3600e3).getUTCHours();
+    for (const [hour, runs] of [[istHour, 1], [(istHour + 1) % 24, 0]]) {
+      const urls = [];
+      global.fetch = async (url) => {
+        urls.push(url);
+        if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify({ mode: 'shadow', draft_digest_hour: hour }) }]);
+        if (url.includes('settings?key=eq.bot_mode')) return json([]);
+        if (url.includes('bot_shadow_log?')) return json([]);
+        throw new Error('unexpected fetch: ' + url);
+      };
+      assert.equal((await hourly()).statusCode, 200);
+      assert.equal(urls.filter(u => u.includes('bot_shadow_log')).length, runs, `digest hour ${hour}`);
+      assert.equal(urls.length, 2 + runs, 'no quiet-chat push or owner timers in shadow');
+    }
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
+  }
+
+  // ── S11b: the mode in its own settings row; /mode from the owner's Telegram ──
+  {
+    const { getBotConfig, handleOwnerUpdate, botReply } = require('./meta-service');
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
+    process.env.RESEND_API_KEY = 're_test';
+    process.env.OPS_ALERT_EMAIL = 'ops@test.dev';
+    const json = (v) => ({ ok: true, json: async () => v });
+    const st = { cfg: { mode: 'live', model: 'm' }, mode: null, tg: [], upserts: [], emails: [] };
+    global.fetch = async (url, opts = {}) => {
+      if (url.includes('settings?key=eq.telegram_owner')) return json([{ value: JSON.stringify({ chat_id: 555, name: 'Gaurav' }) }]);
+      if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify(st.cfg) }]);
+      if (url.includes('settings?key=eq.bot_mode')) return json(st.mode ? [{ value: JSON.stringify(st.mode) }] : []);
+      if (url.includes('/settings') && opts.method === 'POST') {
+        const b = JSON.parse(opts.body);
+        st.upserts.push(b);
+        if (b.key === 'bot_mode') st.mode = JSON.parse(b.value);
+        return { ok: true };
+      }
+      if (url.includes('api.telegram.org')) { st.tg.push({ method: url.split('/').pop(), ...JSON.parse(opts.body) }); return json({ ok: true, result: { message_id: 1 } }); }
+      if (url.includes('api.resend.com')) { st.emails.push(JSON.parse(opts.body)); return json({}); }
+      throw new Error('unexpected fetch: ' + url);
+    };
+
+    // the bot_mode row beats chatbot_config.mode (a stale console save can't undo it);
+    // no row or a bad value → chatbot_config.mode, as before S11b
+    assert.deepEqual(await getBotConfig(), { mode: 'live', model: 'm' });
+    st.mode = { mode: 'off', by: 'telegram' };
+    assert.deepEqual(await getBotConfig(), { mode: 'off', model: 'm' });
+    assert.deepEqual(await botReply({ id: 'L1', bot_active: true }, { messageText: 'hi' }, 'instagram'), { skipped: 'mode_off' });
+    st.mode = { mode: 'banana' };
+    assert.equal((await getBotConfig()).mode, 'live');
+
+    const cmd  = (text, chatId = 555) => handleOwnerUpdate({ message: { message_id: 40, text, chat: { id: chatId } } });
+    const tap  = (data) => handleOwnerUpdate({ callback_query: { id: 'cq', data, message: { message_id: 41, chat: { id: 555 } } } });
+    const edits = () => st.tg.filter(t => t.method === 'editMessageText');
+
+    // /mode → the current mode + three buttons
+    st.mode = { mode: 'shadow' };
+    await cmd('/mode');
+    assert.equal(st.tg.length, 1);
+    assert.equal(st.tg[0].chat_id, 555);
+    assert.equal(st.tg[0].text, '🤖 Bot is in SHADOW (drafts replies, sends nothing).');
+    assert.deepEqual(st.tg[0].reply_markup.inline_keyboard, [[{ text: 'Off', callback_data: 'mode:off' },
+      { text: 'Shadow', callback_data: 'mode:shadow' }, { text: 'Live', callback_data: 'mode:live' }]]);
+    st.tg = [];
+    await cmd('/mode@DSkinBot');
+    assert.equal(st.tg.length, 1, 'the menu form of the command works too');
+    st.tg = [];
+    await cmd('/mode', 666);
+    assert.equal(st.tg.length, 0, 'another chat is ignored');
+
+    // Off applies at once: the row, the edited menu, one email to us
+    await tap('mode:off');
+    assert.equal(st.mode.mode, 'off');
+    assert.equal(st.mode.by, 'telegram');
+    assert.ok(st.mode.at);
+    assert.equal(st.tg[0].method, 'answerCallbackQuery');
+    assert.equal(edits()[0].text, '✅ Bot is now OFF (does nothing).');
+    assert.equal(edits()[0].reply_markup, undefined, 'buttons gone');
+    assert.equal(st.emails.length, 1);
+    assert.deepEqual(st.emails[0].to, ['ops@test.dev']);
+    assert.equal(st.emails[0].subject, '🤖 Bot mode: shadow → off');
+    assert.match(st.emails[0].html, /Gaurav switched the bot from SHADOW to OFF in Telegram/);
+
+    // Live asks first; only the confirm changes anything
+    st.tg = [];
+    await tap('mode:live');
+    assert.equal(st.mode.mode, 'off');
+    assert.equal(edits()[0].text, '⚠️ Go live? The bot will reply to customers on Instagram.');
+    assert.deepEqual(edits()[0].reply_markup.inline_keyboard, [[{ text: 'Yes, go live', callback_data: 'mode:live!' },
+                                                                { text: 'Cancel', callback_data: 'mode:cancel' }]]);
+    st.tg = [];
+    await tap('mode:cancel');
+    assert.equal(st.mode.mode, 'off');
+    assert.equal(edits()[0].text, 'Nothing changed. Bot is still OFF (does nothing).');
+    await tap('mode:live!');
+    assert.equal(st.mode.mode, 'live');
+    assert.equal(st.emails.length, 2);
+    assert.equal(st.emails[1].subject, '🤖 Bot mode: off → live');
+
+    // a stale tap on the current mode, or a junk payload → nothing written, nobody emailed
+    const upserts = st.upserts.length;
+    st.tg = [];
+    await tap('mode:live!');
+    await tap('mode:banana');
+    assert.equal(st.upserts.length, upserts);
+    assert.equal(st.emails.length, 2);
+    assert.deepEqual(edits().map(e => e.text), ['Nothing changed. Bot is still LIVE (replies to customers).',
+                                                'Nothing changed. Bot is still LIVE (replies to customers).']);
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY', 'OPS_ALERT_EMAIL']) delete process.env[k];
   }
 
   global.fetch = realFetch;

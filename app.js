@@ -1281,6 +1281,7 @@ const DEFAULT_CHATBOT_CONFIG = {
   lead_quiet_hours: 2,               // S2: a chat this long without a message settles → lead push (bot-hourly)
   owner_remind_hours: 2,             // S6: unanswered owner price question → one Telegram reminder
   owner_fallback_hours: 20,          // S6: still unanswered → customer gets canned.owner_no_reply, lead pushed
+  draft_digest_hour: 20,             // S11a: shadow mode → the day's drafts to the owner's Telegram at this IST hour
   alert_email: '',                   // '' = default admin address (server side)
   report_frequency: 'off',           // 'off' | 'daily' | 'weekly' — send-bot-report cron
 };
@@ -1303,8 +1304,12 @@ function mergeChatbotConfig(saved) {
 
 async function loadChatbotConfig() {
   try {
-    const { data } = await db.from('settings').select('value').eq('key', 'chatbot_config').maybeSingle();
+    const [{ data }, { data: m }] = await Promise.all(['chatbot_config', 'bot_mode'].map(k =>
+      db.from('settings').select('value').eq('key', k).maybeSingle()));
     state.chatbotConfig = mergeChatbotConfig(data?.value ? JSON.parse(data.value) : null);
+    // S11b: the mode's own row wins (the owner may have set it from Telegram).
+    const mode = m?.value ? JSON.parse(m.value)?.mode : null;
+    if (CHATBOT_MODES.some(x => x.key === mode)) state.chatbotConfig.mode = mode;
   } catch (e) { state.chatbotConfig = mergeChatbotConfig(null); }
   renderChatbotConfig();
 }
@@ -1322,6 +1327,7 @@ function renderChatbotConfig() {
   set('chatbot-lead-quiet-hours', cfg.lead_quiet_hours);
   set('chatbot-owner-remind-hours', cfg.owner_remind_hours);
   set('chatbot-owner-fallback-hours', cfg.owner_fallback_hours);
+  set('chatbot-draft-digest-hour', cfg.draft_digest_hour);
   set('chatbot-alert-email', cfg.alert_email || '');
   set('chatbot-report-frequency', cfg.report_frequency || 'off');
 
@@ -1370,6 +1376,7 @@ function collectChatbotConfigFromForm() {
     owner_remind_hours: Math.max(0.01, parseFloat(val('chatbot-owner-remind-hours')) || DEFAULT_CHATBOT_CONFIG.owner_remind_hours),
     // under 24 h: the fallback message must land inside Instagram's reply window
     owner_fallback_hours: Math.min(23, Math.max(0.01, parseFloat(val('chatbot-owner-fallback-hours')) || DEFAULT_CHATBOT_CONFIG.owner_fallback_hours)),
+    draft_digest_hour: Math.min(23, int('chatbot-draft-digest-hour', 0, DEFAULT_CHATBOT_CONFIG.draft_digest_hour)),
     alert_email:      (val('chatbot-alert-email') || '').trim(),
     report_frequency: val('chatbot-report-frequency') || 'off',
   };
@@ -1393,10 +1400,15 @@ async function saveChatbotConfigFromForm() {
 
 // The master switch — applies immediately, no separate Save (mirrors the
 // integrations toggle): an operator must be able to kill the bot in one click.
+// S11b: writes only the bot_mode row (the server reads it before
+// chatbot_config.mode), so neither a mode click nor a Settings save from a
+// stale page can undo a mode the owner set with /mode in Telegram.
 async function setChatbotMode(mode) {
   const prev = state.chatbotConfig?.mode;
   state.chatbotConfig = { ...(state.chatbotConfig || mergeChatbotConfig(null)), mode };
-  const error = await saveChatbotConfigToDB();
+  const { error } = await db.from('settings').upsert(
+    { key: 'bot_mode', value: JSON.stringify({ mode, by: 'console', at: new Date().toISOString() }) },
+    { onConflict: 'key' });
   if (error) {
     state.chatbotConfig = { ...state.chatbotConfig, mode: prev };
     renderChatbotMode();

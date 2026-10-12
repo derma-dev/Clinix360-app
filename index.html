@@ -782,8 +782,9 @@
                 <input type="number" id="chatbot-lead-quiet-hours" class="text-input" placeholder="2" min="0.05" step="any" style="margin:0;width:130px" title="Hours without a new message before the chat is sent to the lead webhook">
                 <input type="number" id="chatbot-owner-remind-hours" class="text-input" placeholder="2" min="0.01" step="any" style="margin:0;width:130px" title="Hours without an owner answer to a price question before one Telegram reminder">
                 <input type="number" id="chatbot-owner-fallback-hours" class="text-input" placeholder="20" min="0.01" max="23" step="any" style="margin:0;width:130px" title="Hours without an owner answer before the customer is told the team will get in touch (max 23: Instagram's 24 h window)">
+                <input type="number" id="chatbot-draft-digest-hour" class="text-input" placeholder="20" min="0" max="23" step="1" style="margin:0;width:130px" title="Shadow mode: the hour (IST, 0–23) the day's drafts go to the owner's Telegram for ✅ / ✏️">
               </div>
-              <div style="font-size:11px;color:#9ca3af">Offer stale days · turn cap · conversation age cap (days) · lead push after quiet (hours) · owner reminder (hours) · owner fallback (hours)</div>
+              <div style="font-size:11px;color:#9ca3af">Offer stale days · turn cap · conversation age cap (days) · lead push after quiet (hours) · owner reminder (hours) · owner fallback (hours) · draft digest hour (IST)</div>
               <div style="font-weight:600;font-size:13px;margin-top:6px">Alerts &amp; report</div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <input type="email" id="chatbot-alert-email" class="text-input" placeholder="hospitalitybee@gmail.com" style="margin:0;flex:1;min-width:200px" title="Gets the owner alerts by email when Telegram fails">

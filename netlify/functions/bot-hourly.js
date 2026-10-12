@@ -1,6 +1,9 @@
 // ============================================================
 // Netlify Scheduled Function: bot-hourly
-// Runs every hour, on the hour. Live mode only.
+// Runs every hour, on the hour.
+// Shadow mode (S11a): at chatbot_config.draft_digest_hour (IST, default 20) →
+// one Telegram digest of the day's drafts to the owner (sendDraftDigest). Nothing else.
+// Live mode:
 // S6: open owner price questions → reminder (owner_remind_hours, default 2) or
 // fallback (owner_fallback_hours, default 20) via runOwnerTimer.
 // S2: a chat with no new message for chatbot_config.lead_quiet_hours (default 2)
@@ -9,7 +12,7 @@
 // ============================================================
 
 const { schedule } = require('@netlify/functions');
-const { createSupabaseClient, getSettingJson, pushLead, ownerQuestionOpen, runOwnerTimer } = require('./utils/meta-service');
+const { createSupabaseClient, getBotConfig, pushLead, ownerQuestionOpen, runOwnerTimer, sendDraftDigest } = require('./utils/meta-service');
 
 // ponytail: only chats active in the 48 h before they went quiet are checked, so a
 // push that keeps failing gives up after 2 days (we were emailed on the first failure).
@@ -27,7 +30,18 @@ const handler = async () => {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_ANON_KEY;
   if (!url || !key) { console.error('[bot-hourly] missing env vars'); return { statusCode: 500 }; }
-  const cfg = (await getSettingJson('chatbot_config')) || {};
+  const cfg = (await getBotConfig()) || {};
+  if (cfg.mode === 'shadow') {
+    const istHour = new Date(Date.now() + 5.5 * 3600e3).getUTCHours();
+    if (istHour !== Number(cfg.draft_digest_hour ?? 20)) return { statusCode: 200 };
+    try {
+      console.log(`[bot-hourly] draft digest: ${await sendDraftDigest(createSupabaseClient())} drafts shown`);
+    } catch (e) {
+      console.error('[bot-hourly] draft digest failed:', e.message);
+      return { statusCode: 500 };
+    }
+    return { statusCode: 200 };
+  }
   if (cfg.mode !== 'live') return { statusCode: 200 };
 
   const get = async (path) => {

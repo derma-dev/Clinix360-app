@@ -244,6 +244,13 @@ CREATE TABLE IF NOT EXISTS bot_shadow_log (
   error      text,
   created_at timestamptz DEFAULT now()
 );
+-- Service tracker S11a: the owner's daily Telegram digest of drafts.
+ALTER TABLE bot_shadow_log ADD COLUMN IF NOT EXISTS digest_at         timestamptz;  -- looked at by a digest (shown or not)
+ALTER TABLE bot_shadow_log ADD COLUMN IF NOT EXISTS owner_verdict     text;         -- 'good' | 'fix'
+ALTER TABLE bot_shadow_log ADD COLUMN IF NOT EXISTS owner_fix         text;         -- what the bot should have said
+ALTER TABLE bot_shadow_log ADD COLUMN IF NOT EXISTS fix_prompt_msg_id bigint;       -- the ✏️ prompt the owner replies to
+ALTER TABLE bot_shadow_log ADD COLUMN IF NOT EXISTS kb_saved          jsonb;        -- undo record when the fix set a KB price
+ALTER TABLE bot_shadow_log ADD COLUMN IF NOT EXISTS reviewed_at       timestamptz;
 
 -- Server-only secrets (service tracker S9): key 'instagram' = the connected
 -- account's token { token, ig_user_id, username, refreshed_at, expires_at }.

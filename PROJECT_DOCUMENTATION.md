@@ -682,7 +682,7 @@ already delivered, a flip failure is logged, never a 502): **replying IS taking 
 
 One call per fresh inbound, after routing: `botReply(lead, ev, platform, inboundRow)` —
 never throws, additive, never blocks the inbound (it is already stored). Strict no-op when
-`lead.bot_active = false` or `settings.chatbot_config.mode = 'off'`.
+`lead.bot_active = false` or the bot mode = `'off'` (`settings.bot_mode`, else `chatbot_config.mode`; S11b).
 
 ```
 botReply
@@ -832,6 +832,27 @@ botReply
     stamped so the quiet push settles the chat.
   - A new price question resets `owner_answered_at` / `owner_reminded_at` / `owner_reminder_msg_id`.
   - An emailed question (Telegram failed) has no reply path: no timers, and it settles at once as before.
+- **Shadow draft digest** (chatbot-as-a-service S11a): in **shadow** mode [bot-hourly](netlify/functions/bot-hourly.js)
+  does only this. At `chatbot_config.draft_digest_hour` (IST, default 20), `sendDraftDigest` sends the owner ONE
+  Telegram message with the last 24 h of undigested `bot_shadow_log` drafts: one per conversation, up to 8, within
+  Telegram's 4,096 characters. Each shows name · service · branch, the customer's message (by Meta id, else the last
+  one before the turn), the bot's draft (normal replies only: handoffs, the safety net, non-leads and errors aren't
+  drafts) and **what staff sent** (the first non-bot outgoing row after it, else "(no reply yet)"). Picked in order:
+  bot and staff quote different prices → the bot quoted an offer → a conversation's first message → random. Every
+  row looked at gets `digest_at`, so a second run sends nothing new.
+  - **[n ✅]** (`sd:good:<row id>`) → `owner_verdict: 'good'`. **[n ✏️]** (`sd:fix:<id>`) → a `force_reply` prompt
+    "✏️ What should the bot have said to <name>?", its id in `fix_prompt_msg_id`. The owner's reply to it (checked
+    before the S4 price-question lookup) → `owner_verdict: 'fix'`, `owner_fix`.
+  - A fix with a price, on a turn where `asks_price` was set, for a recognisable KB service → the S4 KB fold at once
+    (`learnedService` + `applyLearnedKbEntry`), undo record in `kb_saved`, **[🚫 Don't save]** = `sdnosave:<id>`.
+    Anything else → a pending `kb_candidates` row (Teach the Bot), since a correction is often one-customer advice.
+  - S16's "20 drafts signed off" = rows with `owner_verdict = 'good'`. No owner linked or a failed send → a logged 500.
+- **Bot mode from Telegram** (chatbot-as-a-service S11b): the mode lives in its own `settings.bot_mode` row, read by
+  `getBotConfig()` (lead insert, comments, bot turn, bot-hourly) ahead of `chatbot_config.mode`. The console's mode
+  buttons write only that row. The owner sends **`/mode`** → "🤖 Bot is in SHADOW (…)" + `[Off] [Shadow] [Live]`
+  (`mode:<m>`). Off / Shadow apply at once; Live first edits the menu to "⚠️ Go live? …" `[Yes, go live]`
+  (`mode:live!`) `[Cancel]`. The menu is edited to the outcome ("✅ Bot is now OFF (…)" / "Nothing changed …"). Every
+  change emails `OPS_ALERT_EMAIL` (`🤖 Bot mode: shadow → off`). A tap on the current mode changes nothing.
 - **Lead push** (chatbot-as-a-service S2, Q7/Q31/Q34): `pushLead` POSTs a settled chat to
   `LEAD_WEBHOOK_URL` (our Make webhook until S15). A chat settles at **any bot handoff** (called at the
   end of `handoffToStaff`; except a price question the owner can still answer in Telegram, which settles at
@@ -871,7 +892,8 @@ botReply
   non-price, FYIs, once per incident, email fallback, telegram-webhook secret/binding), the S4 owner
   answers and the S6 owner timeouts (fake clock, one reminder, one fallback, staff reply, quiet skip),
   and the S7 comment flow (mode gate, post offer → branch tap → quoted, cache, lookup failure, payload fields),
-  and the S8 report text, and S9 (authorize link, code exchange → saved via the service key → subscribed,
+  and the S8 report text, the S11a draft digest (pick order, cap, length, stamping, ✅ / ✏️ → KB vs Teach the Bot,
+  undo, shadow-only hour gate), S11b (`bot_mode` precedence, `/mode` menu, Live confirm, cancel, ops email), and S9 (authorize link, code exchange → saved via the service key → subscribed,
   token fallback order DB → env → throw, 50-day refresh window, failed refresh → Telegram alert).
 - **Instagram token (S9):** every IG Graph call takes its token from `getIgToken()`: the account connected
   through the Connect link ([ig-connect](netlify/functions/ig-connect.js), stored in `secrets.instagram`
@@ -897,7 +919,7 @@ customer comments  → POST /webhook/meta  (object='instagram', changes[].field=
       ├ skip our own comment (from.id === entry.id)  ← infinite-loop guard
       ├ skip threaded replies (value.parent_id)
       ├ matchCommentRule(text, settings.comment_rules)
-      ├ chatbot_config.mode (S7): off → stop · shadow → one bot_shadow_log row, send nothing
+      ├ bot mode (S7; `bot_mode` row, S11b): off → stop · shadow → one bot_shadow_log row, send nothing
       ├ meanwhile: GET graph.instagram.com/v21.0/{media.id}?fields=caption,permalink
       │      → resolveOffer (offer_cache, else one parse) — a failure only loses the offer
       ├ 1. PRIVATE REPLY  POST graph.instagram.com/v21.0/{IG}/messages
@@ -1054,7 +1076,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 |---|---|---|---|---|
 | [get-config](netlify/functions/get-config.js) | `/.netlify/functions/get-config` | GET | — | Returns `{supabaseUrl, supabaseAnonKey}` from env. `Cache-Control: public, max-age=300`. `500` if env missing. |
 | [meta-webhook](netlify/functions/meta-webhook.mjs) | **`/webhook/meta`** | GET / POST | Meta payload | Modern Request/Response syntax (`.mjs` — the project is CommonJS). GET → `verifyWebhook()`, echoes `hub.challenge` as **plain text** (403 on mismatch). POST → HMAC check → `200 {status:'ok'}` **immediately**, then `handleWebhook()` runs under `context.waitUntil` (60 s limit) — a slow bot turn (27 s seen on a first-seen shared post) no longer blows Meta's delivery timeout and triggers retries. |
-| [telegram-webhook](netlify/functions/telegram-webhook.mjs) | **`/webhook/telegram`** | POST | Telegram update | `.mjs` like meta-webhook. `403` unless `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET` (unset = reject all). `/start <TELEGRAM_LINK_CODE>` → `settings.telegram_owner` + "✅ Linked" reply; anything else `200`, then `handleOwnerUpdate` via `waitUntil` (S4: the owner's answers + [Don't save] taps; other chats ignored). |
+| [telegram-webhook](netlify/functions/telegram-webhook.mjs) | **`/webhook/telegram`** | POST | Telegram update | `.mjs` like meta-webhook. `403` unless `X-Telegram-Bot-Api-Secret-Token` = `TELEGRAM_WEBHOOK_SECRET` (unset = reject all). `/start <TELEGRAM_LINK_CODE>` → `settings.telegram_owner` + "✅ Linked" reply; anything else `200`, then `handleOwnerUpdate` via `waitUntil` (S4: the owner's answers + [Don't save] taps; S11a digest taps; S11b `/mode`; other chats ignored). The binding also registers `/mode` in the bot's menu (`setMyCommands`). |
 | [ig-connect](netlify/functions/ig-connect.js) | `/.netlify/functions/ig-connect` | GET | `?start=<IG_CONNECT_CODE>` / Instagram's `?code&state` | S9 Connect link. `start` → `302` to Instagram login (`state` = the code); the callback → `connectInstagram`: short → long-lived token (60 d) → `secrets.instagram` → `me/subscribed_apps` (`messages,messaging_postbacks,comments`). Plain-text result page. `403` without the code (unset = always). |
 | [meta-send](netlify/functions/meta-send.js) | `/.netlify/functions/meta-send` | POST | `{leadId, message}` | Resolves platform from the lead row, sends, then persists. `400` bad input / no recipient id / unsupported source, `404` lead not found, `502` send failure. Max 1000 bytes. |
 | [meta-status](netlify/functions/meta-status.js) | `/.netlify/functions/meta-status` | GET | — | `{instagram:{connected,name}, facebook:{…}, whatsapp:{…}}`. `Cache-Control: no-store`. Never returns tokens. |
@@ -1065,7 +1087,7 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | [send-automation-webhook](netlify/functions/send-automation-webhook.js) | `/.netlify/functions/send-automation-webhook` | POST | `{automation_id, date_from, date_to}` | Builds a per-branch plain-text block `{report: "…"}`, POSTs to `webhook_url`, **3 retries** w/ backoff, updates `last_sent_at`, `502` on final failure. |
 | [check-automations](netlify/functions/check-automations.js) | scheduled | cron | — | `schedule('0 18 * * *')`. Fires due scheduled automations (see [§13](#13-report-automations)). |
 | [ig-token-refresh](netlify/functions/ig-token-refresh.js) | scheduled | cron | — | `schedule('0 4 * * *')`. `refreshIgToken`: renews the connected IG token once it's > 50 days old; a failure keeps the old token and alerts the owner's Telegram (email if that fails), daily until fixed. |
-| [bot-hourly](netlify/functions/bot-hourly.js) | scheduled | cron | — | `schedule('0 * * * *')`, live mode only. Chats with no message for `chatbot_config.lead_quiet_hours` (default 2) → `pushLead` (lead push, see §15). First, open owner price questions → `runOwnerTimer` (S6: reminder after `owner_remind_hours`, `owner_no_reply` fallback after `owner_fallback_hours`). Trigger by hand from the Netlify UI to test. |
+| [bot-hourly](netlify/functions/bot-hourly.js) | scheduled | cron | — | `schedule('0 * * * *')`. Shadow mode: only the S11a draft digest, at `draft_digest_hour` (IST). Live mode: chats with no message for `chatbot_config.lead_quiet_hours` (default 2) → `pushLead` (lead push, see §15). First, open owner price questions → `runOwnerTimer` (S6: reminder after `owner_remind_hours`, `owner_no_reply` fallback after `owner_fallback_hours`). Trigger by hand from the Netlify UI to test. |
 | [send-bot-report](netlify/functions/send-bot-report.js) | scheduled | cron | — | `schedule('30 3 * * *')`. Chatbot metrics report to the owner's Telegram (`settings.telegram_owner`) per `report_frequency` (daily / weekly on Mondays / off). |
 
 **Webhook payload emitted by `send-automation-webhook`** (one string, per branch):
@@ -1102,7 +1124,7 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 | `lead_notes` | notes on a lead | `lead_id`, `note` |
 | `lead_messages` | the chat timeline | `lead_id`, `branch_id`, `direction`, `message`, `is_seen`, `seen_at`, `external_message_id`, `created_at`, `is_bot` (chatbot, 2026-08-24) |
 | `kb_candidates` | teach-the-bot queue (chatbot) | `lead_id`, `question`, `answer`, `status` (pending/approved/discarded) |
-| `bot_shadow_log` | shadow-mode draft log (chatbot) | `lead_id`, `message_id`, `decision` JSONB, `model`, `latency_ms`, `error` |
+| `bot_shadow_log` | shadow-mode draft log (chatbot) | `lead_id`, `message_id`, `decision` JSONB, `model`, `latency_ms`, `error`; S11a digest: `digest_at`, `owner_verdict` ('good'/'fix'), `owner_fix`, `fix_prompt_msg_id`, `kb_saved`, `reviewed_at` |
 
 **`settings` keys in use:**
 
@@ -1112,7 +1134,8 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 | `payment_modes` | JSON array `[{code,label}, …]` |
 | `integrations` | JSON flags `{"instagram":true,"facebook":true,"whatsapp":true}` — only an explicit `false` disables |
 | `comment_rules` | JSON array `[{keyword, public, dm}, …]` — Instagram & Facebook comment automation ([§15](#instagram-comment-automation-comment--dm--branch-routing)) |
-| `chatbot_config` | JSON object — chatbot config (final plan §5): `mode` ('off'/'shadow'/'live'), `model`, `kb {entries, prices_verified_at}`, `locality_map`, `canned` (8 replies), `offer_stale_days`, `turn_cap`, `conversation_age_cap_days`, `lead_quiet_hours` (lead push, default 2), `owner_remind_hours` / `owner_fallback_hours` (S6, default 2 / 20). Created on first Settings save; absent row = code defaults with `mode:'off'`. |
+| `chatbot_config` | JSON object — chatbot config (final plan §5): `mode` ('off'/'shadow'/'live'), `model`, `kb {entries, prices_verified_at}`, `locality_map`, `canned` (8 replies), `offer_stale_days`, `turn_cap`, `conversation_age_cap_days`, `lead_quiet_hours` (lead push, default 2), `owner_remind_hours` / `owner_fallback_hours` (S6, default 2 / 20), `draft_digest_hour` (S11a, IST, default 20). Created on first Settings save; absent row = code defaults with `mode:'off'`. |
+| `bot_mode` | JSON `{mode, by, at}` — the bot mode (S11b), `by` = `'console'` or `'telegram'`. Beats `chatbot_config.mode` (`getBotConfig`), so a Settings save from a stale page can't undo a `/mode` change; no row = `chatbot_config.mode`. Written by the console's mode buttons and the owner's `/mode`. |
 | `offer_cache` | JSON object — share→offer cache (D9/D10, Step 14): `{offers: {<media_id>: {service, offer_price, last_seen, source_caption}}}`, capped at 50 newest, written only by the webhook; humans never edit it. |
 
 **Indexes**: `idx_leads_branch`, `idx_leads_instagram_user`, `idx_leads_facebook_user`,
@@ -1164,6 +1187,7 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 | `TELEGRAM_BOT_TOKEN` | `sendTelegram()` (owner alerts) | @BotFather token — **secret**. Unset = alerts go by email |
 | `TELEGRAM_WEBHOOK_SECRET` | telegram-webhook | Must match `secret_token` given to `setWebhook`; unset = the webhook rejects everything |
 | `TELEGRAM_LINK_CODE` | telegram-webhook | Owner opens `t.me/<bot>?start=<code>` to receive alerts. Change it to stop anyone else re-linking |
+| `OPS_ALERT_EMAIL` | `/mode` (S11b) | Us: emailed on every bot mode change the owner makes in Telegram. Unset = the default admin address |
 | `URL` | check-automations, ig-connect | Injected by Netlify; check-automations falls back to the hardcoded site URL, ig-connect to the request host (builds the OAuth redirect URI) |
 | `INTERNAL_FUNCTION_SECRET` | check-automations → send-automation-* | Shared secret authorizing the cron's calls to the (now PIN/secret-gated) send endpoints. **Required** for scheduled automations to fire. |
 
