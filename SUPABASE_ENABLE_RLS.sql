@@ -1,26 +1,24 @@
 -- ============================================================
--- Enable Row Level Security WITHOUT breaking the app.
+-- Lock down the database (service tracker S12, Q35).
 -- Run in: Supabase Dashboard → SQL Editor → paste → Run. Safe to re-run.
 --
--- Why this is safe:
---   Every part of Clinix360 (browser app.js + ALL netlify functions) talks to
---   Supabase with the ANON key — nothing uses the service_role key. The anon
---   key is subject to RLS, so turning RLS on with NO policies would lock the
---   app out of every table (empty reads, failed writes, dead realtime inbox).
+--   * The public anon key (the browser holds it) gets NO access to any table.
+--   * Every Netlify function uses SUPABASE_SERVICE_ROLE_KEY, which bypasses RLS.
+--   * The console signs in with ONE Supabase Auth account. is_console() names it,
+--     and every table's only policy asks is_console(), so a stray signup sees nothing.
+--     authorizeRequest (meta-service.js) asks the same function, so one rule decides both.
+--   * `secrets` (S9) stays as it is: RLS on, no policy, no grants, service key only.
 --
---   This enables RLS on EVERY table in the public schema and gives each a
---   single PERMISSIVE policy (allow all for anon/authenticated). Net behaviour
---   is IDENTICAL to RLS-off: the app keeps working exactly as today. RLS is
---   now "on" as a foundation so per-table rules can be tightened later.
---   Looping over ALL public tables (not a hardcoded list) means tables that
---   exist in the live DB but not in SUPABASE_SCHEMA.sql — e.g.
---   lead_status_history — are covered too.
---
--- This does NOT by itself make the data more private — the anon key can still
--- read/write everything. Real row-level privacy needs Supabase Auth (the app
--- currently uses a custom PIN login, so auth.uid() is null in the browser) or
--- moving writes to service_role server functions.
+-- Before running: create the account (Authentication → Users → Add user → email +
+-- password, Auto Confirm on) and put its email below. To change the account later,
+-- re-run only the CREATE OR REPLACE FUNCTION with the new email.
+-- Also turn off Authentication → Sign In / Providers → "Allow new users to sign up".
 -- ============================================================
+
+CREATE OR REPLACE FUNCTION public.is_console() RETURNS boolean
+LANGUAGE sql STABLE SET search_path = '' AS $$
+  SELECT coalesce(auth.jwt()->>'email', '') = 'dermadwarka@gmail.com'
+$$;
 
 DO $$
 DECLARE t RECORD;
@@ -29,26 +27,34 @@ BEGIN
     SELECT c.relname
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public' AND c.relkind = 'r'
-      AND c.relname <> 'secrets'   -- server-only (S9): must never get the allow-all policy
+    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+      AND c.relname <> 'secrets'   -- server-only (S9): never a policy
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t.relname);
-    EXECUTE format('DROP POLICY IF EXISTS allow_anon_all ON %I;', t.relname);
+    EXECUTE format('DROP POLICY IF EXISTS allow_anon_all ON %I;', t.relname);   -- the old allow-all
+    EXECUTE format('DROP POLICY IF EXISTS console_only ON %I;', t.relname);
     EXECUTE format(
-      'CREATE POLICY allow_anon_all ON %I FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);',
+      'CREATE POLICY console_only ON %I FOR ALL TO authenticated USING ((SELECT public.is_console())) WITH CHECK ((SELECT public.is_console()));',
       t.relname
     );
   END LOOP;
 END $$;
 
--- Sanity check: EVERY public table should show rls_enabled = true, policy_count = 1.
+-- Grants: anon loses every table and view (a view would skip RLS), now and for tables made later.
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon;
+
+-- Sanity check: every row should show anon_can_read = false; tables (not views)
+-- rls_enabled = true and policies = 1 (secrets: 0).
 SELECT
-  c.relname AS table_name,
+  c.relname AS name,
+  c.relkind AS kind,
   c.relrowsecurity AS rls_enabled,
-  COUNT(p.polname) AS policy_count
+  COUNT(p.polname) AS policies,
+  has_table_privilege('anon', c.oid, 'SELECT') AS anon_can_read
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_policy p ON p.polrelid = c.oid
-WHERE n.nspname = 'public' AND c.relkind = 'r'
-GROUP BY c.relname, c.relrowsecurity
+WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'v', 'm')
+GROUP BY c.relname, c.relkind, c.relrowsecurity, c.oid
 ORDER BY c.relname;

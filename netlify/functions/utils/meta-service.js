@@ -31,15 +31,12 @@ function verifyMetaSignature(rawBody, signatureHeader) {
   return safeEqual(signatureHeader, expected);
 }
 
-// Authorize a write/send request from EITHER the browser (a logged-in staff PIN —
-// admin or any branch) OR the server (a shared INTERNAL_FUNCTION_SECRET, used by
-// the scheduled check-automations cron). Without one of these, the send endpoints
-// would let anyone DM every customer from the business's accounts.
+// Authorize a write/send request from EITHER the console (its Supabase Auth login,
+// sent as `Authorization: Bearer <access token>`, S12) OR the server (a shared
+// INTERNAL_FUNCTION_SECRET, used by the scheduled check-automations cron). Without
+// one of these, the send endpoints would let anyone DM every customer from the
+// business's accounts.
 async function authorizeRequest(event) {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) return false;
-  const h = { apikey: key, Authorization: `Bearer ${key}` };
   const headers = event.headers || {};
 
   // 1) Server-to-server (scheduled cron → send-automation-*).
@@ -47,24 +44,23 @@ async function authorizeRequest(event) {
   const expectedSecret = process.env.INTERNAL_FUNCTION_SECRET;
   if (expectedSecret && internalSecret && safeEqual(internalSecret, expectedSecret)) return true;
 
-  // 2) Browser: a logged-in staff PIN.
-  const staffPin = headers['x-staff-pin'];
-  if (!staffPin) return false;
+  // 2) Browser: the console login. is_console() (SUPABASE_ENABLE_RLS.sql) is the rule
+  // every table's policy runs, asked with the caller's own token: PostgREST rejects a
+  // forged or expired one, and any other account (or the bare anon key) gets false.
+  const url = process.env.SUPABASE_URL;
+  const anon = process.env.SUPABASE_ANON_KEY;
+  const auth = headers.authorization || '';
+  if (!url || !anon || !auth.startsWith('Bearer ')) return false;
   try {
-    const r = await fetch(`${url}/rest/v1/settings?key=eq.admin_pin&select=value&limit=1`, { headers: h });
-    if (r.ok) {
-      const rows = await r.json();
-      if (rows[0] && rows[0].value && safeEqual(staffPin, String(rows[0].value))) return true;
-    }
-  } catch (e) { console.warn('[meta-service] admin_pin lookup failed:', e.message); }
-  try {
-    const r = await fetch(`${url}/rest/v1/branches?select=pin`, { headers: h });
-    if (r.ok) {
-      const rows = await r.json();
-      if (rows.some((b) => b.pin && safeEqual(staffPin, String(b.pin)))) return true;
-    }
-  } catch (e) { console.warn('[meta-service] branch pin lookup failed:', e.message); }
-  return false;
+    const r = await fetch(`${url}/rest/v1/rpc/is_console`, {
+      method: 'POST', body: '{}',
+      headers: { apikey: anon, Authorization: auth, 'Content-Type': 'application/json' },
+    });
+    return r.ok && (await r.json()) === true;
+  } catch (e) {
+    console.warn('[meta-service] console login check failed:', e.message);
+    return false;
+  }
 }
 
 // ── Platform tables ───────────────────────────────────────────
@@ -91,11 +87,12 @@ function idColumnFor(platform) {
 }
 
 // ── Supabase REST client ──────────────────────────────────────
-// Uses Node 18 built-in fetch — no extra dependency needed.
+// Uses Node 18 built-in fetch — no extra dependency needed. Server key (S12):
+// the anon key reads nothing since the lockdown.
 function createSupabaseClient() {
   const url = process.env.SUPABASE_URL;
-  const key  = process.env.SUPABASE_ANON_KEY;
-  if (!url || !key) throw new Error('Missing SUPABASE_URL or SUPABASE_ANON_KEY env vars');
+  const key  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars');
 
   const headers = {
     apikey:          key,
@@ -736,13 +733,13 @@ function extractComments(payload) {
 // Returns the parsed JSON value of one settings row, or null on any failure —
 // each caller picks its own fallback.
 async function getSettingJson(key) {
-  const url  = process.env.SUPABASE_URL;
-  const anon = process.env.SUPABASE_ANON_KEY;
-  if (!url || !anon) return null;
+  const url = process.env.SUPABASE_URL;
+  const sk  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !sk) return null;
   try {
     const res = await fetch(
       `${url}/rest/v1/settings?key=eq.${encodeURIComponent(key)}&select=value&limit=1`,
-      { headers: { apikey: anon, Authorization: `Bearer ${anon}` } }
+      { headers: { apikey: sk, Authorization: `Bearer ${sk}` } }
     );
     if (!res.ok) return null;
     const rows = await res.json();
@@ -1553,13 +1550,22 @@ async function callAssistant({ model, kb, history, inboundText, offer, image }) 
 
   const sysParts = [{ text: ASSISTANT_SYSTEM_PROMPT }, { text: renderKbForPrompt(kb) }];
   if (offer) sysParts.push({ text: renderOfferForPrompt(offer) });
+  // A burst ("price?" "branches?" "tanning?") runs one turn per message and the
+  // older turns yield (yieldsToBurst), so the customer messages since the last
+  // reply join the new one: answered only "tanning?" (shadow, 2026-10-12).
+  const past = [...(history || [])];
+  const waiting = [];
+  while (past.length && past.at(-1).role !== 'model') waiting.unshift(String(past.pop().text || ''));
   // Language reminder sits next to the message: in the system prompt alone, a short
   // Hinglish line after an English thread still got English replies (live, 2026-09-23).
-  const parts = [{ text: `Customer's new message (reply in ITS language — plain English → only English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi):\n${inboundText}${image ? IMAGE_TURN_ADDENDUM : ''}` }];
+  const lang = 'reply in ITS language — plain English → only English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi';
+  const head = waiting.length ? `Customer's new messages, not answered yet — answer EVERY one in a single reply (${lang}):`
+                              : `Customer's new message (${lang}):`;
+  const parts = [{ text: `${head}\n${[...waiting, inboundText].join('\n')}${image ? IMAGE_TURN_ADDENDUM : ''}` }];
   if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
 
   const contents = [
-    ...(history || []).map(h => ({ role: h.role === 'model' ? 'model' : 'user', parts: [{ text: String(h.text || '') }] })),
+    ...past.map(h => ({ role: h.role === 'model' ? 'model' : 'user', parts: [{ text: String(h.text || '') }] })),
     { role: 'user', parts },
   ];
 
@@ -2206,6 +2212,29 @@ function inboundOf(row, msgs) {
       || mine.filter(m => Date.parse(m.created_at) <= Date.parse(row.created_at)).pop() || null;
 }
 
+// The turn's whole exchange, as live would have it: the customer's burst ending
+// at its message, and every staff message after it up to the customer's next
+// one. null when live would have yielded the turn to a newer message in the burst
+// (yieldsToBurst): only the burst's last turn would have been sent.
+function exchangeOf(row, msgs) {
+  const mine = msgs.filter(m => m.lead_id === row.lead_id);
+  const inbound = inboundOf(row, msgs);
+  const i = mine.indexOf(inbound);
+  if (i < 0) return { customer: [], staff: [], first: false };
+  const at = Date.parse(inbound.created_at);
+  const next = mine[i + 1];
+  if (next && isIncomingRow(next) && !isStickyInbound(inbound.message)
+      && Date.parse(next.created_at) - at < BURST_MS) return null;
+  let s = i;
+  while (s > 0 && isIncomingRow(mine[s - 1]) && at - Date.parse(mine[s - 1].created_at) < BURST_MS) s--;
+  let e = i + 1;
+  while (e < mine.length && !isIncomingRow(mine[e])) e++;
+  return { customer: mine.slice(s, i + 1).map(m => m.message),
+           staff:    mine.slice(i + 1, e).filter(m => !m.is_bot).map(m => m.message),
+           first:    !mine.slice(0, s).some(isIncomingRow) };
+}
+const quoted = (texts, each, total) => clip(texts.map(t => `"${clip(t, each)}"`).join(' / '), total);
+
 // Pure: { text, keyboard, shown } for these shadow rows, or null when none has a
 // draft. Per conversation the best draft to check: bot and staff quote different
 // prices → the bot quoted an offer → the conversation's first message → the rest
@@ -2215,15 +2244,11 @@ function draftDigest(rows, msgs, leads) {
   const best = {};
   for (const r of rows) {
     const draft = draftOf(r.decision);
-    if (!draft) continue;
-    const inbound = inboundOf(r, msgs);
-    const at    = Date.parse(inbound?.created_at || r.created_at);
-    const mine  = msgs.filter(m => m.lead_id === r.lead_id);
-    const staff = mine.find(m => !isIncomingRow(m) && !m.is_bot && Date.parse(m.created_at) > at)?.message || '';
-    const first = !mine.some(m => isIncomingRow(m) && Date.parse(m.created_at) < at);
-    const bp = firstPriceIn(draft), sp = firstPriceIn(staff);
-    const c = { r, draft, inbound, staff, tie: Math.random(),
-                rank: bp && sp && bp !== sp ? 0 : r.decision.offer ? 1 : first ? 2 : 3 };
+    const x = draft && exchangeOf(r, msgs);
+    if (!x) continue;
+    const bp = firstPriceIn(draft), sp = firstPriceIn(x.staff.join('\n'));
+    const c = { r, draft, x, tie: Math.random(),
+                rank: bp && sp && bp !== sp ? 0 : r.decision.offer ? 1 : x.first ? 2 : 3 };
     const b = best[r.lead_id];
     if (!b || c.rank < b.rank || (c.rank === b.rank && c.tie < b.tie)) best[r.lead_id] = c;
   }
@@ -2236,8 +2261,8 @@ function draftDigest(rows, msgs, leads) {
     const l = leadOf[c.r.lead_id] || {};
     const q = mergeBotState(l.bot_state, c.r.decision).qualification;
     const block = `${n}) ${[l.customer_name || 'A customer', q.service, q.branch || q.location].filter(Boolean).join(' · ')}\n` +
-      `   Customer: "${clip(c.inbound?.message, 200)}"\n   Bot: "${clip(c.draft, 600)}"\n` +
-      `   Staff sent: ${c.staff ? `"${clip(c.staff, 300)}"` : '(no reply yet)'}`;
+      `   Customer: ${quoted(c.x.customer, 200, 500) || '""'}\n   Bot: "${clip(c.draft, 600)}"\n` +
+      `   Staff sent: ${quoted(c.x.staff, 300, 700) || '(no reply yet)'}`;
     if (n > DIGEST_MAX || blocks.join('\n\n').length + block.length > DIGEST_CHARS) break;
     blocks.push(block);
     buttons.push({ text: `${n} ✅`, callback_data: `sd:good:${c.r.id}` }, { text: `${n} ✏️`, callback_data: `sd:fix:${c.r.id}` });

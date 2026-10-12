@@ -25,10 +25,8 @@ function stopLiveClock() {
 let state = {
   branches: [],
   currentBranch: null,
-  pinBuffer: '',
   activeDate: null,
   isAdmin: false,
-  adminPIN: null,
   cameFromAdmin: false,
   autocompleteData: { products: [], staff: [], names: [] },
   commentRules: [],
@@ -101,14 +99,13 @@ function showHome() {
   state.currentBranch = null;
   state.isAdmin = false;
   state.cameFromAdmin = false;
-  state.pinBuffer = '';
   showScreen('home');
-  loadBranches();
   setRoute('#/');
 }
 
-function logout() {
+async function logout() {
   clearSession();
+  await db.auth.signOut();
   showHome();
 }
 
@@ -473,7 +470,7 @@ async function sendLeadMessage() {
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'x-staff-pin': _staffPin() },
+      headers: { 'Content-Type': 'application/json', ...(await _authHeader()) },
       body:    JSON.stringify({ leadId, message: body }),
     });
     const data = await res.json().catch(() => ({}));
@@ -850,7 +847,7 @@ async function sendAdminChatMessage() {
   try {
     const res = await fetch('/.netlify/functions/meta-send', {
       method:  'POST',
-      headers: { 'Content-Type': 'application/json', 'x-staff-pin': _staffPin() },
+      headers: { 'Content-Type': 'application/json', ...(await _authHeader()) },
       body:    JSON.stringify({ leadId, message: body }),
     });
     const data = await res.json().catch(() => ({}));
@@ -909,10 +906,11 @@ function _isOutgoing(direction) {
   return ['out', 'outgoing'].includes(direction);
 }
 
-// The PIN of whoever is logged in (admin or branch), sent on every write to the
-// send endpoints so they can authorize server-side. Empty before login.
-function _staffPin() {
-  return state.adminPIN || state.currentBranch?.pin || '';
+// The console's login token, sent on every write to the send endpoints so they can
+// authorize server-side (authorizeRequest → is_console(), S12). getSession refreshes it.
+async function _authHeader() {
+  const { data } = await db.auth.getSession();
+  return { Authorization: `Bearer ${data.session?.access_token || ''}` };
 }
 
 // Append one bubble to the open branch thread (no-op if it isn't the active convo).
@@ -1094,19 +1092,41 @@ async function init() {
   if (!cfgRes.ok) throw new Error('Failed to load app config — check Netlify env vars');
   const { supabaseUrl, supabaseAnonKey } = await cfgRes.json();
   db = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
-  await Promise.all([loadBranches(), loadAdminPIN(), loadPaymentModes()]);
   bindGlobalEvents();
   markOffAreas();
   window.addEventListener('hashchange', () => {
     if (_suppressHash > 0) { _suppressHash--; return; }
     routeFromHash();
   });
+  // S12: the console signs in with one Supabase Auth account; the public key alone
+  // reads nothing. The app session (24 h) and the Supabase login end together.
+  const { data } = await db.auth.getSession();
+  if (data.session && loadSession()) await loadAppData();
+  else { clearSession(); if (data.session) await db.auth.signOut(); }
   await routeFromHash();   // restore where the user left off
 }
 
-async function loadAdminPIN() {
-  const { data } = await db.from('settings').select('value').eq('key', 'admin_pin').single();
-  state.adminPIN = data?.value || null;
+async function loadAppData() {
+  await Promise.all([loadBranches(), loadPaymentModes()]);
+}
+
+async function signIn(e) {
+  e.preventDefault();
+  const btn = document.getElementById('btn-login');
+  const msg = document.getElementById('login-error');
+  msg.textContent = '';
+  btn.disabled = true;
+  const { error } = await db.auth.signInWithPassword({
+    email: document.getElementById('login-email').value.trim(),
+    password: document.getElementById('login-password').value,
+  });
+  btn.disabled = false;
+  if (error) { msg.textContent = error.message; return; }
+  document.getElementById('login-password').value = '';
+  await loadAppData();
+  state.isAdmin = true;
+  saveSession('admin', null);
+  await openAdminPanel();
 }
 
 // ============================================================
@@ -1549,7 +1569,7 @@ function showScreen(name) {
 }
 
 // ============================================================
-// HOME — BRANCH LOADING
+// BRANCHES
 // ============================================================
 
 async function loadBranches() {
@@ -1559,92 +1579,12 @@ async function loadBranches() {
     .eq('active', true)
     .order('name');
 
-  if (error) {
-    document.getElementById('branch-grid').innerHTML =
-      '<p style="color:#e53935;padding:20px;text-align:center">Could not load branches. Check Supabase config.</p>';
-    return;
-  }
-
+  if (error) { console.error('[branches]', error.message); return; }
   state.branches = data;
-  renderBranchCards(data);
-}
-
-function renderBranchCards(branches) {
-  const grid = document.getElementById('branch-grid');
-  grid.innerHTML = branches.map((b) => `
-    <div class="branch-card" data-branch-id="${b.id}">
-      <div class="branch-card-left">
-        <div class="branch-icon">
-          <img src="dskin-logo.png" style="width:36px;height:auto;opacity:0.85" alt="">
-        </div>
-        <div>
-          <div class="branch-name">${esc(b.name)}</div>
-          <div class="branch-sub">Tap to continue</div>
-        </div>
-      </div>
-      <div class="branch-arrow">›</div>
-    </div>
-  `).join('');
-
-  grid.querySelectorAll('.branch-card').forEach(card => {
-    card.addEventListener('click', () => {
-      const branch = branches.find(b => b.id === card.dataset.branchId);
-      selectBranch(branch);
-    });
-  });
 }
 
 // ============================================================
-// PIN ENTRY
-// ============================================================
-
-function selectBranch(branch) {
-  state.currentBranch = branch;
-  state.pinBuffer = '';
-  document.getElementById('pin-branch-name').textContent = branch.name;
-  document.getElementById('pin-error').textContent = '';
-  updatePinDots();
-  showScreen('pin');
-}
-
-function updatePinDots() {
-  for (let i = 0; i < 4; i++) {
-    const dot = document.getElementById('d' + i);
-    dot.className = 'pin-dot';
-    if (i < state.pinBuffer.length) dot.classList.add('filled');
-  }
-}
-
-async function verifyPIN() {
-  const entered = state.pinBuffer;
-
-  if (state.adminPIN && entered === state.adminPIN) {
-    // Admin PIN — open admin panel
-    state.isAdmin = true;
-    state.cameFromAdmin = false;
-    saveSession('admin', null);
-    await openAdminPanel();
-  } else if (entered === state.currentBranch.pin) {
-    // Branch PIN — open dashboard
-    state.isAdmin = false;
-    state.cameFromAdmin = false;
-    state.activeDate = getISTDate();
-    saveSession('branch', state.currentBranch.id);
-    await openDashboard();
-  } else {
-    // Wrong
-    document.getElementById('pin-error').textContent = 'Incorrect PIN. Try again.';
-    document.querySelectorAll('.pin-dot').forEach(d => {
-      d.classList.add('error');
-      setTimeout(() => { d.classList.remove('error', 'filled'); }, 600);
-    });
-    state.pinBuffer = '';
-    setTimeout(() => updatePinDots(), 650);
-  }
-}
-
-// ============================================================
-// ADMIN PANEL (PIN-based)
+// ADMIN PANEL
 // ============================================================
 
 async function openAdminPanel() {
@@ -2298,7 +2238,7 @@ async function fireAutomationEmail(automation, from, to) {
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-staff-pin': _staffPin() },
+        headers: { 'Content-Type': 'application/json', ...(await _authHeader()) },
         body: payload,
       });
       if (res.ok) return;
@@ -2309,25 +2249,6 @@ async function fireAutomationEmail(automation, from, to) {
     if (attempt < 3) await new Promise(r => setTimeout(r, 2000 * attempt));
   }
   console.error('Automation failed after 3 attempts');
-}
-
-async function saveAdminPIN() {
-  const newPin = document.getElementById('new-admin-pin-input').value.trim();
-  if (!/^\d{4}$/.test(newPin)) {
-    showToast('Admin PIN must be 4 digits', 'error');
-    return;
-  }
-  // Can't match any active branch PIN
-  const conflict = state.branches.find(b => b.pin === newPin && b.active !== false);
-  if (conflict) {
-    showToast(`PIN conflicts with "${conflict.name}" branch`, 'error');
-    return;
-  }
-  const { error } = await db.from('settings').upsert({ key: 'admin_pin', value: newPin });
-  if (error) { showToast('Error saving PIN', 'error'); return; }
-  state.adminPIN = newPin;
-  document.getElementById('new-admin-pin-input').value = '';
-  showToast('Admin PIN updated ✓', 'success');
 }
 
 // Branch CRUD
@@ -2357,7 +2278,6 @@ async function saveBranchModal() {
 
   if (!name) { showToast('Enter branch name', 'error'); return; }
   if (!/^\d{4}$/.test(pin)) { showToast('PIN must be 4 digits', 'error'); return; }
-  if (pin === state.adminPIN) { showToast('Cannot use Admin PIN for a branch', 'error'); return; }
 
   if (id) {
     await db.from('branches').update({ name, pin, state: stateVal || null }).eq('id', id);
@@ -2392,70 +2312,12 @@ function deleteBranch(id, name) {
   });
 }
 
-// Forgot PIN — shows modal
-function forgotPIN() {
-  document.getElementById('forgot-pin-email').value = '';
-  document.getElementById('forgot-pin-msg').textContent = '';
-  document.getElementById('forgot-pin-msg').className = 'admin-msg';
-  document.getElementById('modal-forgot-pin').style.display = 'flex';
-}
-
-async function sendForgotPIN() {
-  const email = document.getElementById('forgot-pin-email').value.trim().toLowerCase();
-  const msg = document.getElementById('forgot-pin-msg');
-  const btn = document.getElementById('btn-forgot-submit');
-
-  if (!email) {
-    msg.textContent = 'Enter your email address.';
-    msg.className = 'admin-msg error';
-    return;
-  }
-
-  if (email !== CONFIG.ADMIN_EMAIL.toLowerCase()) {
-    msg.textContent = 'Not authorized.';
-    msg.className = 'admin-msg error';
-    return;
-  }
-
-  // Send PIN to admin email via Netlify function (PIN never exposed on screen)
-  btn.disabled = true;
-  btn.textContent = 'Sending…';
-  msg.textContent = '';
-  msg.className = 'admin-msg';
-
-  try {
-    // Always sends the ADMIN PIN to the admin email (never a branch PIN).
-    // This is the admin's private recovery path; for staff it's a decoy.
-    // branch_id is sent only so the email can show which branch attempted it.
-    const res = await fetch('/.netlify/functions/send-pin-email', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, branch_id: state.currentBranch?.id || null }),
-    });
-
-    if (res.ok) {
-      msg.textContent = 'PIN sent to your email.';
-      msg.className = 'admin-msg success';
-    } else {
-      const err = await res.json().catch(() => ({}));
-      msg.textContent = err.error === 'Not authorized' ? 'Not authorized.' : 'Could not send email. Try again.';
-      msg.className = 'admin-msg error';
-    }
-  } catch {
-    msg.textContent = 'Network error. Try again.';
-    msg.className = 'admin-msg error';
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Get PIN';
-  }
-}
-
 // ============================================================
 // DASHBOARD
 // ============================================================
 
 async function openDashboard() {
-  // Every way in (branch PIN, admin "View →", a saved #/branch link) lands here.
+  // Every way in (admin "View →", a saved #/branch link) lands here.
   if (OFF_AREAS.includes('branch')) {
     showToast('The branch dashboard is not in use');
     return state.isAdmin ? openAdminPanel() : logout();
@@ -4000,65 +3862,7 @@ function bindGlobalEvents() {
     if (!e.target.closest('.staff-dropdown-wrap') && !e.target.closest('#staff-portal-panel')) closeAllStaffPanels();
   });
 
-  // PIN screen
-  document.getElementById('btn-pin-back').addEventListener('click', () => {
-    state.currentBranch = null;
-    state.pinBuffer = '';
-    showScreen('home');
-  });
-
-  document.getElementById('btn-pin-clear').addEventListener('click', () => {
-    state.pinBuffer = '';
-    document.getElementById('pin-error').textContent = '';
-    updatePinDots();
-  });
-
-  document.getElementById('btn-pin-del').addEventListener('click', () => {
-    state.pinBuffer = state.pinBuffer.slice(0, -1);
-    updatePinDots();
-  });
-
-  document.querySelectorAll('.num-btn[data-val]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (state.pinBuffer.length >= 4) return;
-      state.pinBuffer += btn.dataset.val;
-      updatePinDots();
-      if (state.pinBuffer.length === 4) {
-        setTimeout(verifyPIN, 150);
-      }
-    });
-  });
-
-  // Keyboard / numpad input for PIN screen
-  document.addEventListener('keydown', (e) => {
-    const pinScreen = document.getElementById('screen-pin');
-    if (!pinScreen || !pinScreen.classList.contains('active')) return;
-    // Ignore if focus is inside a text input (e.g. forgot PIN modal)
-    const tag = document.activeElement?.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-
-    if (e.key >= '0' && e.key <= '9') {
-      if (state.pinBuffer.length >= 4) return;
-      state.pinBuffer += e.key;
-      updatePinDots();
-      if (state.pinBuffer.length === 4) setTimeout(verifyPIN, 150);
-    } else if (e.key === 'Backspace') {
-      state.pinBuffer = state.pinBuffer.slice(0, -1);
-      updatePinDots();
-    } else if (e.key === 'Escape') {
-      state.pinBuffer = '';
-      document.getElementById('pin-error').textContent = '';
-      updatePinDots();
-    }
-  });
-
-  document.getElementById('btn-forgot-pin').addEventListener('click', forgotPIN);
-
-  // Forgot PIN modal
-  document.getElementById('btn-forgot-cancel').addEventListener('click', () => {
-    document.getElementById('modal-forgot-pin').style.display = 'none';
-  });
-  document.getElementById('btn-forgot-submit').addEventListener('click', sendForgotPIN);
+  document.getElementById('login-form').addEventListener('submit', signIn);
 
   // Branch panel — logout / back-to-admin
   function branchExit() {
@@ -4156,7 +3960,6 @@ function bindGlobalEvents() {
   document.getElementById('auto-trigger-type').addEventListener('change', (e) => {
     updateAutoTriggerUI(e.target.value);
   });
-  document.getElementById('btn-save-admin-pin').addEventListener('click', saveAdminPIN);
 
   // Clear the "Product/Service required" highlight as soon as staff start typing
   document.addEventListener('input', (e) => {

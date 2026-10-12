@@ -171,7 +171,6 @@ netlify/functions/
   meta-status.js                → live connection check for admin "Connected Accounts"
   send-feedback-email.js        → staff feedback  → admin email
   send-variance-alert.js        → till variance   → admin email
-  send-pin-email.js             → "Forgot PIN"    → emails the ADMIN PIN to the admin only
   send-automation-report.js     → automation: emails a .doc report (Resend attachment)
   send-automation-webhook.js    → automation: POSTs a formatted text report to a webhook
   check-automations.js          → cron (0 18 * * * UTC = 23:30 IST): fires scheduled automations
@@ -201,15 +200,14 @@ Docs (see §23):
 | 177–479 | **Lead Hub — unified inbox** (branch side) |
 | 481–729 | **Admin — Leads pipeline** (cross-branch KPIs, table, chat modal) |
 | 731–795 | **Admin — Connected Accounts** (integration toggles) |
-| 797–818 | `init()` |
+| 797–818 | `init()`, `signIn()` |
 | 820–899 | Payment modes (load/save/render/add/remove) |
 | 901–963 | **Instagram comment automation rules** (load/save/render/add/remove) |
 | 965–973 | `showScreen()` |
-| 975–1019 | Branch loading + cards |
-| 1021–1068 | PIN entry + `verifyPIN()` |
+| 975–1019 | Branch loading |
 | 1070–1178 | Admin panel open, alerts/feedback |
 | 1180–1447 | Feedback modal, admin branches, admin stats/KPIs |
-| 1449–1869 | Automations, admin PIN, branch CRUD, forgot-PIN |
+| 1449–1869 | Automations, branch CRUD |
 | 1871–2052 | Branch dashboard (today status, yesterday warning, stats) |
 | 2054–2477 | Cashup form (rows, staff dropdown portal, `recalcSummary`) |
 | 2479–2669 | `saveCashup()` |
@@ -229,9 +227,11 @@ Docs (see §23):
    - `fetch('/.netlify/functions/get-config')` — gets `SUPABASE_URL` + `SUPABASE_ANON_KEY`
      **at runtime**, so no credentials are baked into any browser-served file.
    - `db = window.supabase.createClient(url, key)` — the single global DB handle.
-   - `Promise.all([loadBranches(), loadAdminPIN(), loadPaymentModes()])`.
-   - `bindGlobalEvents()`, `hashchange` listener, then `routeFromHash()` to restore
-     wherever the user left off.
+   - `bindGlobalEvents()`, `hashchange` listener.
+   - `db.auth.getSession()` (S12): signed in **and** a live `clinix_session` →
+     `loadAppData()` (`loadBranches()` + `loadPaymentModes()`); otherwise both sessions are
+     cleared (the anon key alone reads nothing).
+   - `routeFromHash()` restores wherever the user left off (no session → the sign-in form).
 
 > **Consequence:** a plain static server (`npx serve .`) cannot boot the app — there's no
 > `/.netlify/functions/get-config`. Use `netlify dev`.
@@ -244,7 +244,7 @@ Docs (see §23):
 
 | Route | Screen |
 |---|---|
-| `#/` | Home (branch picker) |
+| `#/` | Home (sign-in form) |
 | `#/branch/cashup` | Branch dashboard — Daily Cashup tab (default) |
 | `#/branch/emails` | Branch dashboard — Emails tab (placeholder, "Coming soon") |
 | `#/branch/leads` | Branch dashboard — Leads inbox |
@@ -266,20 +266,22 @@ Docs (see §23):
 
 ## 7. Authentication model
 
-**There are no Supabase Auth users.** Everything is PIN-based:
+**One Supabase Auth account** (since S12, Q35). The console is ours only (the client never logs in, Q3).
 
-| Role | Credential | Where stored |
-|---|---|---|
-| Branch staff | 4-digit PIN | `branches.pin` |
-| Admin | 4-digit PIN | `settings.admin_pin` |
-| Accountant | email allow-list, view-only | `CONFIG.ACCOUNTANT_EMAILS` in [config.js](config.js) (currently empty) |
-
-- `verifyPIN()` ([app.js:977](app.js#L977)) matches the entered PIN against the selected
-  branch, or against the admin PIN, and routes accordingly.
-- **Forgot PIN** ([app.js:1749](app.js#L1749) → [send-pin-email.js](netlify/functions/send-pin-email.js)):
-  the function **only ever sends the ADMIN PIN, only to the admin email**. Any other email
-  gets a hard `403`. For staff it is effectively a decoy; the email names which branch
-  triggered it so the admin knows.
+- **Sign-in**: the home screen is an email + password form → `signIn()` →
+  `db.auth.signInWithPassword` → `loadAppData()` → admin panel. supabase-js keeps the session
+  in `localStorage` and refreshes the token; the 24 h `clinix_session` TTL still applies, and
+  `init()` signs out of Supabase when it has expired. **Exit Admin** = `logout()` → `signOut()`.
+- **Which account**: `dermadwarka@gmail.com`. `is_console()` in [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql) names its
+  email. Every table's only policy (`console_only`, role `authenticated`) asks `is_console()`, so
+  another signup sees nothing. Sign-ups are off in Supabase Auth settings. Password reset: Supabase
+  dashboard → Authentication → Users.
+- **Send endpoints** (`meta-send`, `send-automation-*`): the browser sends
+  `Authorization: Bearer <access token>` (`_authHeader()`); `authorizeRequest` asks
+  `rpc/is_console` with that token. The cron uses `x-internal-secret` instead.
+- **Gone with S12**: the PIN pad, `verifyPIN()`, Forgot PIN + `send-pin-email`, Change Admin PIN.
+  `settings.admin_pin` and `branches.pin` stay in the DB, unused. The branch side (off since S1)
+  would need its own logins to come back.
 - **Staff date guard**: non-admin users can only save **today or yesterday**
   ([app.js:2440](app.js#L2440)). Admin can open and edit any date for any branch.
 
@@ -292,8 +294,7 @@ Each screen is a `<div class="screen">`; `showScreen(name)` toggles `.active`
 
 | Screen id | Purpose |
 |---|---|
-| `screen-home` | Branch picker cards + "Admin" entry |
-| `screen-pin` | 4-digit PIN pad with dots, Forgot PIN link |
+| `screen-home` | Sign-in form (email + password, S12) |
 | `screen-dashboard` | Branch panel: sidebar with 3 tabs + mobile bottom nav |
 | `screen-cashup` | The cashup sheet (date hero + live IST clock) |
 | `screen-admin-panel` | Admin: sidebar with 5 tabs + mobile bottom nav |
@@ -396,7 +397,7 @@ Opened by `openAdminPanel()` ([app.js:1009](app.js#L1009)). Five tabs:
 
 > **Not in use (2026-10-02, chatbot-as-a-service, Q3):** `OFF_AREAS` at the top of [app.js](app.js) greys out
 > the **Leads**, **Reports** and **Notifications** tabs, the Overview **Performance** card, and the whole
-> **branch dashboard** (branch PIN login, "View →", `#/branch/*`, `#/cashup/*` bounce back with a toast).
+> **branch dashboard** ("View →", `#/branch/*`, `#/cashup/*` bounce back with a toast).
 > They are `inert` (can't be clicked, focused or routed to) and labelled "Not in use". Nothing is deleted
 > and no data is touched: remove a name from `OFF_AREAS` to turn that area back on. Overview → Branches
 > and **Settings** stay fully usable (this is now our operator console).
@@ -442,7 +443,6 @@ Five collapsible cards:
    question + staff-answer pairs captured automatically on kb_miss threads; Approve
    (after optional edit) folds them into the KB, Discard drops them. Title shows the
    pending count.
-7. **Change Admin PIN** (`saveAdminPIN`).
 
 **Staff feedback** is submitted from the cashup screen (`openFeedbackModal`,
 `submitFeedback`, [app.js:1119](app.js#L1119)) → writes `cashup_feedback` **and** emails
@@ -835,9 +835,11 @@ botReply
 - **Shadow draft digest** (chatbot-as-a-service S11a): in **shadow** mode [bot-hourly](netlify/functions/bot-hourly.js)
   does only this. At `chatbot_config.draft_digest_hour` (IST, default 20), `sendDraftDigest` sends the owner ONE
   Telegram message with the last 24 h of undigested `bot_shadow_log` drafts: one per conversation, up to 8, within
-  Telegram's 4,096 characters. Each shows name · service · branch, the customer's message (by Meta id, else the last
-  one before the turn), the bot's draft (normal replies only: handoffs, the safety net, non-leads and errors aren't
-  drafts) and **what staff sent** (the first non-bot outgoing row after it, else "(no reply yet)"). Picked in order:
+  Telegram's 4,096 characters. Each shows name · service · branch, the customer's messages (the turn's message, by Meta
+  id else the last one before the turn, plus the burst before it: messages within 60 s with no reply between), the
+  bot's draft (normal replies only: handoffs, the safety net, non-leads and errors aren't drafts) and **what staff
+  sent** (every non-bot outgoing row up to the customer's next message, else "(no reply yet)"). A turn live would
+  have yielded to a newer message in its burst (`yieldsToBurst`) is skipped. Picked in order:
   bot and staff quote different prices → the bot quoted an offer → a conversation's first message → random. Every
   row looked at gets `digest_at`, so a second run sends nothing new.
   - **[n ✅]** (`sd:good:<row id>`) → `owner_verdict: 'good'`. **[n ✏️]** (`sd:fix:<id>`) → a `force_reply` prompt
@@ -1082,7 +1084,6 @@ All functions are Node 18 CommonJS using built-in `fetch`. CORS headers are `*`.
 | [meta-status](netlify/functions/meta-status.js) | `/.netlify/functions/meta-status` | GET | — | `{instagram:{connected,name}, facebook:{…}, whatsapp:{…}}`. `Cache-Control: no-store`. Never returns tokens. |
 | [send-feedback-email](netlify/functions/send-feedback-email.js) | `/.netlify/functions/send-feedback-email` | POST | `{branch_name, entry_date, feedback_text, submitted_by}` | Resend email to the admin. |
 | [send-variance-alert](netlify/functions/send-variance-alert.js) | `/.netlify/functions/send-variance-alert` | POST | `{branch_name, entry_date, calculated_closing, actual_closing, variance}` | Resend email; "Over by" green / "Short by" red. |
-| [send-pin-email](netlify/functions/send-pin-email.js) | `/.netlify/functions/send-pin-email` | POST | `{email, branch_id}` | **403 unless `email` is the admin email.** Reads `settings.admin_pin`, emails it to the admin only, naming the branch that triggered it. |
 | [send-automation-report](netlify/functions/send-automation-report.js) | `/.netlify/functions/send-automation-report` | POST | `{automation_id, date_from, date_to}` | Builds a styled HTML→`.doc`, base64-attaches it to a Resend email, updates `last_sent_at`. |
 | [send-automation-webhook](netlify/functions/send-automation-webhook.js) | `/.netlify/functions/send-automation-webhook` | POST | `{automation_id, date_from, date_to}` | Builds a per-branch plain-text block `{report: "…"}`, POSTs to `webhook_url`, **3 retries** w/ backoff, updates `last_sent_at`, `502` on final failure. |
 | [check-automations](netlify/functions/check-automations.js) | scheduled | cron | — | `schedule('0 18 * * *')`. Fires due scheduled automations (see [§13](#13-report-automations)). |
@@ -1130,7 +1131,7 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 
 | Key | Value |
 |---|---|
-| `admin_pin` | 4-digit admin PIN (string) |
+| `admin_pin` | old 4-digit admin PIN, unused since S12 (Supabase Auth sign-in) |
 | `payment_modes` | JSON array `[{code,label}, …]` |
 | `integrations` | JSON flags `{"instagram":true,"facebook":true,"whatsapp":true}` — only an explicit `false` disables |
 | `comment_rules` | JSON array `[{keyword, public, dm}, …]` — Instagram & Facebook comment automation ([§15](#instagram-comment-automation-comment--dm--branch-routing)) |
@@ -1141,8 +1142,10 @@ Full DDL with comments: **[SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql)**.
 **Indexes**: `idx_leads_branch`, `idx_leads_instagram_user`, `idx_leads_facebook_user`,
 `idx_leads_whatsapp_user`, `idx_lead_notes_lead`, `idx_lead_messages_lead`.
 
-**RLS is DISABLED on every table**, except **`secrets`** (S9: `key` text PK, `value` jsonb; RLS on, no
-policy, anon/authenticated grants revoked), which only `SUPABASE_SERVICE_ROLE_KEY` can touch. Migrations are run by hand in the Supabase SQL editor —
+**Access (S12, [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql)):** RLS on every table, one policy
+`console_only` (role `authenticated`, `is_console()`), and anon has no grants on any table or view.
+Functions use `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS). **`secrets`** (S9: `key` text PK, `value`
+jsonb) has RLS on, no policy, anon/authenticated grants revoked: only the service key touches it. Migrations are run by hand in the Supabase SQL editor —
 there is no migration framework in the repo.
 
 ### ⚠️ Known schema-file drift — trust the code, not the SQL file
@@ -1168,8 +1171,8 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 | Var | Used by | Purpose |
 |---|---|---|
 | `SUPABASE_URL` | all DB-touching functions | Supabase project URL |
-| `SUPABASE_ANON_KEY` | all DB-touching functions | Public anon key (also served to the browser) |
-| `SUPABASE_SERVICE_ROLE_KEY` | `getIgToken()` / Connect / refresh (meta-service) | **Secret**, server-only. The only key that can read the `secrets` table (RLS on, no anon policy). Unset = IG token from env only |
+| `SUPABASE_ANON_KEY` | get-config → browser; `authorizeRequest` | Public anon key. Since S12 it reads no table: the browser uses it to sign in, then the login token decides |
+| `SUPABASE_SERVICE_ROLE_KEY` | every DB-touching function + local scripts | **Secret**, server-only, **required** (S12). Bypasses RLS; the only key that reads `secrets`. `getIgToken()` alone tolerates it unset (IG token from env only) |
 | `RESEND_API_KEY` | 5 email functions + bot alert fallback | Resend API key — **secret** |
 | `META_APP_ID` | meta-service `getConfig()` | Meta app id |
 | `META_APP_SECRET` | `verifyMetaSignature()` | HMAC-verifies the `X-Hub-Signature-256` on every webhook POST (see [§20](#20-security-model-quirks--known-issues)) |
@@ -1182,14 +1185,14 @@ Set in **Netlify → Site settings → Environment variables** (production) and 
 | `META_BRANCH_ID` | `processIncomingMessage()` | Branch UUID every inbound lead attaches to |
 | `WHATSAPP_PHONE_NUMBER_ID` | WA send + WA status | Numeric **phone number ID**, not the number |
 | `WHATSAPP_ACCESS_TOKEN` | WA send + WA status | **Use a System User token with expiry Never** — the dashboard token dies in 24 h |
-| `LEAD_WEBHOOK_URL` | `pushLead()` (meta-service) | Make Custom-webhook URL that settled chats are POSTed to. Unset = no pushes. Env, not DB: the DB is readable with the public key (Q35) |
+| `LEAD_WEBHOOK_URL` | `pushLead()` (meta-service) | Make Custom-webhook URL that settled chats are POSTed to. Unset = no pushes. Env, not DB (decided before the S12 lockdown, Q35) |
 | `LEAD_WEBHOOK_KEY` | `pushLead()` (optional) | Sent as `x-make-apikey` once the webhook has an API key (Q10) |
 | `TELEGRAM_BOT_TOKEN` | `sendTelegram()` (owner alerts) | @BotFather token — **secret**. Unset = alerts go by email |
 | `TELEGRAM_WEBHOOK_SECRET` | telegram-webhook | Must match `secret_token` given to `setWebhook`; unset = the webhook rejects everything |
 | `TELEGRAM_LINK_CODE` | telegram-webhook | Owner opens `t.me/<bot>?start=<code>` to receive alerts. Change it to stop anyone else re-linking |
 | `OPS_ALERT_EMAIL` | `/mode` (S11b) | Us: emailed on every bot mode change the owner makes in Telegram. Unset = the default admin address |
 | `URL` | check-automations, ig-connect | Injected by Netlify; check-automations falls back to the hardcoded site URL, ig-connect to the request host (builds the OAuth redirect URI) |
-| `INTERNAL_FUNCTION_SECRET` | check-automations → send-automation-* | Shared secret authorizing the cron's calls to the (now PIN/secret-gated) send endpoints. **Required** for scheduled automations to fire. |
+| `INTERNAL_FUNCTION_SECRET` | check-automations → send-automation-* | Shared secret authorizing the cron's calls to the (login/secret-gated) send endpoints. **Required** for scheduled automations to fire. |
 
 > **Env vars are read at deploy time — after adding or changing one you must trigger a
 > redeploy**, or the running deploy won't see it. A `403` on webhook verification with
@@ -1267,13 +1270,11 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
 
 ### Security model
 
-- **RLS is enabled but permissive on every table** (`allow_anon_all` — see
-  [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql)). The browser holds the public **anon
-  key** with full read/write; the net behaviour is identical to RLS-off. **Security is
-  enforced at the app/PIN layer only** — the anon key is not a security boundary; anyone who
-  opens devtools can read and write the database directly. (Tightening this needs Supabase
-  Auth or moving writes to the service_role — deferred, see [§22](#22-roadmap--open-items).)
-- **Exception: `secrets` (S9)** holds the connected Instagram token. RLS on with **no** policy, so
+- **Locked down (S12, 2026-10-12)** — [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql). The public
+  **anon key** reads and writes **nothing** (no grants on any table or view). The console signs in
+  with one Supabase Auth account; every table's only policy asks `is_console()` (that account's
+  email). Functions use the service key. See [§7](#7-authentication-model).
+- **`secrets` (S9)** holds the connected Instagram token. RLS on with **no** policy, so
   the anon key reads nothing; only the server's `SUPABASE_SERVICE_ROLE_KEY` (bypasses RLS) can. The
   `SUPABASE_ENABLE_RLS.sql` loop skips it. Never give it a policy.
 - The anon key is public *by design* and safe to ship. **Never commit** the Netlify deploy
@@ -1287,10 +1288,10 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
   content) to distinguish wrong secret / mangled body / missing header. **Note:** for Instagram
   API with Instagram Login, `META_APP_SECRET` must be the **Instagram app secret**, not the
   parent Meta app secret.
-- **Send endpoints are now auth-gated (2026-08-13).** `meta-send`, `send-automation-report`
-  and `send-automation-webhook` require either a browser `x-staff-pin` header (the logged-in
-  admin/branch PIN) or a server `x-internal-secret` (`INTERNAL_FUNCTION_SECRET`, used by the
-  scheduled cron). Without one, 401.
+- **Send endpoints are auth-gated.** `meta-send`, `send-automation-report`
+  and `send-automation-webhook` require either the console's login token
+  (`Authorization: Bearer …`, checked with `rpc/is_console`, S12; was a PIN header) or a server
+  `x-internal-secret` (`INTERNAL_FUNCTION_SECRET`, used by the scheduled cron). Without one, 401.
 - Outbound tokens never reach the client: `meta-send` resolves the recipient from the lead
   row server-side.
 - User-supplied text is escaped (`esc()`) or set via `textContent` before rendering.
@@ -1301,7 +1302,7 @@ production** while it's set. Full procedure: [NETLIFY_CREDITS_WORKAROUND.md](NET
 |---|---|
 | 1 | **Everything is IST.** `getISTDate()` is the canonical "today"; the cashup screen runs a live IST clock. |
 | 2 | **Save = full overwrite** of that branch/day (delete-then-insert). Concurrent edits clobber each other silently. |
-| 3 | `ADMIN_EMAIL` is **duplicated** — `config.js` plus hardcoded constants in `send-pin-email.js`, `send-feedback-email.js`, `send-variance-alert.js`. Changing the admin email means changing it in **four** places. |
+| 3 | `ADMIN_EMAIL` is **duplicated** — `config.js` plus hardcoded constants in `send-feedback-email.js`, `send-variance-alert.js`. Changing the admin email means changing it in **three** places. |
 | 4 | Every email template **hot-links the logo** at `https://eloquent-pothos-dc09dc.netlify.app/dskin-logo.png`. Move the site and every historical email breaks its image. |
 | 5 | Resend sends from the shared `onboarding@resend.dev`. For production, verify a domain and change the `from:`. |
 | 6 | `README.md` is the day-1 guide and describes putting Supabase creds in `config.js` — **that is no longer true** (see [§5](#5-boot-sequence)). |
@@ -1323,6 +1324,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 
 | Date | Commit | Change |
 |---|---|---|
+| 2026-10-12 | — | **Data locked down (service tracker S12, Q35).** [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql) is now the lockdown: `is_console()` (the one console account's email), one `console_only` policy per table for `authenticated`, anon grants revoked on every table and view (and by default for new ones); the old `allow_anon_all` is dropped. [SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql) no longer disables RLS. Every function and local script uses `SUPABASE_SERVICE_ROLE_KEY`. The console signs in with email + password (`signIn`; `logout` → `signOut`); the PIN pad, Forgot PIN (`send-pin-email.js` deleted) and Change Admin PIN are gone. `authorizeRequest` checks the login token via `rpc/is_console` instead of `x-staff-pin`. See §7, §20. |
 | 2026-10-09 | — | **Report numbers reworked for the lead service.** [send-bot-report.js](netlify/functions/send-bot-report.js) counts the chats the customer wrote in during the window: total **chats**, then customers (category `lead`) split by what the bot gathered: **complete leads** (phone + service + branch/location), **potential leads** (a service, details missing), **general enquiries** (no service); **from comments** (chats opened by a `[comment]` inbound, and how many have a service); **top 3 services**; **leads per branch**. From `bot_state` stamps in the window (one `or=` query): **leads sent to Make** (+ ⚠️ failed = `lead_push_alerted` without a later `lead_pushed`), **price questions to you** (asked / answered / `owner_no_reply`). New stamp `bot_state.owner_asked_at` on a kb_miss handoff, since `handoff_at` is overwritten by the chat's next handoff. Kept: medical / emergency, kb_miss, turn cap, bot messages. Dropped: handoffs to staff, the % / ≥60% target, missed medical (and its ⚠️ title), the Teach-the-Bot note. [scripts/bot-metrics.sql](scripts/bot-metrics.sql) is unchanged (old numbers, ad-hoc only). |
 | 2026-10-08 | — | **Connect Instagram + secure token storage (service tracker S9, Q16/Q20/Q28).** New `secrets` table (RLS on, no anon policy; SQL in [SUPABASE_SCHEMA.sql](SUPABASE_SCHEMA.sql), and [SUPABASE_ENABLE_RLS.sql](SUPABASE_ENABLE_RLS.sql) now skips it) read only with the new `SUPABASE_SERVICE_ROLE_KEY`. New [ig-connect.js](netlify/functions/ig-connect.js) (Connect link gated by `IG_CONNECT_CODE` → Instagram login → `connectInstagram`: long-lived token → `secrets.instagram` → webhook subscription) and scheduled [ig-token-refresh.js](netlify/functions/ig-token-refresh.js) (`refreshIgToken` > 50 days; failure → Telegram alert). `getIgToken()` replaces the 6 `META_ACCESS_TOKEN` reads (5 in meta-service + meta-status); env stays the fallback. New env `SUPABASE_SERVICE_ROLE_KEY`, `IG_APP_ID`, `IG_APP_SECRET`, `IG_CONNECT_CODE`. See §15. |
 | 2026-10-06 | — | **Daily report → Telegram (service tracker S8, Q22).** [send-bot-report.js](netlify/functions/send-bot-report.js) sends the same numbers as one plain-text Telegram message to the owner (`sendTelegram` → `settings.telegram_owner`) instead of the Resend email; ⚠️ in front when missed medical > 0. No owner linked / send failed → logged (500 / 502), no email fallback. `reportHtml` → `reportText`. Settings tooltips updated (alert email = Telegram fallback for alerts only). |
@@ -1424,9 +1426,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
 5. ~~**Webhook signature verification**~~ — **DONE 2026-08-13.** `X-Hub-Signature-256` is
    now HMAC-checked with `META_APP_SECRET` on every POST for all three platforms
    ([meta-webhook.mjs](netlify/functions/meta-webhook.mjs) → `verifyMetaSignature()`). The
-   remaining open security item is the RLS/anon-key model (the `allow_anon_all` policy +
-   client-side PIN is still cosmetic) — tightening it needs Supabase Auth or service_role
-   writes; deferred as its own project (it would touch the client's PIN login).
+   RLS/anon-key model was locked down in S12 (2026-10-12), see item 8.
 6. **Clinicea auto-capture (not built).** When a *payment* is registered in Clinicea (the
    clinic's main software) — not when a bill is generated — auto-insert a prefilled row into
    that branch's cashup sheet (amount + payment mode + branch; staff fill Product/Service +
@@ -1437,7 +1437,7 @@ Newest first. **Add a line here for every change that touches behaviour.**
    `getPayments` and webhooks. Open: does one webhook cover all branches, does the payload
    identify the clinic, and does it fire on payment vs bill.
 7. **Realtime inbox — DONE (2026-08-03).** The inbox now uses Supabase Postgres Changes to push messages live; see [§14](#14-lead-hub--unified-inbox) and [artifacts/REALTIME_INBOX.md](artifacts/REALTIME_INBOX.md). Requires the `supabase_realtime` publication enabled on `lead_messages` + the `branch_id` backfill; degrades to load-on-open otherwise.
-8. **Security hardening** — RLS + real auth instead of relying on the PIN/app layer.
+8. ~~**Security hardening**~~ — **DONE 2026-10-12 (S12):** Supabase Auth sign-in, `console_only` policies, no anon grants, functions on the service key.
 9. **Branch Emails tab** — still a placeholder.
 10. **Fix the schema-file drift** listed in [§17](#17-database-schema).
 11. **Facebook comment automation — CODE SHIPPED, not yet switched on.** Mirrors the

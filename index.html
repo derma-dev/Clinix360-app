@@ -28,7 +28,6 @@
 <symbol id="i-receipt" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="80" y1="104" x2="176" y2="104" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="136" x2="176" y2="136" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M32,208V56a8,8,0,0,1,8-8H216a8,8,0,0,1,8,8V208l-32-16-32,16-32-16L96,208,64,192Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-plus" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><circle cx="128" cy="128" r="96" fill="none" stroke="currentColor" stroke-miterlimit="10" stroke-width="16"/><line x1="88" y1="128" x2="168" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="128" y1="88" x2="128" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-card" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><rect x="24" y="56" width="208" height="144" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="168" y1="168" x2="200" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="120" y1="168" x2="136" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="24" y1="96" x2="232" y2="96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
-<symbol id="i-key" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M93.17,122.83A71.68,71.68,0,0,1,88,95.91c0-38.58,31.08-70.64,69.64-71.87A72,72,0,0,1,232,98.36C230.73,136.92,198.67,168,160.09,168a71.68,71.68,0,0,1-26.92-5.17h0L120,176H96v24H72v24H40a8,8,0,0,1-8-8V187.31a8,8,0,0,1,2.34-5.65l58.83-58.83Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="180" cy="76" r="12"/></symbol>
 <symbol id="i-chat" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><circle cx="128" cy="128" r="12"/><circle cx="84" cy="128" r="12"/><circle cx="172" cy="128" r="12"/><path d="M79.93,211.11a96,96,0,1,0-35-35h0L32.42,213.46a8,8,0,0,0,10.12,10.12l37.39-12.47Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-inbox" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M32.5,138A72,72,0,1,1,62,167.5l-27.76,8.16a8,8,0,0,1-9.93-9.93Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M163.94,80.11A72,72,0,0,1,223.5,186l8.16,27.76a8,8,0,0,1-9.93,9.93L194,215.5A72.05,72.05,0,0,1,92.06,175.89" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-warning" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M142.41,40.22l87.46,151.87C236,202.79,228.08,216,215.46,216H40.54C27.92,216,20,202.79,26.13,192.09L113.59,40.22C119.89,29.26,136.11,29.26,142.41,40.22Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="128" y1="144" x2="128" y2="104" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><circle cx="128" cy="180" r="12"/></symbol>
@@ -42,55 +41,27 @@
 </svg>
 
 <!-- ============================================================
-     SCREEN: HOME — Branch Selector
+     SCREEN: HOME — Sign in (one Supabase Auth account, S12)
      ============================================================ -->
 <div id="screen-home" class="screen active">
   <div class="home-wrap">
     <div class="logo-area">
       <img src="dskin-logo.png" class="logo-img" alt="DSkin Logo">
       <h1 class="app-title">Clinix360</h1>
-      <p class="app-sub">Select your branch to begin</p>
+      <p class="app-sub">Sign in to continue</p>
     </div>
-    <div class="branch-grid" id="branch-grid">
-      <div class="skel-branch-card"></div>
-      <div class="skel-branch-card"></div>
-      <div class="skel-branch-card"></div>
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================
-     SCREEN: PIN Entry
-     ============================================================ -->
-<div id="screen-pin" class="screen">
-  <div class="pin-screen-wrap">
-    <button class="back-btn" id="btn-pin-back">‹ Back</button>
-    <div class="pin-branch-badge" id="pin-branch-name">Branch</div>
-    <p class="pin-label">Enter 4-digit PIN</p>
-    <div class="pin-dots-wrap">
-      <div class="pin-dots" id="pin-dots">
-        <span class="pin-dot" id="d0"></span>
-        <span class="pin-dot" id="d1"></span>
-        <span class="pin-dot" id="d2"></span>
-        <span class="pin-dot" id="d3"></span>
+    <form class="login-form" id="login-form">
+      <div class="form-group">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" class="text-input" autocomplete="username" required>
       </div>
-    </div>
-    <div class="pin-error" id="pin-error"></div>
-    <div class="numpad">
-      <button class="num-btn" data-val="1">1</button>
-      <button class="num-btn" data-val="2">2</button>
-      <button class="num-btn" data-val="3">3</button>
-      <button class="num-btn" data-val="4">4</button>
-      <button class="num-btn" data-val="5">5</button>
-      <button class="num-btn" data-val="6">6</button>
-      <button class="num-btn" data-val="7">7</button>
-      <button class="num-btn" data-val="8">8</button>
-      <button class="num-btn" data-val="9">9</button>
-      <button class="num-btn num-clear" id="btn-pin-clear">✕</button>
-      <button class="num-btn" data-val="0">0</button>
-      <button class="num-btn num-del" id="btn-pin-del">⌫</button>
-    </div>
-    <button class="forgot-pin-btn" id="btn-forgot-pin">Forgot PIN?</button>
+      <div class="form-group">
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" class="text-input" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="primary-btn full-width" id="btn-login">Sign in</button>
+      <div class="admin-msg error" id="login-error" role="alert"></div>
+    </form>
   </div>
 </div>
 
@@ -831,23 +802,6 @@
             </div>
           </div>
         </div>
-
-        <!-- Admin PIN -->
-        <div class="section-card settings-card collapsed">
-          <div class="section-header settings-head">
-            <span class="section-icon"><svg class="icon"><use href="#i-key"/></svg></span>
-            <span class="section-title">Change Admin PIN</span>
-            <span class="settings-chevron">▾</span>
-          </div>
-          <div class="settings-body" style="padding:14px 18px 18px">
-            <p style="font-size:13px;color:#6b7280;margin:0 0 14px">Update the 4-digit PIN used to access the Admin Panel.</p>
-            <div style="display:flex;gap:10px;align-items:center">
-              <input type="text" id="new-admin-pin-input" class="text-input" placeholder="New 4-digit PIN"
-                maxlength="4" pattern="[0-9]{4}" inputmode="numeric" style="margin:0;flex:1">
-              <button class="primary-btn" id="btn-save-admin-pin" style="white-space:nowrap">Save</button>
-            </div>
-          </div>
-        </div>
       </div>
 
     </main>
@@ -965,25 +919,6 @@
     <div class="modal-btns">
       <button class="secondary-btn" id="btn-delete-cancel">Cancel</button>
       <button class="danger-btn" id="btn-delete-confirm" style="padding:10px 20px;border-radius:8px;font-weight:600">Delete</button>
-    </div>
-  </div>
-</div>
-
-<!-- ============================================================
-     MODAL: Forgot PIN
-     ============================================================ -->
-<div id="modal-forgot-pin" class="modal-overlay" style="display:none">
-  <div class="modal-card">
-    <h3>Forgot PIN?</h3>
-    <p style="font-size:14px;color:#6b7280;margin:0 0 16px">Enter admin email to retrieve the branch PIN</p>
-    <div class="form-group">
-      <label>Admin Email</label>
-      <input type="email" id="forgot-pin-email" class="text-input" placeholder="admin@email.com">
-    </div>
-    <div class="admin-msg" id="forgot-pin-msg"></div>
-    <div class="modal-btns">
-      <button class="secondary-btn" id="btn-forgot-cancel">Cancel</button>
-      <button class="primary-btn" id="btn-forgot-submit">Get PIN</button>
     </div>
   </div>
 </div>

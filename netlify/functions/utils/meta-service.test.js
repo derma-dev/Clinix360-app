@@ -576,6 +576,15 @@ assert.equal(extractComments({}).length, 0);
       assert.ok(body.contents.at(-1).parts[0].text.includes('price of laser'));
       assert.equal(body.contents.length, 3, 'history + current message');
 
+      // a burst: customer messages after the last reply join the new one, so
+      // the one turn that's sent answers them all
+      await callAssistant({ history: [{ role: 'user', text: 'hi' }, { role: 'model', text: 'hello!' },
+                                      { role: 'user', text: 'subcision price?' }, { role: 'user', text: 'branches?' }],
+                            inboundText: 'tanning too?' });
+      const burst = JSON.parse(captured.opts.body).contents;
+      assert.equal(burst.length, 3, 'waiting messages leave the history');
+      assert.match(burst.at(-1).parts[0].text, /answer EVERY one[^\n]*\nsubcision price\?\nbranches\?\ntanning too\?$/);
+
       // HTTP failure → throws (caller maps to llm_error, D13)
       global.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: { message: 'quota' } }) });
       await assert.rejects(() => callAssistant({ inboundText: 'x' }), /Gemini call failed: 429/);
@@ -668,7 +677,7 @@ assert.equal(extractComments({}).length, 0);
   //    so the branch inbox's realtime feed (filtered on branch_id) shows it ──
   {
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.META_BRANCH_ID = 'FALLBACK';
     const { handleWebhook } = require('./meta-service');
     const run = async (routeFails) => {
@@ -705,7 +714,7 @@ assert.equal(extractComments({}).length, 0);
   //    the echo of our own send (same text, just stored) is ignored ──
   {
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     const { processEcho } = require('./meta-service');
     const echoMock = ({ history = [], dup = false } = {}) => {
       const calls = { fetches: 0, inserts: [], patches: [] };
@@ -765,7 +774,7 @@ assert.equal(extractComments({}).length, 0);
   {
     // dummy creds so getSettingJson/createSupabaseClient actually fetch (mocked)
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.GEMINI_API_KEY = 'test_key';
     process.env.META_ACCESS_TOKEN = 'ig_token';
     process.env.RESEND_API_KEY = 'test_resend';
@@ -1501,7 +1510,7 @@ assert.equal(extractComments({}).length, 0);
     }
 
     delete process.env.SUPABASE_URL;
-    delete process.env.SUPABASE_ANON_KEY;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     delete process.env.GEMINI_API_KEY;
     delete process.env.META_ACCESS_TOKEN;
     delete process.env.RESEND_API_KEY;
@@ -1541,7 +1550,7 @@ assert.equal(extractComments({}).length, 0);
   {
     const { default: tg } = await import('../telegram-webhook.mjs');
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
     process.env.TELEGRAM_LINK_CODE = 'link_abc';
     const calls = { upserts: [], telegrams: [] };
@@ -1769,7 +1778,7 @@ assert.equal(extractComments({}).length, 0);
     await post({ update_id: 5, callback_query: { ...tap().callback_query, message: { message_id: 900, chat: { id: 666 }, text: 'x' } } });
     assert.equal(st.tg.length + st.sends.length + st.patches.length + st.upserts, 0, 'only the bound owner is heard');
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_LINK_CODE', 'TELEGRAM_WEBHOOK_SECRET',
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_LINK_CODE', 'TELEGRAM_WEBHOOK_SECRET',
                      'GEMINI_API_KEY', 'META_ACCESS_TOKEN'])
       delete process.env[k];
   }
@@ -1846,7 +1855,7 @@ assert.equal(extractComments({}).length, 0);
     const realSetTimeout = global.setTimeout;
     global.setTimeout = (fn) => realSetTimeout(fn, 0);           // no real backoff waits
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.META_ACCESS_TOKEN = 'ig_token';
     process.env.META_BRANCH_ID = 'FALLBACK';
     process.env.RESEND_API_KEY = 'test_resend';
@@ -2066,7 +2075,7 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(calls.msgQueries.length + calls.hooks.length, 0, 'not live → the hourly run does nothing');
 
     global.setTimeout = realSetTimeout;
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
       delete process.env[k];
   }
 
@@ -2075,7 +2084,7 @@ assert.equal(extractComments({}).length, 0);
     const { ownerTimerDue, handoffToStaff } = require('./meta-service');
     const { handler: hourly } = require('../bot-hourly');
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.META_ACCESS_TOKEN = 'ig_token';
     process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
     process.env.RESEND_API_KEY = 'test_resend';
@@ -2208,7 +2217,7 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(st.hooks.length, 1, 'nobody can answer it in Telegram → settled now, as before S6');
     assert.equal(st.hooks[0].reason, 'kb_miss');
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'META_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
       delete process.env[k];
   }
 
@@ -2216,7 +2225,7 @@ assert.equal(extractComments({}).length, 0);
   {
     const { handleWebhook, pushLead } = require('./meta-service');
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.META_ACCESS_TOKEN = 'ig_token';
     process.env.META_BRANCH_ID = 'FALLBACK';
     process.env.GEMINI_API_KEY = 'test_key';
@@ -2343,7 +2352,7 @@ assert.equal(extractComments({}).length, 0);
     await handleWebhook(comment('Price kya hai?'));
     assert.equal(st.dms.length + st.publics.length + st.leads.length + st.shadow.length + st.media, 0);
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'GEMINI_API_KEY', 'LEAD_WEBHOOK_URL'])
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'GEMINI_API_KEY', 'LEAD_WEBHOOK_URL'])
       delete process.env[k];
   }
 
@@ -2353,7 +2362,7 @@ assert.equal(extractComments({}).length, 0);
     const DAY = 86400e3, NOW = Date.parse('2026-10-08T00:00:00Z');
     const isoDaysAgo = (d, now) => new Date(now - d * DAY).toISOString();
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.IG_APP_ID = 'APP1';
     process.env.IG_APP_SECRET = 'APPSECRET';
     const s9 = ({ secret = null, secretsStatus = 200, failAt = null } = {}) => {
@@ -2459,7 +2468,7 @@ assert.equal(extractComments({}).length, 0);
     assert.match(st.tg[0].text, /stops working on 17 Oct/);
     assert.ok(!st.tg[0].text.includes('DB_TOKEN'), 'the token never appears in an alert');
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'IG_APP_ID', 'IG_APP_SECRET', 'TELEGRAM_BOT_TOKEN'])
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'IG_APP_ID', 'IG_APP_SECRET', 'TELEGRAM_BOT_TOKEN'])
       delete process.env[k];
   }
 
@@ -2467,7 +2476,7 @@ assert.equal(extractComments({}).length, 0);
   {
     const { draftDigest, sendDraftDigest, handleOwnerUpdate } = require('./meta-service');
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
     const json = (v) => ({ ok: true, json: async () => v });
     const T = (min) => new Date(Date.parse('2026-10-12T14:00:00Z') + min * 60e3).toISOString();
@@ -2480,19 +2489,22 @@ assert.equal(extractComments({}).length, 0);
                    { id: 'L3', customer_name: 'Neha K.', bot_state: {} },
                    { id: 'L4', customer_name: 'Aman P.', bot_state: {} }];
     const MSGS = [
-      inMsg('L1', 0, 'hydrafacial price?', 'mid1'), inMsg('L1', 1, 'and at bopal?', 'mid2'), outMsg('L1', 5, '2500 mam, which day you want?'),
+      inMsg('L1', 0, 'hydrafacial price?', 'mid1'), inMsg('L1', 0.5, 'and at bopal?', 'mid2'),
+      outMsg('L1', 5, '2500 mam, which day you want?'), outMsg('L1', 6, 'bopal also available'),
       inMsg('L2', 0, 'hi'), inMsg('L2', 10, 'full body laser how many sittings'), outMsg('L2', 12, '6-8 sitting sir'), inMsg('L2', 20, 'ok'),
       inMsg('L3', 30, 'do you have branch in vadodara'),
       inMsg('L4', 40, 'my skin is burning'),
     ];
     const ROWS = [
-      // after 'and at bopal?' arrived, but the Meta id says it answered the first message
-      row(1, 'L1', 1.5, reply('Hydrafacial is ₹2,499 per session 😊', { qualification: { branch: 'Satellite' }, asks_price: true }), 'mid1'),
+      row(1, 'L1', 1, reply('Hydrafacial is ₹2,499 per session 😊', { qualification: { branch: 'Satellite' }, asks_price: true }), 'mid2'),
       row(2, 'L2', 10.1, reply('Most people need 6–8 sessions.', { offer: { service: 'LHR', offer_price: 9999 } })),
       row(3, 'L2', 20.1, reply('Great, anything else?')),
       row(4, 'L3', 30.1, reply('We have branches in Satellite, Bopal and Maninagar.')),
       row(5, 'L4', 40.1, { safety_net: 'medical', reason: 'medical', reply: '', handoff: true }),
       row(6, 'L3', 31, { reason: 'qualified', reply: 'Booking you in!', handoff: true, category: 'lead' }),
+      // logged after 'and at bopal?' arrived, but the Meta id says it answered the
+      // first message: live yields it to the burst's last turn (row 1)
+      row(7, 'L1', 1.5, reply('Hydrafacial is ₹1,999 😊', { asks_price: true }), 'mid1'),
     ];
 
     // one draft per conversation, the one most worth checking first: price mismatch
@@ -2502,8 +2514,8 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(d.text,
       '📝 Bot drafts for today — 3 of 3 conversations\n' +
       'Nothing was sent. Tap ✅ if the draft is fine, ✏️ to correct it.\n\n' +
-      '1) Priya S. · HYDRA FACIAL P/S · Satellite\n   Customer: "hydrafacial price?"\n' +
-      '   Bot: "Hydrafacial is ₹2,499 per session 😊"\n   Staff sent: "2500 mam, which day you want?"\n\n' +
+      '1) Priya S. · HYDRA FACIAL P/S · Satellite\n   Customer: "hydrafacial price?" / "and at bopal?"\n' +
+      '   Bot: "Hydrafacial is ₹2,499 per session 😊"\n   Staff sent: "2500 mam, which day you want?" / "bopal also available"\n\n' +
       '2) Rahul M.\n   Customer: "full body laser how many sittings"\n' +
       '   Bot: "Most people need 6–8 sessions."\n   Staff sent: "6-8 sitting sir"\n\n' +
       '3) Neha K.\n   Customer: "do you have branch in vadodara"\n' +
@@ -2513,6 +2525,7 @@ assert.equal(extractComments({}).length, 0);
        { text: '2 ✅', callback_data: 'sd:good:2' }, { text: '2 ✏️', callback_data: 'sd:fix:2' }],
       [{ text: '3 ✅', callback_data: 'sd:good:4' }, { text: '3 ✏️', callback_data: 'sd:fix:4' }]]);
     assert.equal(draftDigest([ROWS[4], ROWS[5]], MSGS, LEADS), null, 'no drafts → no digest');
+    assert.equal(draftDigest([ROWS[6]], MSGS, LEADS), null, 'a turn live would yield is no draft');
 
     // at most 8, and always inside Telegram's 4,096 characters
     const many = Array.from({ length: 12 }, (_, i) => `M${i}`);
@@ -2543,7 +2556,7 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(tg[0].chat_id, 555);
     assert.equal(tg[0].text, d.text);
     assert.deepEqual(tg[0].reply_markup.inline_keyboard, d.keyboard);
-    assert.deepEqual(fdb.stamps, [['id=in.(1,2,3,4,5,6)', { digest_at: '2026-10-12T14:30:00.000Z' }]]);
+    assert.deepEqual(fdb.stamps, [['id=in.(1,2,3,4,5,6,7)', { digest_at: '2026-10-12T14:30:00.000Z' }]]);
     fdb = fakeDb([ROWS[4]]);
     assert.equal(await sendDraftDigest(fdb, NOW), 0);
     assert.equal(tg.length, 1, 'no draft → no message');
@@ -2644,14 +2657,14 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(urls.length, 2 + runs, 'no quiet-chat push or owner timers in shadow');
     }
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
   }
 
   // ── S11b: the mode in its own settings row; /mode from the owner's Telegram ──
   {
     const { getBotConfig, handleOwnerUpdate, botReply } = require('./meta-service');
     process.env.SUPABASE_URL = 'http://supabase.test';
-    process.env.SUPABASE_ANON_KEY = 'test_anon';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
     process.env.RESEND_API_KEY = 're_test';
     process.env.OPS_ALERT_EMAIL = 'ops@test.dev';
@@ -2739,7 +2752,49 @@ assert.equal(extractComments({}).length, 0);
     assert.deepEqual(edits().map(e => e.text), ['Nothing changed. Bot is still LIVE (replies to customers).',
                                                 'Nothing changed. Bot is still LIVE (replies to customers).']);
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY', 'OPS_ALERT_EMAIL']) delete process.env[k];
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY', 'OPS_ALERT_EMAIL']) delete process.env[k];
+  }
+
+  // ── S12: server key for tables; the console login authorizes the send endpoints ──
+  {
+    const { authorizeRequest } = require('./meta-service');
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_ANON_KEY = 'anon_key';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
+    process.env.INTERNAL_FUNCTION_SECRET = 'cron_secret';
+    let calls = [], answer;
+    global.fetch = async (url, opts = {}) => { calls.push({ url, headers: opts.headers || {} }); return answer(); };
+
+    // tables: the service key, never the anon key
+    answer = () => ({ ok: true, json: async () => [] });
+    await createSupabaseClient().findLeadByPlatformId('instagram', 'IGSID_1');
+    assert.equal(calls[0].headers.apikey, 'service_key');
+    assert.equal(calls[0].headers.Authorization, 'Bearer service_key');
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    assert.throws(() => createSupabaseClient(), /SUPABASE_SERVICE_ROLE_KEY/, 'no silent fallback to the anon key');
+
+    const authz = (headers) => { calls = []; return authorizeRequest({ headers }); };
+    // the cron's shared secret: no DB call
+    assert.equal(await authz({ 'x-internal-secret': 'cron_secret' }), true);
+    assert.equal(calls.length, 0);
+    // no login → no; the old PIN header means nothing now
+    assert.equal(await authz({}), false);
+    assert.equal(await authz({ 'x-staff-pin': '1234' }), false);
+    assert.equal(calls.length, 0);
+    // a login token → is_console() asked with the caller's own token
+    answer = () => ({ ok: true, json: async () => true });
+    assert.equal(await authz({ authorization: 'Bearer USER_JWT' }), true);
+    assert.equal(calls[0].url, 'http://supabase.test/rest/v1/rpc/is_console');
+    assert.equal(calls[0].headers.Authorization, 'Bearer USER_JWT');
+    assert.equal(calls[0].headers.apikey, 'anon_key');
+    answer = () => ({ ok: true, json: async () => false });      // another account
+    assert.equal(await authz({ authorization: 'Bearer OTHER_JWT' }), false);
+    answer = () => ({ ok: false, status: 401, json: async () => ({ message: 'JWT expired' }) });
+    assert.equal(await authz({ authorization: 'Bearer OLD_JWT' }), false);
+    answer = () => { throw new Error('network down'); };
+    assert.equal(await authz({ authorization: 'Bearer USER_JWT' }), false);
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'INTERNAL_FUNCTION_SECRET']) delete process.env[k];
   }
 
   global.fetch = realFetch;

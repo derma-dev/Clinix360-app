@@ -13,7 +13,7 @@ const { sendInstagramMessage, sendFacebookMessage, sendWhatsAppMessage, createSu
 exports.handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, x-staff-pin, x-internal-secret',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-internal-secret',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Content-Type': 'application/json',
   };

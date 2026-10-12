@@ -201,7 +201,7 @@ function latestQuote(list) {
   if (!write) { console.log('\n(dry-run — re-run with --write to merge into settings.chatbot_config)'); return; }
 
   loadEnv();
-  const H = { apikey: process.env.SUPABASE_ANON_KEY, Authorization: `Bearer ${process.env.SUPABASE_ANON_KEY}`,
+  const H = { apikey: process.env.SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
               'Content-Type': 'application/json', Prefer: 'resolution=merge-duplicates' };
   const URL = process.env.SUPABASE_URL + '/rest/v1/settings?key=eq.chatbot_config&select=value';
   let res = await fetch(URL, { headers: H });

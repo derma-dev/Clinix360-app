@@ -8,7 +8,7 @@ const { authorizeRequest } = require('./utils/meta-service');
 exports.handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'Content-Type, x-staff-pin, x-internal-secret',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-internal-secret',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Content-Type': 'application/json',
   };
@@ -26,12 +26,12 @@ exports.handler = async (event) => {
   const { automation_id, date_from, date_to } = body;
   const RESEND_API_KEY = process.env.RESEND_API_KEY;
   const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+  const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!RESEND_API_KEY || !SUPABASE_URL || !SUPABASE_ANON_KEY)
+  if (!RESEND_API_KEY || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)
     return { statusCode: 500, headers, body: JSON.stringify({ error: 'Server misconfigured' }) };
 
-  const sbHeaders = { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` };
+  const sbHeaders = { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` };
 
   // Load automation config
   const autoRes = await fetch(`${SUPABASE_URL}/rest/v1/cashup_automations?id=eq.${automation_id}&select=*`, { headers: sbHeaders });

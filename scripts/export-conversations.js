@@ -16,7 +16,7 @@ const ROOT = path.join(__dirname, '..');
 
 function loadEnv() {
   const file = path.join(ROOT, '.env');
-  if (!fs.existsSync(file)) throw new Error('No .env found — copy .env.example and fill SUPABASE_URL / SUPABASE_ANON_KEY');
+  if (!fs.existsSync(file)) throw new Error('No .env found — copy .env.example and fill SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY');
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
     if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
@@ -25,7 +25,7 @@ function loadEnv() {
 
 // PostgREST caps at 1000 rows per request — loop until a short batch comes back.
 async function fetchAll(table, select, order) {
-  const key = process.env.SUPABASE_ANON_KEY;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const rows = [];
   for (;;) {
     const url = `${process.env.SUPABASE_URL}/rest/v1/${table}` +

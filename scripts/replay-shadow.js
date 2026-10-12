@@ -40,7 +40,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ── config: the live chatbot_config (KB, model, caps) — same read getSettingJson does ──
 async function loadConfig() {
-  const url = process.env.SUPABASE_URL, key = process.env.SUPABASE_ANON_KEY;
+  const url = process.env.SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const res = await fetch(`${url}/rest/v1/settings?key=eq.chatbot_config&select=value&limit=1`,
     { headers: { apikey: key, Authorization: `Bearer ${key}` } });
   if (!res.ok) throw new Error(`chatbot_config read failed: ${res.status}`);

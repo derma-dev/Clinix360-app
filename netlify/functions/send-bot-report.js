@@ -97,7 +97,7 @@ function reportText(m, days) {
 
 const handler = async () => {
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_ANON_KEY;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) { console.error('[send-bot-report] missing env vars'); return { statusCode: 500 }; }
   const h = { apikey: key, Authorization: `Bearer ${key}` };
   const get = async (path) => {

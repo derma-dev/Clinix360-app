@@ -2,8 +2,8 @@
 -- Clinix360 Cashup — CURRENT Supabase schema (as of 24 Aug 2026)
 -- Project ref: plxhbtsncfkuvnywstgn  (https://plxhbtsncfkuvnywstgn.supabase.co)
 -- This reflects the LIVE database including all migrations since launch.
--- RLS is DISABLED on all tables — access is gated at the app level by PIN.
--- The frontend talks to these tables with the public ANON key (in config.js).
+-- Access (S12): run SUPABASE_ENABLE_RLS.sql after this file. The anon key reads
+-- nothing; functions use the service key; the console signs in with Supabase Auth.
 -- ============================================================
 
 -- Branches (one row per clinic). PIN is the 4-digit branch login.
@@ -132,7 +132,7 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 -- Keys in use:
---   admin_pin       -> the 4-digit admin PIN (string)
+--   admin_pin       -> the old 4-digit admin PIN (unused since S12, the console signs in with Supabase Auth)
 --   payment_modes   -> JSON array, e.g. [{"code":"cash","label":"Cash"}, ...]
 --                      Editable from Admin Panel -> Settings -> Payment Modes.
 --   chatbot_config  -> JSON object (chatbot final plan §5): mode ('off'|'shadow'|'live',
@@ -264,18 +264,4 @@ CREATE TABLE IF NOT EXISTS secrets (
 ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON secrets FROM anon, authenticated;
 
--- RLS disabled everywhere else (PIN-based app security):
-ALTER TABLE branches            DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cashup_entries      DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cashup_summaries    DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cashup_expenses     DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cashup_extras       DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cashup_alerts       DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cashup_feedback     DISABLE ROW LEVEL SECURITY;
-ALTER TABLE cashup_automations  DISABLE ROW LEVEL SECURITY;
-ALTER TABLE settings            DISABLE ROW LEVEL SECURITY;
-ALTER TABLE leads               DISABLE ROW LEVEL SECURITY;
-ALTER TABLE lead_notes          DISABLE ROW LEVEL SECURITY;
-ALTER TABLE lead_messages       DISABLE ROW LEVEL SECURITY;
-ALTER TABLE kb_candidates       DISABLE ROW LEVEL SECURITY;
-ALTER TABLE bot_shadow_log      DISABLE ROW LEVEL SECURITY;
+-- RLS + policies for every other table: SUPABASE_ENABLE_RLS.sql (S12 lockdown).
