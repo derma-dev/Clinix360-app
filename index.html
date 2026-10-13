@@ -737,14 +737,14 @@
               <div style="font-weight:600;font-size:13px">Model</div>
               <input type="text" id="chatbot-model" class="text-input" placeholder="gemini-3.5-flash-lite" style="margin:0">
               <div style="font-weight:600;font-size:13px;margin-top:6px">Canned replies</div>
-              <textarea id="chatbot-canned-collaboration" class="text-input" rows="2" placeholder="Reply to collaboration enquiries" style="margin:0;resize:vertical"></textarea>
-              <textarea id="chatbot-canned-sales_pitch" class="text-input" rows="2" placeholder="Reply to sales pitches" style="margin:0;resize:vertical"></textarea>
-              <textarea id="chatbot-canned-misc" class="text-input" rows="2" placeholder="Reply to other non-lead messages" style="margin:0;resize:vertical"></textarea>
-              <textarea id="chatbot-canned-kb_miss" class="text-input" rows="2" placeholder="Hold reply when the bot doesn't know the answer" style="margin:0;resize:vertical"></textarea>
-              <textarea id="chatbot-canned-llm_error" class="text-input" rows="2" placeholder="Hold reply when the bot errors out" style="margin:0;resize:vertical"></textarea>
-              <textarea id="chatbot-canned-disclosure" class="text-input" rows="2" placeholder="Prepended to the bot's first message — discloses it's an assistant" style="margin:0;resize:vertical"></textarea>
-              <textarea id="chatbot-canned-refusal_ok" class="text-input" rows="2" placeholder="Reply when the customer declines to share their WhatsApp number" style="margin:0;resize:vertical"></textarea>
-              <textarea id="chatbot-canned-owner_no_reply" class="text-input" rows="2" placeholder="Sent when the owner hasn't answered a price question by the fallback time" style="margin:0;resize:vertical"></textarea>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Collaboration enquiries<textarea id="chatbot-canned-collaboration" class="text-input" rows="2" placeholder="Reply to collaboration enquiries" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Sales pitches<textarea id="chatbot-canned-sales_pitch" class="text-input" rows="2" placeholder="Reply to sales pitches" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Other non-lead messages<textarea id="chatbot-canned-misc" class="text-input" rows="2" placeholder="Reply to other non-lead messages" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Bot doesn't know the answer<textarea id="chatbot-canned-kb_miss" class="text-input" rows="2" placeholder="Hold reply when the bot doesn't know the answer" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Bot error<textarea id="chatbot-canned-llm_error" class="text-input" rows="2" placeholder="Hold reply when the bot errors out" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">First-message disclosure (added before the bot's first reply)<textarea id="chatbot-canned-disclosure" class="text-input" rows="2" placeholder="Prepended to the bot's first message — discloses it's an assistant" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Customer won't share a number<textarea id="chatbot-canned-refusal_ok" class="text-input" rows="2" placeholder="Reply when the customer declines to share their WhatsApp number" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Owner didn't answer in time<textarea id="chatbot-canned-owner_no_reply" class="text-input" rows="2" placeholder="Sent when the owner hasn't answered a price question by the fallback time" style="margin:0;resize:vertical"></textarea></label>
               <div style="font-weight:600;font-size:13px;margin-top:6px">Limits</div>
               <div style="display:flex;gap:8px;flex-wrap:wrap">
                 <input type="number" id="chatbot-offer-stale-days" class="text-input" placeholder="30" min="0" style="margin:0;width:130px" title="Days a shared-post offer price stays quotable before falling back to the KB range">
