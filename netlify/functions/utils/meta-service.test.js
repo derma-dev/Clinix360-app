@@ -2797,6 +2797,92 @@ assert.equal(extractComments({}).length, 0);
     for (const k of ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'INTERNAL_FUNCTION_SECRET']) delete process.env[k];
   }
 
+  // ── S11c P1: Google Sheets as the service account; writes only to 'Bot answers' (Q36) ──
+  {
+    const crypto = require('node:crypto');
+    const { googleToken, sheetsApi, readSheet, appendAnswerRow, clearAnswerRow } = require('./meta-service');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048,
+      publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+    const SA = 'price-sheet@proj.iam.gserviceaccount.com';
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
+    const json = (v, status = 200) => ({ ok: status < 400, status, json: async () => v, text: async () => JSON.stringify(v) });
+    // sheets: one answer per Sheets call, in order
+    const g = ({ key = { client_email: SA, private_key: privateKey }, token = json({ access_token: 'GTOKEN', expires_in: 3599 }), sheets = [] } = {}) => {
+      const st = { calls: [], sheets: [] };
+      global.fetch = async (url, opts = {}) => {
+        st.calls.push(String(url));
+        if (url.startsWith('http://supabase.test/rest/v1/secrets?key=eq.google')) return json(key ? [{ value: key }] : []);
+        if (url === 'https://oauth2.googleapis.com/token') { st.tokenBody = Object.fromEntries(opts.body); return token; }
+        if (url.startsWith('https://sheets.googleapis.com/v4/spreadsheets/')) {
+          st.sheets.push({ url, method: opts.method || 'GET', body: opts.body, auth: opts.headers.Authorization });
+          return sheets.shift() || json({});
+        }
+        throw new Error('unexpected fetch ' + url);
+      };
+      return st;
+    };
+
+    // Token: an RS256 JWT with our claims, signed by the stored key, swapped at Google's token endpoint
+    const NOW = Date.parse('2026-10-14T06:00:00Z');
+    let st = g();
+    assert.deepEqual(await googleToken(NOW), { token: 'GTOKEN', email: SA });
+    assert.equal(st.tokenBody.grant_type, 'urn:ietf:params:oauth:grant-type:jwt-bearer');
+    const [h, p, sig] = st.tokenBody.assertion.split('.');
+    const part = (s) => JSON.parse(Buffer.from(s, 'base64url').toString());
+    assert.deepEqual(part(h), { alg: 'RS256', typ: 'JWT' });
+    assert.deepEqual(part(p), { iss: SA, scope: 'https://www.googleapis.com/auth/spreadsheets',
+                                aud: 'https://oauth2.googleapis.com/token', iat: NOW / 1000, exp: NOW / 1000 + 3600 });
+    assert.ok(crypto.verify('RSA-SHA256', Buffer.from(`${h}.${p}`), publicKey, Buffer.from(sig, 'base64url')), 'signature verifies');
+    g({ key: null });
+    await assert.rejects(googleToken(), /No Google key/);
+    g({ token: json({ error: 'invalid_grant', error_description: 'Invalid JWT Signature.' }, 400) });
+    await assert.rejects(googleToken(), /Google token failed: 400 Invalid JWT Signature/);
+
+    // Read: batchGet with unformatted values; a range with no values → []
+    st = g({ sheets: [json({ valueRanges: [{ range: 'Prices!A1:F3', values: [['SERVICES'], ['Name', 'Customer Price']] },
+                                           { range: "'Bot answers'!A:C" }] })] });
+    assert.deepEqual(await readSheet('SHEET_ID', ['Prices!A1:F3', "'Bot answers'!A:C"]),
+                     [[['SERVICES'], ['Name', 'Customer Price']], []]);
+    assert.equal(st.sheets[0].url, "https://sheets.googleapis.com/v4/spreadsheets/SHEET_ID/values:batchGet" +
+      "?valueRenderOption=UNFORMATTED_VALUE&ranges=Prices!A1%3AF3&ranges='Bot%20answers'!A%3AC");
+    assert.equal(st.sheets[0].auth, 'Bearer GTOKEN');
+
+    // Append: RAW, new rows, into 'Bot answers'!A:D; returns the range written. Clear: exactly that range.
+    st = g({ sheets: [json({ updates: { updatedRange: "'Bot answers'!A2:D2" } }), json({})] });
+    const r = await appendAnswerRow('SHEET_ID', ['2026-10-14 11:30', 'AKAR SKIN BOOSTER', '6000', 'akar price?']);
+    assert.equal(r, "'Bot answers'!A2:D2");
+    assert.equal(st.sheets[0].url, "https://sheets.googleapis.com/v4/spreadsheets/SHEET_ID/values/'Bot%20answers'!A%3AD:append" +
+      '?valueInputOption=RAW&insertDataOption=INSERT_ROWS');
+    assert.equal(st.sheets[0].method, 'POST');
+    assert.deepEqual(JSON.parse(st.sheets[0].body), { values: [['2026-10-14 11:30', 'AKAR SKIN BOOSTER', '6000', 'akar price?']] });
+    await clearAnswerRow('SHEET_ID', r);
+    assert.equal(st.sheets[1].url, "https://sheets.googleapis.com/v4/spreadsheets/SHEET_ID/values/'Bot%20answers'!A2%3AD2:clear");
+    assert.equal(st.sheets[1].method, 'POST');
+
+    // Write guard: anything outside 'Bot answers' throws before any fetch (not even the token)
+    st = g();
+    await assert.rejects(clearAnswerRow('SHEET_ID', 'Prices!A1'), /only write to the Bot answers tab/);
+    await assert.rejects(clearAnswerRow('SHEET_ID', "'Prices'!A1:F200"), /only write to the Bot answers tab/);
+    await assert.rejects(sheetsApi('SHEET_ID', `/values/${encodeURIComponent('Prices!A:F')}:append`, { method: 'POST' }), /Bot answers/);
+    await assert.rejects(sheetsApi('SHEET_ID', ':batchUpdate', { method: 'POST' }), /Bot answers/);
+    assert.equal(st.calls.length, 0);
+
+    // 429 → one retry, then it works. Twice → the error, no third try.
+    st = g({ sheets: [json({ error: { message: 'Quota exceeded' } }, 429), json({ valueRanges: [] })] });
+    assert.deepEqual(await sheetsApi('SHEET_ID', '/values:batchGet?ranges=A1', {}, 0), { valueRanges: [] });
+    assert.equal(st.sheets.length, 2);
+    st = g({ sheets: [json({}, 503), json({ error: { message: 'Backend Error' } }, 503)] });
+    await assert.rejects(sheetsApi('SHEET_ID', '/values:batchGet?ranges=A1', {}, 0), /Google Sheets 503: Backend Error/);
+    assert.equal(st.sheets.length, 2);
+
+    // 403 → names the service account, so the fix (share the sheet with it) is obvious
+    g({ sheets: [json({ error: { message: 'The caller does not have permission' } }, 403)] });
+    await assert.rejects(appendAnswerRow('SHEET_ID', ['x']), new RegExp(`does not have permission.*shared with ${SA.replace(/\./g, '\\.')}`));
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY']) delete process.env[k];
+  }
+
   global.fetch = realFetch;
   console.log('meta-service: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });

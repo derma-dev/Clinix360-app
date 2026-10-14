@@ -298,9 +298,10 @@ function secretsApi(query, opts = {}) {
     headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...opts.headers } });
 }
 
-// { token, ig_user_id, username, refreshed_at, expires_at } or null.
-async function readIgSecret() {
-  const res = await secretsApi('?key=eq.instagram&select=value&limit=1');
+// A secrets row's value or null: 'instagram' = { token, ig_user_id, username,
+// refreshed_at, expires_at }, 'google' = the service account's JSON key (S11c).
+async function readSecret(key) {
+  const res = await secretsApi(`?key=eq.${enc(key)}&select=value&limit=1`);
   if (!res) return null;
   if (!res.ok) throw new Error(`secrets read failed: ${res.status} ${await res.text()}`);
   return (await res.json())[0]?.value || null;
@@ -326,7 +327,7 @@ async function igJson(res, what) {
 let lastIgTokenSource = null;
 async function getIgToken() {
   let s = null;
-  try { s = await readIgSecret(); }
+  try { s = await readSecret('instagram'); }
   catch (e) { console.warn('[meta-service] IG token from DB failed, using env:', e.message); }
   const fromDb = !!s?.token && !(Date.parse(s.expires_at) <= Date.now());
   const token  = fromDb ? s.token : process.env.META_ACCESS_TOKEN;
@@ -370,7 +371,7 @@ const igTokenDue = (s, now) => !!s?.token && now - Date.parse(s.refreshed_at) > 
 async function refreshIgToken(now = Date.now()) {
   let s = null;
   try {
-    s = await readIgSecret();
+    s = await readSecret('instagram');
     if (!igTokenDue(s, now)) return 'not due';
     const d = await igJson(await fetch('https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token' +
       `&access_token=${enc(s.token)}`), 'token refresh');
@@ -394,6 +395,62 @@ async function refreshIgToken(now = Date.now()) {
     return 'failed';
   }
 }
+
+// ── S11c price sheet: Google Sheets as the service account ────
+// secrets.google holds the JSON key. Each call signs a JWT (RS256) and swaps it
+// for a 1-hour access token. No library, no token cache.
+// ponytail: one token per sheet call; cache it in secrets if runs get frequent.
+// Writes go only to the 'Bot answers' tab: the client's Prices tab is read-only (Q36).
+const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets/';
+const ANSWERS_TAB = "'Bot answers'!";
+const b64url = (v) => Buffer.from(JSON.stringify(v)).toString('base64url');
+
+async function googleToken(now = Date.now()) {
+  const sa = await readSecret('google');
+  if (!sa?.client_email || !sa?.private_key) throw new Error('No Google key: secrets.google is missing (P0 SQL)');
+  const iat = Math.floor(now / 1000);
+  const unsigned = b64url({ alg: 'RS256', typ: 'JWT' }) + '.' + b64url({ iss: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets', aud: GOOGLE_TOKEN_URL, iat, exp: iat + 3600 });
+  const jwt = unsigned + '.' + crypto.createSign('RSA-SHA256').update(unsigned).sign(sa.private_key, 'base64url');
+  const res = await fetch(GOOGLE_TOKEN_URL, { method: 'POST',
+    body: new URLSearchParams({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: jwt }) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok || !d.access_token) throw new Error(`Google token failed: ${res.status} ${d.error_description || d.error || ''}`.trim());
+  return { token: d.access_token, email: sa.client_email };
+}
+
+// path is after /spreadsheets/{id}. A 429/5xx is retried once (Google's advice).
+// A write (any non-GET) outside 'Bot answers' throws before anything is fetched.
+async function sheetsApi(id, path, opts = {}, retryMs = 1000 + Math.random() * 1000) {
+  if (opts.method && opts.method !== 'GET' && !decodeURIComponent(path).startsWith(`/values/${ANSWERS_TAB}`))
+    throw new Error(`Refused: we only write to the Bot answers tab (${decodeURIComponent(path)})`);
+  const { token, email } = await googleToken();
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(SHEETS_API + enc(id) + path, { ...opts,
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } });
+    if ((res.status === 429 || res.status >= 500) && attempt === 0) { await new Promise(r => setTimeout(r, retryMs)); continue; }
+    const d = await res.json().catch(() => ({}));
+    if (res.status === 403) throw new Error(`Google Sheets 403 (${d.error?.message || 'forbidden'}). Is the sheet shared with ${email}?`);
+    if (!res.ok) throw new Error(`Google Sheets ${res.status}: ${d.error?.message || ''}`.trim());
+    return d;
+  }
+}
+
+// One array of rows per range. Numbers come back as numbers (no ₹ or commas).
+async function readSheet(id, ranges) {
+  const d = await sheetsApi(id, `/values:batchGet?valueRenderOption=UNFORMATTED_VALUE&ranges=${ranges.map(enc).join('&ranges=')}`);
+  return (d.valueRanges || []).map(v => v.values || []);
+}
+
+// Returns the range written, e.g. 'Bot answers'!A5:D5 (the undo clears exactly that).
+async function appendAnswerRow(id, row) {
+  const d = await sheetsApi(id, `/values/${enc(ANSWERS_TAB + 'A:D')}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+                            { method: 'POST', body: JSON.stringify({ values: [row] }) });
+  return d.updates?.updatedRange;
+}
+
+const clearAnswerRow = (id, range) => sheetsApi(id, `/values/${enc(range)}:clear`, { method: 'POST', body: '{}' });
 
 // ── Fetch a DM sender's Instagram profile ─────────────────────
 // Uses the User Profile API. Consent is auto-granted once the user DMs us.
@@ -2652,4 +2709,10 @@ module.exports = {
   connectInstagram,
   igTokenDue,
   refreshIgToken,
+  // S11c price sheet
+  googleToken,
+  sheetsApi,
+  readSheet,
+  appendAnswerRow,
+  clearAnswerRow,
 };
