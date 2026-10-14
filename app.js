@@ -1491,7 +1491,7 @@ function firstPriceIn(text) {
     .replace(/\b\d{5}[\s-]\d{5}\b/g, ' ');
   for (const m of t.matchAll(/(?:₹|rs\.?\s*|inr\s*)?(\d{1,5})(\s*k)?\b/g)) {
     const n = parseInt(m[1], 10) * (m[2] ? 1000 : 1);
-    if (n >= 500 && n <= 60000) return n;
+    if (n >= 100 && n <= 99999) return n;
   }
   return null;
 }

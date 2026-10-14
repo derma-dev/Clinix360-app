@@ -3096,6 +3096,148 @@ assert.equal(extractComments({}).length, 0);
     await prices('/prices', 666);
     assert.equal(st.sheets.length + st.tg.length, 0);
 
+    // ── S11c P5: the owner's price → a 'Bot answers' row + [Don't save]; firstPriceIn ₹100–₹99,999 ──
+    const { firstPriceIn } = require('./meta-service');
+    for (const ok of ['₹100', 'haircut 375', '90,000 for the peel', '8k']) assert.ok(firstPriceIn(ok), ok);
+    for (const no of ['99', 'call 9876543210', '98765 43210', '1,00,000']) assert.equal(firstPriceIn(no), null, no);
+
+    process.env.GEMINI_API_KEY = 'gk';
+    process.env.META_ACCESS_TOKEN = 'ig_token';
+    const SYNCED = { synced_at: '2026-10-13T06:00:00.000Z', items: [{ kind: 'service', name: 'HYDRA FACIAL 1s', price: 3000 }, { kind: 'service', name: 'NEW SERVICE', price: null }],
+                     counts: { services: 7, packages: 3, owner: 0 } };
+    const AKAR = { text: 'Akar skin booster is ₹6,000 per session 😊', item: 'AKAR SKIN BOOSTER 1 SESSION', price: 6000 };
+    // `answers` is the Bot answers tab: appends land there, clears empty a row, syncs read it
+    const p5 = ({ gemini = AKAR, appendFails = false, cfg = SHEET_CFG, service,
+                  question = 'akar skin booster price? call me 98765 43210' } = {}) => {
+      const s = { pl: SYNCED, answers: [['Date', 'Item', 'Customer Price', 'Customer asked']], writes: [], clears: [], tg: [], sends: [], upserts: [],
+        lead: { id: 'L1', customer_name: 'Priya Sharma', branch_id: 'B1', source: 'instagram', instagram_user_id: 'IGSID_9', bot_active: false,
+                bot_state: { qualification: { service }, handoff_reason: 'kb_miss', handoff_at: new Date(Date.now() - HOUR).toISOString(),
+                             kb_miss_question: question, owner_alert_msg_id: 701 } },
+        shadow: { id: 7, lead_id: 'L1', created_at: new Date().toISOString(), decision: { asks_price: true, reply: 'Hydrafacial is ₹3,000 😊' } } };
+      global.fetch = async (url, opts = {}) => {
+        url = String(url);
+        const m = opts.method || 'GET';
+        if (url.includes('/rest/v1/settings?key=eq.')) {
+          const v = { chatbot_config: { mode: 'live', model: 'm', kb: { entries: [] }, ...cfg }, price_list: s.pl,
+                      telegram_owner: { chat_id: 42 } }[url.split('key=eq.')[1].split('&')[0]];
+          return json(v ? [{ value: JSON.stringify(v) }] : []);
+        }
+        if (url === 'http://supabase.test/rest/v1/settings' && m === 'POST') {
+          const b = JSON.parse(opts.body);
+          s.upserts.push(b);
+          if (b.key === 'price_list') s.pl = JSON.parse(b.value);
+          return json(null, 201);
+        }
+        if (url.startsWith('http://supabase.test/rest/v1/secrets?key=eq.google')) return json([{ value: { client_email: SA, private_key: privateKey } }]);
+        if (url === 'https://oauth2.googleapis.com/token') return json({ access_token: 'GTOKEN' });
+        if (url.startsWith('https://sheets.googleapis.com/')) {
+          if (m !== 'GET') s.writes.push(decodeURIComponent(url));
+          if (url.includes(':append')) {
+            if (appendFails) return json({ error: { message: 'The caller does not have permission' } }, 403);
+            s.answers.push(JSON.parse(opts.body).values[0]);
+            return json({ updates: { updatedRange: `'Bot answers'!A${s.answers.length}:D${s.answers.length}` } });
+          }
+          const n = +(/answers'!A(\d+)/.exec(decodeURIComponent(url)) || [])[1];
+          if (url.includes(':clear')) { s.answers[n - 1] = []; s.clears.push(n); return json({}); }
+          if (url.includes('ranges=Prices')) return json({ valueRanges: [{ values: PRICES }, { values: s.answers }] });
+          return json({ valueRanges: [s.answers[n - 1]?.length ? { values: [s.answers[n - 1]] } : {}] });   // one Bot answers row
+        }
+        if (url.includes('or=(bot_state->>owner_alert_msg_id.eq.')) return json(url.includes('eq.701,') ? [s.lead] : []);
+        if (url.includes('bot_shadow_log?fix_prompt_msg_id=eq.950') || url.includes('bot_shadow_log?id=eq.7')) {
+          if (m === 'PATCH') { Object.assign(s.shadow, JSON.parse(opts.body)); return json([]); }
+          return json([s.shadow]);
+        }
+        if (url.includes('bot_shadow_log?fix_prompt_msg_id=eq.')) return json([]);
+        if (url.includes('/leads?id=eq.') && m === 'PATCH') { Object.assign(s.lead, JSON.parse(opts.body)); return json([]); }
+        if (url.includes('/leads?id=eq.') || url.includes('/leads?id=in.(')) return json([s.lead]);
+        if (url.includes('lead_messages?lead_id=')) return json([{ lead_id: 'L1', direction: 'incoming', message: 'hydra facial price',
+                                                                    created_at: new Date(Date.now() - 2 * HOUR).toISOString() }]);
+        if (url.includes('/lead_messages') && m === 'POST') return json([{ id: 'o1' }]);
+        if (url.includes('generativelanguage.googleapis.com'))
+          return gemini === 'error' ? json({ error: { message: 'overloaded' } }, 503)
+                                    : json({ candidates: [{ content: { parts: [{ text: JSON.stringify(gemini) }] } }] });
+        if (url.includes('graph.instagram.com')) { s.sends.push(JSON.parse(opts.body)); return json({ message_id: 'm1' }); }
+        if (url.includes('api.telegram.org')) { s.tg.push({ method: url.split('/').pop(), ...JSON.parse(opts.body) }); return json({ ok: true, result: { message_id: 1 } }); }
+        throw new Error('unexpected fetch ' + url);
+      };
+      return s;
+    };
+    const answerP5 = (text, to = 701) => handleOwnerUpdate({ message: { message_id: 60, text, chat: { id: 42 }, reply_to_message: { message_id: to } } });
+    const tapP5 = (data = 'nosave:L1') => handleOwnerUpdate({ callback_query: { id: 'cq', data, message: { message_id: 61, chat: { id: 42 }, text: 'x' } } });
+    const ownerItems = () => s5.pl.items.filter(i => i.kind === 'owner').map(i => [i.name, i.price]);
+    const noPricesWrite = () => s5.writes.forEach(u => assert.ok(u.includes("'Bot answers'!") && !u.includes('Prices'), u));
+
+    // a price → sent to the customer, one IST-dated row (no phone digits), re-synced, owner told with [Don't save]
+    let s5 = p5();
+    await answerP5('6000 per session');
+    assert.equal(s5.sends[0].message.text, AKAR.text);
+    const [date, ...rest] = s5.answers[1];
+    assert.ok(Math.abs(Date.parse(date.replace(' ', 'T') + 'Z') - (Date.now() + 5.5 * HOUR)) < 2 * 60e3, `IST date: ${date}`);
+    assert.match(date, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
+    assert.deepEqual(rest, ['AKAR SKIN BOOSTER 1 SESSION', 6000, 'akar skin booster price? call me']);
+    assert.deepEqual(s5.writes, ["https://sheets.googleapis.com/v4/spreadsheets/SHEET_ID/values/'Bot answers'!A:D:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS"]);
+    assert.deepEqual(ownerItems(), [['AKAR SKIN BOOSTER 1 SESSION', 6000]], 're-synced: the next customer gets it');
+    assert.deepEqual(s5.lead.bot_state.kb_saved, { sheet_id: 'SHEET_ID', sheet_range: "'Bot answers'!A2:D2", item: 'AKAR SKIN BOOSTER 1 SESSION' });
+    assert.equal(s5.lead.bot_active, true);
+    assert.equal(s5.upserts.some(u => u.key === 'chatbot_config'), false, 'the KB is untouched');
+    assert.equal(s5.tg.at(-1).text, `✅ Sent to Priya Sharma:\n"${AKAR.text}"\n📄 Added to the price sheet: AKAR SKIN BOOSTER 1 SESSION → ₹6000`);
+    assert.deepEqual(s5.tg.at(-1).reply_markup.inline_keyboard, [[{ text: '🚫 Don’t save', callback_data: 'nosave:L1' }]]);
+    // [Don't save] → exactly that row cleared, re-synced; a second tap has nothing to undo
+    s5.tg = [];
+    await tapP5();
+    assert.deepEqual(s5.clears, [2]);
+    assert.deepEqual(ownerItems(), []);
+    assert.deepEqual(s5.tg.map(t => t.text), ['Not saved', 'x\n🗑 Undone: not saved for other customers.']);
+    s5.tg = [];
+    await tapP5();
+    assert.deepEqual(s5.clears, [2]);
+    assert.equal(s5.tg[1].text, 'x\n↩️ Nothing to undo (that row in the price sheet has changed).');
+    noPricesWrite();
+    // the row changed in the sheet since (moved, tidied) → never cleared
+    s5 = p5();
+    await answerP5('6000 per session');
+    s5.answers[1][1] = 'GOLD FACIAL';
+    await tapP5();
+    assert.deepEqual(s5.clears, []);
+    assert.equal(s5.answers[1][1], 'GOLD FACIAL');
+
+    // the model failed or named a price the owner didn't write → the thread's sheet name, else the question; firstPriceIn's price
+    for (const [gemini, service, item] of [['error', undefined, 'akar skin booster price? call me'],
+                                           [{ ...AKAR, price: 18000 }, undefined, 'akar skin booster price? call me'],
+                                           ['error', 'NEW SERVICE', 'NEW SERVICE']]) {
+      s5 = p5({ gemini, service });
+      await answerP5('6000 per session');
+      assert.deepEqual(s5.answers[1].slice(1, 3), [item, 6000], JSON.stringify(gemini));
+    }
+
+    // a failed append → the item joins price_list until the next sync, ⚠️, no button
+    s5 = p5({ appendFails: true });
+    await answerP5('6000 per session');
+    assert.deepEqual(ownerItems(), [['AKAR SKIN BOOSTER 1 SESSION', 6000]]);
+    assert.match(s5.tg.at(-1).text, /\n⚠️ Couldn't add it to the price sheet \(Google Sheets 403 .*\)\. The bot uses it until the next refresh\.$/);
+    assert.equal(s5.tg.at(-1).reply_markup, undefined);
+    assert.equal(s5.lead.bot_state.kb_saved, null);
+    noPricesWrite();
+
+    // no price in the answer → the KB's learned FAQ, as before; no sheet write
+    s5 = p5({ gemini: { text: 'We don’t do that treatment, sorry!' } });
+    await answerP5('We don’t do that treatment');
+    assert.equal(s5.writes.length, 0);
+    assert.equal(JSON.parse(s5.upserts.find(u => u.key === 'chatbot_config').value).kb.entries[0].type, 'faq');
+
+    // a ✏️ fix with a price for a sheet name → the same append path, sdnosave clears it
+    s5 = p5();
+    await answerP5('It is 3200 now', 950);
+    assert.deepEqual(s5.answers[1].slice(1), ['HYDRA FACIAL 1s', 3200, 'hydra facial price']);
+    assert.equal(s5.tg.at(-1).text, '✏️ Noted. 📄 Added to the price sheet: HYDRA FACIAL 1s → ₹3200');
+    assert.deepEqual(s5.tg.at(-1).reply_markup.inline_keyboard, [[{ text: '🚫 Don’t save', callback_data: 'sdnosave:7' }]]);
+    assert.equal(s5.shadow.kb_saved.sheet_range, "'Bot answers'!A2:D2");
+    await tapP5('sdnosave:7');
+    assert.deepEqual(s5.clears, [2]);
+    noPricesWrite();
+    delete process.env.GEMINI_API_KEY;
+    delete process.env.META_ACCESS_TOKEN;
+
     for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
   }
 

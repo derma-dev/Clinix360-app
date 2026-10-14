@@ -2096,40 +2096,47 @@ async function pushLead(db, lead, cfg, quiet = false) {
 // The owner replies in Telegram to a ❓ price question (sendBotAlert) → the
 // answer is rephrased in the bot's voice → sent to the customer if their last
 // message is < 24 h old → the bot resumes → the price joins the KB for
-// everyone, with a [Don't save] button for one-off prices (a personal discount).
+// everyone (S11c P5: the price sheet's Bot answers tab once one is set up), with a
+// [Don't save] button for one-off prices (a personal discount).
 
 // Q29 number guard: both texts must carry the same numbers, digit-group commas
 // ignored ("₹3,500" = "3500"). Any mismatch sends the owner's own words.
 const numbersIn = (t) => [...new Set((String(t).match(/\d[\d,]*(?:\.\d+)?/g) || [])
   .map(n => n.replace(/,/g, '')))].sort().join(' ');
 
-const REPHRASE_SCHEMA = { type: 'OBJECT', properties: { text: { type: 'STRING' } }, required: ['text'] };
+// S11c P5: item + price name what was priced, for the 'Bot answers' row.
+const REPHRASE_SCHEMA = { type: 'OBJECT', required: ['text'],
+  properties: { text: { type: 'STRING' }, item: { type: 'STRING' }, price: { type: 'NUMBER' } } };
 
+// → { text, item, price }. text is the owner's own words unless the numbers match
+// (Q29). A failed call → { text: answer }: the caller falls back for item/price.
 async function rephraseOwnerAnswer(model, answer, question, latest) {
   try {
     const d = await geminiJson({ model, schema: REPHRASE_SCHEMA,
-      system: 'You are the Instagram DM assistant of Derma Skin and Hair Solutions, a dermatology clinic. The clinic team has answered a customer’s question. Pass the answer on to the customer: warm, 1–3 sentences, in the language and script of the customer’s latest message (English → English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi). Keep every number exactly as the team wrote it, in digits. Add nothing the team didn’t say, and don’t say who on the team answered.',
+      system: 'You are the Instagram DM assistant of Derma Skin and Hair Solutions, a dermatology clinic. The clinic team has answered a customer’s question. Pass the answer on to the customer: warm, 1–3 sentences, in the language and script of the customer’s latest message (English → English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi). Keep every number exactly as the team wrote it, in digits. Add nothing the team didn’t say, and don’t say who on the team answered.\n' +
+              'Also fill `item`: a short UPPERCASE name for what the team priced, in the style of a clinic price list (e.g. "LHR FULL FACE 6 SESSIONS PACKAGE"), and `price`: that price in rupees as a plain number. If the answer gives no price, leave item empty and price 0.',
       user: `Customer asked: """${question || ''}"""\nCustomer's latest message: """${latest || ''}"""\nTeam's answer: """${answer}"""` });
     const text = String(d?.text || '').trim();
-    return text && numbersIn(text) === numbersIn(answer) ? text : answer;
+    return { text: text && numbersIn(text) === numbersIn(answer) ? text : answer,
+             item: String(d?.item || '').trim(), price: d?.price };
   } catch (e) {
     console.warn('[meta-service] owner answer rephrase failed (sending their words):', e.message);
-    return answer;
+    return { text: answer };
   }
 }
 
-// First plausible price in an answer. Port of firstPriceIn in app.js, keep in step.
-function firstPriceIn(text) {
-  const t = String(text || '').toLowerCase()
-    .replace(/(\d),(\d)/g, '$1$2')
-    .replace(/\d{6,}/g, ' ')
-    .replace(/\b\d{5}[\s-]\d{5}\b/g, ' ');
-  for (const m of t.matchAll(/(?:₹|rs\.?\s*|inr\s*)?(\d{1,5})(\s*k)?\b/g)) {
-    const n = parseInt(m[1], 10) * (m[2] ? 1000 : 1);
-    if (n >= 500 && n <= 60000) return n;
-  }
-  return null;
+// Phone-like digits out: 6+ digit runs and "98765 43210".
+const noPhones = (t) => String(t || '').replace(/\b\d{5}[\s-]\d{5}\b/g, ' ').replace(/\d{6,}/g, ' ');
+
+// Every plausible price in an answer, in order: ₹100–₹99,999 (the sheet's range,
+// F7), 8k-style suffixes OK. A lakh ("1,00,000") isn't read. Port of firstPriceIn
+// in app.js, keep the range in step.
+function pricesIn(text) {
+  const t = noPhones(String(text || '').toLowerCase().replace(/(\d),(\d)/g, '$1$2'));
+  return [...t.matchAll(/(?:₹|rs\.?\s*|inr\s*)?(\d{1,5})(\s*k)?\b/g)]
+    .map(m => parseInt(m[1], 10) * (m[2] ? 1000 : 1)).filter(n => n >= 100 && n <= 99999);
 }
+const firstPriceIn = (text) => pricesIn(text)[0] ?? null;
 
 const KB_TAG_STOPWORDS = new Set(['the','and','for','you','your','with','what','how','why','are','is','ka','ki','ke','hai','kya','mein','of','to','in','kitna','kitni','price','cost','charge']);
 
@@ -2209,9 +2216,11 @@ async function relayOwnerAnswer(msg) {
   const rows   = await db.listRecentMessages(lead.id, 10);
   const lastIn = rows.filter(isIncomingRow).pop();
   const out    = [];
+  let r = {};
 
   if (lastIn && Date.now() - Date.parse(lastIn.created_at) < 24 * 3600e3) {
-    const text = await rephraseOwnerAnswer(cfg?.model, answer, bs.kb_miss_question, lastIn.message);
+    r = await rephraseOwnerAnswer(cfg?.model, answer, bs.kb_miss_question, lastIn.message);
+    const text = r.text;
     await sendByPlatform(lead.source, lead[idColumnFor(lead.source)], text);
     await db.insertMessage({ lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
                              message: text, is_seen: true, is_bot: true });
@@ -2220,10 +2229,22 @@ async function relayOwnerAnswer(msg) {
     out.push(`⚠️ Not sent: ${name}’s last message is over 24 h old, and Instagram lets the bot reply only within 24 h.`);
   }
 
-  // Q30: saved for everyone, even when the window had closed. An unread config
-  // is never written back: a partial row would wipe the bot's settings.
+  // Q30: saved for everyone, even when the window had closed. S11c P5: with a
+  // price sheet, a price goes to its 'Bot answers' tab. The model's item/price
+  // count only when that price is in the owner's words; else the thread's sheet
+  // name (or the question) and the first price. No price → the KB, as before.
+  // An unread config is never written back: a partial row would wipe the bot's settings.
   let undo = null;
-  try {
+  const named = pricesIn(answer).includes(r.price);
+  const price = cfg?.price_sheet_id && (named ? r.price : firstPriceIn(answer));
+  if (price) {
+    const q = bs.kb_miss_question;
+    const item = (named && r.item) || learnedService(priceNames(cfg.kb, await getSettingJson('price_list')), q, bs.qualification?.service)
+      || clip(noPhones(q), 60);
+    const added = await addOwnerPrice(cfg.price_sheet_id, item, price, q);
+    undo = added.saved;
+    out.push(added.note);
+  } else try {
     if (!cfg) throw new Error('settings unreadable');
     cfg.kb = cfg.kb || {};
     undo = applyLearnedKbEntry(cfg.kb, bs.kb_miss_question, answer, bs.qualification?.service);
@@ -2247,20 +2268,63 @@ async function relayOwnerAnswer(msg) {
     ? { reply_markup: { inline_keyboard: [[{ text: '🚫 Don’t save', callback_data: `nosave:${lead.id}` }]] } } : {});
 }
 
+// S11c P5: an owner's price → a 'Bot answers' row, then a re-sync so the next
+// customer gets it at once. The sheet is shared with clinic staff: the question
+// goes in clipped, without phone-like digits. A failed append → the item joins
+// price_list until the next sync (only when a list exists: a lone item would
+// switch the prompt to an empty sheet). Returns { saved: [Don't save] record | null, note }.
+async function addOwnerPrice(sheetId, item, price, question) {
+  const row = [isoAt(Date.now() + 5.5 * 3600e3).slice(0, 16).replace('T', ' '), item, price, clip(noPhones(question), 200)];
+  try {
+    const range = await appendAnswerRow(sheetId, row);
+    await syncPriceSheet().catch(e => console.error('[meta-service] re-sync after the Bot answers row failed:', e.message));
+    return { saved: { sheet_id: sheetId, sheet_range: range, item }, note: `📄 Added to the price sheet: ${item} → ₹${price}` };
+  } catch (e) {
+    console.error('[meta-service] Bot answers append failed:', e.message);
+    let kept = false;
+    try {
+      const pl = await getSettingJson('price_list');
+      if (pl?.items) {
+        await createSupabaseClient().upsertSetting('price_list',
+          JSON.stringify({ ...pl, items: [...pl.items, { kind: 'owner', name: item, price }] }));
+        kept = true;
+      }
+    } catch (e2) { console.error('[meta-service] price_list fallback failed:', e2.message); }
+    return { saved: null, note: `⚠️ Couldn't add it to the price sheet (${e.message}). ` +
+      (kept ? 'The bot uses it until the next refresh.' : 'Not saved for other customers.') };
+  }
+}
+
+// [Don't save] on a sheet row: clear exactly that range while it still holds that
+// item (the client may have moved or tidied rows since), then re-sync.
+async function clearOwnerPrice({ sheet_id, sheet_range, item }) {
+  const [[row = []] = []] = await readSheet(sheet_id, [sheet_range]);
+  if (String(row[1] ?? '').trim() !== item) return false;
+  await clearAnswerRow(sheet_id, sheet_range);
+  await syncPriceSheet().catch(e => console.error('[meta-service] re-sync after [Don’t save] failed:', e.message));
+  return true;
+}
+
 // nosave:<lead id> (S4, the record is on the lead) · sdnosave:<shadow row id>
-// (S11a, a ✏️ fix; the record is on the shadow row).
+// (S11a, a ✏️ fix; the record is on the shadow row). A sheet_range record (S11c
+// P5) clears its 'Bot answers' row; an older one undoes the KB save.
 async function undoOwnerKbSave(cq) {
   const db    = createSupabaseClient();
   const [, kind, id] = /^(nosave|sdnosave):(.+)$/.exec(cq.data || '') || [];
   const saved = kind === 'nosave' ? (await db.getLeadById(id))?.bot_state?.kb_saved
               : kind ? (await db.findShadowRow('id', id))?.kb_saved : null;
-  const cfg   = saved && await getSettingJson('chatbot_config');
-  const done  = !!cfg && undoLearnedKbEntry(cfg.kb, saved);
-  if (done) await db.upsertSetting('chatbot_config', JSON.stringify(cfg));
+  let done;
+  if (saved?.sheet_range) done = await clearOwnerPrice(saved);
+  else {
+    const cfg = saved && await getSettingJson('chatbot_config');
+    done = !!cfg && undoLearnedKbEntry(cfg.kb, saved);
+    if (done) await db.upsertSetting('chatbot_config', JSON.stringify(cfg));
+  }
+  const why = saved?.sheet_range ? 'that row in the price sheet has changed' : 'a newer answer replaced it';
   await telegramApi('answerCallbackQuery', { callback_query_id: cq.id, text: done ? 'Not saved' : 'Nothing to undo' });
   // An edit without reply_markup also drops the button.
   await telegramApi('editMessageText', { chat_id: cq.message.chat.id, message_id: cq.message.message_id,
-    text: `${cq.message.text}\n${done ? '🗑 Undone: not saved for other customers.' : '↩️ Nothing to undo (a newer answer replaced it).'}` });
+    text: `${cq.message.text}\n${done ? '🗑 Undone: not saved for other customers.' : `↩️ Nothing to undo (${why}).`}` });
 }
 
 // telegram-webhook hands every update except the owner binding here. Only the
@@ -2486,8 +2550,9 @@ async function shadowVerdict(cq) {
 }
 
 // The owner's reply to a ✏️ prompt. A price answering a price question → the
-// KB at once (the S4 fold, with [Don't save]); anything else → Teach the bot for
-// review, since a correction is often advice for that one customer.
+// KB at once, or the price sheet once there is one (the S4 fold, with [Don't save]);
+// anything else → Teach the bot for review, since a correction is often advice
+// for that one customer.
 async function saveShadowFix(msg, row) {
   const db  = createSupabaseClient();
   const fix = msg.text.trim();
@@ -2498,8 +2563,12 @@ async function saveShadowFix(msg, row) {
   const service  = mergeBotState(lead?.bot_state, row.decision).qualification.service;
   const cfg      = row.decision?.asks_price && firstPriceIn(fix) && await getSettingJson('chatbot_config');
   let saved = null, note;
-  // ponytail: the gate knows the sheet's names, the save still goes to the KB; P5 sends it to the sheet.
-  if (cfg && learnedService(priceNames(cfg.kb, await getSettingJson('price_list')), question, service)) {
+  const name = cfg && learnedService(priceNames(cfg.kb, await getSettingJson('price_list')), question, service);
+  // S11c P5: with a price sheet, the price goes to its 'Bot answers' tab under that name.
+  // ponytail: an owner row named like a Prices row doesn't replace it (priceQuoted takes
+  // the Prices one); a wrong sheet price is fixed in the sheet.
+  if (name && cfg.price_sheet_id) ({ saved, note } = await addOwnerPrice(cfg.price_sheet_id, name, firstPriceIn(fix), question));
+  else if (name) {
     saved = applyLearnedKbEntry(cfg.kb, question, fix, service);
     await db.upsertSetting('chatbot_config', JSON.stringify(cfg));
     note = saved.key ? `💾 Saved: ${saved.key} → ₹${saved.price}. The bot quotes it to everyone from now on.`
@@ -2814,6 +2883,7 @@ module.exports = {
   leadPushDue,
   sendTelegram,
   handleOwnerUpdate,
+  firstPriceIn,
   ownerQuestionOpen,
   ownerTimerDue,
   runOwnerTimer,
