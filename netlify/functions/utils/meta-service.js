@@ -885,10 +885,14 @@ async function getSettingJson(key) {
 // yet → chatbot_config.mode (setups from before S11b). Every mode read goes here.
 // ponytail: a failed bot_mode read alone (chatbot_config read fine) also falls
 // back to chatbot_config.mode; one settings?key=in.(…) query closes that.
+// S11c: the synced price sheet rides along as price_list, only when it has items
+// (a failed first sync saves just { error, alerted_at }: no list). Read-only:
+// never write this object back as chatbot_config.
 const BOT_MODES = ['off', 'shadow', 'live'];
 async function getBotConfig() {
-  const [cfg, m] = await Promise.all([getSettingJson('chatbot_config'), getSettingJson('bot_mode')]);
-  return BOT_MODES.includes(m?.mode) ? { ...cfg, mode: m.mode } : cfg;
+  const [cfg, m, pl] = await Promise.all([getSettingJson('chatbot_config'), getSettingJson('bot_mode'), getSettingJson('price_list')]);
+  const out = BOT_MODES.includes(m?.mode) ? { ...cfg, mode: m.mode } : cfg;
+  return pl?.items ? { ...out, price_list: pl } : out;
 }
 
 // ── Per-platform enable flag (admin "Connected Accounts" toggle) ──
@@ -1507,13 +1511,21 @@ const ASSISTANT_DECISION_SCHEMA = {
   required: ['category', 'is_medical', 'reply', 'kb_covers', 'asks_price', 'handoff', 'reason'],
 };
 
-const ASSISTANT_SYSTEM_PROMPT = `You are the Instagram DM assistant for Derma Skin and Hair Solutions, a Delhi-NCR dermatology clinic (branches: Janakpuri main, Kirti Nagar, Dwarka Sec 12).
+// S11c: sheet prices are list prices with their unit in the name (design §6.2, Q40).
+// Without a synced price_list the KB's corpus prices stay, and those are often
+// package totals, so their old rule stays with them.
+const PRICE_RULE = {
+  sheet:  'KB prices are the clinic\'s list prices. Quote a price with the unit its name states, in words (1s or P/S = per session, P/U = per unit, PER INCH, ML): "₹3,000 per session", never the list\'s codes (1s, P/S, P/U) or its SERVICE/PACKAGE labels. When a PACKAGE exists for that same service and area, mention it too. NEVER multiply a session price into a course total; only a PACKAGE line gives a total. If the customer\'s area or variant isn\'t listed (e.g. "laser for face and neck" when only one of them is), it\'s a price you don\'t have.',
+  corpus: 'KB prices are the last price staff quoted and often cover a package of sessions — for a KB price NEVER say "per session" or state a session count; say it starts from that price and the team confirms the exact plan.',
+};
+
+const assistantSystemPrompt = (sheet) => `You are the Instagram DM assistant for Derma Skin and Hair Solutions, a Delhi-NCR dermatology clinic (branches: Janakpuri main, Kirti Nagar, Dwarka Sec 12).
 
 HARD RULES — breaking any is a failure:
 - Answer ONLY from the KNOWLEDGE BASE below. asks_price=true whenever the customer asks what something costs. If the KB does not answer the question, set kb_covers=false and reason='kb_miss'; then for a PRICE you don't have, reply="" and handoff=true (the team checks the price and comes back), and for ANY OTHER question handoff=false: say the team will confirm that point, then carry on with the next qualifying question.
 - NEVER diagnose, prescribe medicines, or interpret symptoms. A message describing active symptoms (pain, itching, bleeding, a reaction) is not yours to answer: set is_medical=true, reply="" and handoff=true.
 - "Is it safe / painful for my condition?" questions about a STABLE condition (e.g. "PCOS hai to laser safe?") are NOT medical — answer from the KB's safety entries, is_medical=false.
-- Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise you don't have the price: kb_miss, handoff=true (above). NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. KB prices are the last price staff quoted and often cover a package of sessions — for a KB price NEVER say "per session" or state a session count; say it starts from that price and the team confirms the exact plan. A LIVE OFFER may state only what its post caption states. Never reuse one service's price for a different service.
+- Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise you don't have the price: kb_miss, handoff=true (above). NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. ${sheet ? PRICE_RULE.sheet : PRICE_RULE.corpus} A LIVE OFFER may state only what its post caption states. Never reuse one service's price for a different service.
 - NEVER guarantee results.
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
 - Reply in the language and script of the customer's LATEST message, even if earlier messages were in another language: Hinglish in Roman letters ("kya aapki koi aur branch hai?") → reply in Roman Hinglish; Hindi in Devanagari → Hindi in Devanagari; English → English. Keep replies warm, 2–4 sentences.
@@ -1525,14 +1537,21 @@ HARD RULES — breaking any is a failure:
 Set handoff=true with the matching reason when: the customer wants to book now or declines, is fully qualified (WhatsApp number asked — given or refused), asks for a human, the message is medical, or they ask a price you don't have (kb_miss).`;
 
 // Whole-KB injection every turn (D20): no retrieval step can miss a medical
-// entry. ~40 entries stays tiny; upgrade path is pgvector top-k.
-function renderKbForPrompt(kb) {
-  const lines = (kb?.entries || []).map(e => e.type === 'service'
-    // Corpus-mined prices are what staff last quoted — often a multi-session
-    // package, so no "per session" claim here (the P/S in keys is the clinic's billing name).
-    // No price = unknown (S3): a price question on it goes to the owner, who fills it in (S4).
-    ? `- SERVICE ${e.key}${e.price ? `: ₹${e.price} (last quoted ${e.price_last_quoted || 'n/a'})` : ': no price yet'}`
-    : `- FAQ [${(e.tags || []).join(', ')}]: ${e.a}`);
+// entry. ~40 entries + ~150 sheet prices stays small; upgrade path is pgvector top-k.
+// S11c: with a synced price_list its items are the prices and the KB's corpus
+// service entries leave the prompt; without one the KB renders as before.
+const fmtPrice = (p) => p == null ? 'no price yet' : p === 0 ? 'free' : `₹${p.toLocaleString('en-IN')}`;
+function renderKbForPrompt(kb, priceList) {
+  const faq = (e) => `- FAQ [${(e.tags || []).join(', ')}]: ${e.a}`;
+  const lines = priceList?.items
+    ? [...(kb?.entries || []).filter(e => e.type !== 'service').map(faq),
+       ...priceList.items.map(i => `- ${i.kind === 'package' ? 'PACKAGE' : 'SERVICE'} ${i.name}: ${fmtPrice(i.price)}`)]
+    : (kb?.entries || []).map(e => e.type === 'service'
+      // Corpus-mined prices are what staff last quoted — often a multi-session
+      // package, so no "per session" claim here (the P/S in keys is the clinic's billing name).
+      // No price = unknown (S3): a price question on it goes to the owner, who fills it in (S4).
+      ? `- SERVICE ${e.key}${e.price ? `: ₹${e.price} (last quoted ${e.price_last_quoted || 'n/a'})` : ': no price yet'}`
+      : faq(e));
   return `KNOWLEDGE BASE (the ONLY source for answers):\n${lines.join('\n')}`;
 }
 
@@ -1609,8 +1628,7 @@ async function resolveOffer(cfg, attachment) {
   const cache = (await getSettingJson('offer_cache')) || {};
   const hit = mediaId && cache.offers?.[mediaId];
   if (hit) return { ...hit, fresh: isOfferFresh(hit.last_seen, cfg.offer_stale_days) };   // ponytail: last_seen = first sighting; a re-share doesn't refresh — add write-back if offers go stale too early
-  const serviceKeys = (cfg.kb?.entries || []).filter(e => e.type === 'service').map(e => e.key);
-  const parsed = await parseOfferCaption({ model: cfg.model, caption, serviceKeys });
+  const parsed = await parseOfferCaption({ model: cfg.model, caption, serviceKeys: priceNames(cfg.kb, cfg.price_list) });
   if (!parsed) return null;
   return { ...parsed, last_seen: new Date().toISOString(), source_caption: caption.slice(0, 500),
            mediaId, _new: true, fresh: true };
@@ -1670,13 +1688,14 @@ async function fetchImageBase64(url) {
 const IMAGE_TURN_ADDENDUM = `\n(They sent the attached image. Match it to one SERVICE in the KNOWLEDGE BASE if recognizable — e.g. a price-list or treatment screenshot — then reply normally per the rules. If you cannot tell what it shows, ask which treatment they mean.)`;
 
 // One structured decision per inbound. `history` = [{role:'user'|'model', text}]
-// ordered oldest-first. `offer` (D9) injects the ladder block; `image` (Step 15)
-// attaches inline_data to the new message. Returns the parsed decision; throws otherwise.
-async function callAssistant({ model, kb, history, inboundText, offer, image }) {
+// ordered oldest-first. `priceList` (S11c) is the price_list row. `offer` (D9)
+// injects the ladder block; `image` (Step 15) attaches inline_data to the new
+// message. Returns the parsed decision; throws otherwise.
+async function callAssistant({ model, kb, priceList, history, inboundText, offer, image }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('Missing GEMINI_API_KEY env var');
 
-  const sysParts = [{ text: ASSISTANT_SYSTEM_PROMPT }, { text: renderKbForPrompt(kb) }];
+  const sysParts = [{ text: assistantSystemPrompt(!!priceList?.items) }, { text: renderKbForPrompt(kb, priceList) }];
   if (offer) sysParts.push({ text: renderOfferForPrompt(offer) });
   // A burst ("price?" "branches?" "tanning?") runs one turn per message and the
   // older turns yield (yieldsToBurst), so the customer messages since the last
@@ -1765,6 +1784,8 @@ function mergeBotState(prev, decision) {
       next[k] = String(q[k]).slice(0, 120);
     }
   }
+  // The model sometimes copies the KB line's label too: "SERVICE HYDRA FACIAL 1s".
+  if (q.service) next.service = next.service.replace(/^(SERVICE|PACKAGE)\s+/, '');
   return { ...(prev || {}), qualification: next };
 }
 
@@ -1973,11 +1994,16 @@ function conversationText(rows) {
   ).join('\n');
 }
 
-// What the bot would quote: a fresh post offer, else the KB "starts from" price.
+// What the bot would quote: a fresh post offer, else the sheet price (S11c),
+// else (no price_list yet) the KB "starts from" price.
 function priceQuoted(botState, cfg) {
   const offer = offerFromBotState(botState, cfg || {});
   if (offer?.fresh) return `₹${offer.offer_price} (post offer)`;
   const svc = botState?.qualification?.service;
+  if (cfg?.price_list?.items) {
+    const it = cfg.price_list.items.find(i => i.name === svc && i.price != null);
+    return it ? fmtPrice(it.price) : '';
+  }
   const e = (cfg?.kb?.entries || []).find(x => x.type === 'service' && x.key === svc && x.price);
   return e ? `from ₹${e.price}` : '';
 }
@@ -2112,19 +2138,23 @@ const KB_TAG_STOPWORDS = new Set(['the','and','for','you','your','with','what','
 // anything else joins as a learned FAQ. New here: `service` (the thread's
 // qualified KB service) when the question doesn't name one ("price?" after a
 // share), and the returned undo record for [Don't save]. Mutates kb.
-// The KB service entry a question is about: the one it names, else `service`.
-function learnedService(kb, question, service) {
+// The priced names: the synced sheet's (S11c), else the KB's service keys.
+const priceNames = (kb, priceList) => priceList?.items ? priceList.items.map(i => i.name)
+  : (kb?.entries || []).filter(e => e.type === 'service').map(e => e.key);
+
+// The name a question is about: the one whose words it spells out, else `service`.
+function learnedService(names, question, service) {
   const q = (question || '').toLowerCase();
   const keyWords = k => k.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
-  return (kb?.entries || []).find(e => e.type === 'service'
-    && keyWords(e.key).length > 0 && keyWords(e.key).every(w => q.includes(w)))
-    || (kb?.entries || []).find(e => e.type === 'service' && e.key === service);
+  return names.find(n => keyWords(n).length > 0 && keyWords(n).every(w => q.includes(w)))
+    || names.find(n => n === service);
 }
 
 function applyLearnedKbEntry(kb, question, answer, service) {
   const month = new Date().toISOString().slice(0, 7);
   kb.entries = kb.entries || [];
-  const svc = learnedService(kb, question, service);
+  const key = learnedService(priceNames(kb), question, service);
+  const svc = key && kb.entries.find(e => e.type === 'service' && e.key === key);
   const price = firstPriceIn(answer);
   if (svc && price) {
     // null, not undefined: the record goes through JSON in bot_state.
@@ -2453,10 +2483,12 @@ async function saveShadowFix(msg, row) {
   const service  = mergeBotState(lead?.bot_state, row.decision).qualification.service;
   const cfg      = row.decision?.asks_price && firstPriceIn(fix) && await getSettingJson('chatbot_config');
   let saved = null, note;
-  if (cfg && learnedService(cfg.kb, question, service)) {
+  // ponytail: the gate knows the sheet's names, the save still goes to the KB; P5 sends it to the sheet.
+  if (cfg && learnedService(priceNames(cfg.kb, await getSettingJson('price_list')), question, service)) {
     saved = applyLearnedKbEntry(cfg.kb, question, fix, service);
     await db.upsertSetting('chatbot_config', JSON.stringify(cfg));
-    note = `💾 Saved: ${saved.key} → ₹${saved.price}. The bot quotes it to everyone from now on.`;
+    note = saved.key ? `💾 Saved: ${saved.key} → ₹${saved.price}. The bot quotes it to everyone from now on.`
+                     : '💾 Saved: the bot gives this answer to everyone who asks.';
   } else {
     await db.insertKbCandidate({ lead_id: row.lead_id, question: question.slice(0, 500), answer: fix.slice(0, 2000) });
     note = '📥 Added to Teach the bot in the dashboard. The bot uses it once it’s approved there.';
@@ -2650,7 +2682,8 @@ async function botReply(lead, ev, platform, inboundRow = null) {
         if (ev.attachment?.type === 'image') image = await fetchImageBase64(ev.attachment.url);
       } catch (e) { console.warn('[meta-service] image fetch failed (continuing without vision):', e.message); }
       try {
-        decision = await callAssistant({ model: cfg.model, kb: cfg.kb, history, inboundText: ev.messageText, offer, image });
+        decision = await callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history,
+                                         inboundText: ev.messageText, offer, image });
       } catch (err) {
         // D13 — an LLM failure never silences the thread: canned handoff in live,
         // one error row in shadow.
@@ -2788,4 +2821,5 @@ module.exports = {
   clearAnswerRow,
   parsePriceSheet,
   syncPriceSheet,
+  priceNames,
 };

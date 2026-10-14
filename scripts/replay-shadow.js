@@ -1,7 +1,7 @@
 // Chatbot Step 16 — corpus replay harness (final plan §8, D21).
 // Feeds ig_export_history.jsonl threads through the REAL decision pipeline
 // (classifyInbound + caps + offer ladder + callAssistant) in shadow semantics:
-// nothing is sent, nothing touches Supabase except the READ of chatbot_config.
+// nothing is sent, nothing touches Supabase except the READ of chatbot_config + price_list.
 // Output = local JSONL shaped like bot_shadow_log rows plus review extras
 // (staff's actual reply, strat bucket, synthetic turn state). Local file, not
 // the live table: replay rows would pollute Step 19's shadow metrics and
@@ -26,7 +26,7 @@ for (const line of fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split(/\r?\n
   if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
 }
 
-const { classifyInbound, callAssistant, settleDecision, parseOfferCaption } = require('../netlify/functions/utils/meta-service');
+const { classifyInbound, callAssistant, settleDecision, parseOfferCaption, getSettingJson, priceNames } = require('../netlify/functions/utils/meta-service');
 
 const CORPUS = path.join(ROOT, 'artifacts', 'data', 'ig_export_history.jsonl');
 const args = process.argv.slice(2);
@@ -180,7 +180,7 @@ async function replayThread(thread, cfg, append) {
           const caption = m.text.slice('[shared post: '.length, m.text.replace(/\s+$/, '').length - 1);
           const k = normCap(caption);
           offer = offerCache.get(k) || await withBackoff(() => parseOfferCaption(
-            { model: cfg.model, caption, serviceKeys: cfg.kb.entries.filter(e => e.type === 'service').map(e => e.key) }
+            { model: cfg.model, caption, serviceKeys: priceNames(cfg.kb, cfg.price_list) }
           ).then(p => p && { ...p, last_seen: m.at, source_caption: caption.slice(0, 500),
                               // A just-parsed offer is fresh by definition (live resolveOffer
                               // sets fresh:true; without this the ladder renders STALE on the
@@ -199,7 +199,7 @@ async function replayThread(thread, cfg, append) {
         const t0 = Date.now();
         try {
           let decision = await withBackoff(() =>
-            callAssistant({ model: cfg.model, kb: cfg.kb, history, inboundText, offer }));
+            callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history, inboundText, offer }));
           row.latency_ms = Date.now() - t0;
           // Same post-model rules as botReply (is_medical, misc ack, Q30 price-only kb_miss).
           decision = settleDecision(decision, leadCategory, cfg);
@@ -244,7 +244,10 @@ const RUN = new Date().toISOString();
   if (!process.env.GEMINI_API_KEY) throw new Error('Missing GEMINI_API_KEY (set in .env)');
 
   const cfg = await loadConfig();
-  console.log(`[replay] config: model=${cfg.model} mode=${cfg.mode} turn_cap=${cfg.turn_cap} age_cap=${cfg.conversation_age_cap_days}d kb=${cfg.kb?.entries?.length} entries`);
+  const pl = await getSettingJson('price_list');   // S11c: same rule as getBotConfig, a list only with items
+  if (pl?.items) cfg.price_list = pl;
+  console.log(`[replay] config: model=${cfg.model} mode=${cfg.mode} turn_cap=${cfg.turn_cap} age_cap=${cfg.conversation_age_cap_days}d kb=${cfg.kb?.entries?.length} entries` +
+              ` prices=${pl?.items ? `${pl.items.length} from the sheet (synced ${pl.synced_at})` : 'none, KB prices'}`);
 
   // Resume: skip threads whose last row is marked done. A stopped run leaves one
   // half-replayed thread; its rows are dropped so the redo can't duplicate them.

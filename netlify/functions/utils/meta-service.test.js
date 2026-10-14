@@ -18,6 +18,7 @@ const {
   createSupabaseClient,
   maybeCaptureKbCandidate,
   parseOfferCaption,
+  resolveOffer,
   isOfferFresh,
 } = require('./meta-service');
 
@@ -576,6 +577,33 @@ assert.equal(extractComments({}).length, 0);
       assert.ok(body.contents.at(-1).parts[0].text.includes('price of laser'));
       assert.equal(body.contents.length, 3, 'history + current message');
 
+      // no price_list: the KB renders as before, with the "starts from" rule
+      const sysParts = () => JSON.parse(captured.opts.body).systemInstruction.parts.map(p => p.text);
+      assert.equal(sysParts()[1], 'KNOWLEDGE BASE (the ONLY source for answers):\n- SERVICE LHR FULL BODY P/S: ₹35000 (last quoted n/a)');
+      assert.match(sysParts()[0], /say it starts from that price/);
+
+      // S11c P3: a synced price_list replaces the corpus prices; FAQs stay, then the sheet's lines
+      const KB = { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 },
+                             { type: 'faq', tags: ['consultation'], a: 'Consultation at the clinic is free.' }] };
+      const PL = { synced_at: 't', items: [{ kind: 'service', name: 'HYDRA FACIAL 1s', price: 3000 },
+        { kind: 'service', name: 'NEW SERVICE', price: null }, { kind: 'service', name: 'PATCH TEST', price: 0 },
+        { kind: 'package', name: 'LHR FULL BODY 12S', price: 35000 }, { kind: 'owner', name: 'AKAR SKIN BOOSTER', price: 6000 }] };
+      await callAssistant({ kb: KB, priceList: PL, inboundText: 'hydra price?' });
+      assert.equal(sysParts()[1], ['KNOWLEDGE BASE (the ONLY source for answers):',
+        '- FAQ [consultation]: Consultation at the clinic is free.',
+        '- SERVICE HYDRA FACIAL 1s: ₹3,000', '- SERVICE NEW SERVICE: no price yet', '- SERVICE PATCH TEST: free',
+        '- PACKAGE LHR FULL BODY 12S: ₹35,000', '- SERVICE AKAR SKIN BOOSTER: ₹6,000'].join('\n'), 'no corpus price in the prompt');
+      assert.match(sysParts()[0], /Quote a price with the unit its name states, in words \(1s or P\/S = per session/);
+      assert.match(sysParts()[0], /never the list's codes/);
+      assert.match(sysParts()[0], /When a PACKAGE exists for that same service and area, mention it too/);
+      assert.match(sysParts()[0], /NEVER multiply a session price into a course total/);
+      assert.match(sysParts()[0], /area or variant isn't listed.*a price you don't have/);
+      assert.ok(!/starts from/.test(sysParts()[0]), 'the "starts from" rule is gone');
+      // a failed first sync saves only { error, alerted_at }: that's no list
+      await callAssistant({ kb: KB, priceList: { error: 'x', alerted_at: 't' }, inboundText: 'x' });
+      assert.match(sysParts()[1], /- SERVICE LHR FULL BODY P\/S: ₹35000/);
+      assert.match(sysParts()[0], /starts from/);
+
       // a burst: customer messages after the last reply join the new one, so
       // the one turn that's sent answers them all
       await callAssistant({ history: [{ role: 'user', text: 'hi' }, { role: 'model', text: 'hello!' },
@@ -624,6 +652,16 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
     global.fetch = okFetch({ service: '', offer_price: 5000 });
     assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
+
+    // S11c P3: with a synced sheet, a caption is matched to the sheet's names only
+    let parseSys;
+    global.fetch = async (url, opts) => { parseSys = JSON.parse(opts.body).systemInstruction.parts[0].text;
+                                          return okFetch({ service: 'HYDRA FACIAL 1s', offer_price: 1999 })(); };
+    r = await resolveOffer({ kb: { entries: [{ type: 'service', key: 'HYDRA FACIAL P/S' }] },
+                             price_list: { items: [{ kind: 'service', name: 'HYDRA FACIAL 1s', price: 3000 }] } },
+                           { title: 'Hydra glow, 1999 this week!' });
+    assert.equal(r.service, 'HYDRA FACIAL 1s');
+    assert.ok(parseSys.endsWith('SERVICE KEYS:\nHYDRA FACIAL 1s'), 'no corpus key offered');
 
     // HTTP failure → throws (caller degrades to "no offer")
     global.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: { message: 'quota' } }) });
@@ -929,7 +967,8 @@ assert.equal(extractComments({}).length, 0);
     //    via the platform sender, outgoing persisted is_bot=true, category +
     //    normalized qualification persisted (D14/D16)
     {
-      const calls = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      const calls = botMock({ config: CFG('live'), decision: { ...REPLY_DECISION,
+        qualification: { ...REPLY_DECISION.qualification, service: 'SERVICE LHR FULL BODY P/S' } } });
       const r = await botReply(LEAD, EV, 'instagram', { id: 'inbound_row' });
       assert.deepEqual(r, { sent: true });
       assert.equal(calls.gemini.length, 1);
@@ -944,7 +983,8 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.patches[0].body.category, 'lead');
       assert.equal(calls.patches[0].body.bot_state.qualification.phone, '9876543210',
         'phone digit-normalized in code (D16)');
-      assert.equal(calls.patches[0].body.bot_state.qualification.service, 'LHR FULL BODY P/S');
+      assert.equal(calls.patches[0].body.bot_state.qualification.service, 'LHR FULL BODY P/S',
+        'the KB line label the model copied ("SERVICE …") is stripped');
       assert.equal(calls.patches[0].body.bot_active, undefined, 'a normal turn never flips the bot off');
     }
 
@@ -1946,6 +1986,15 @@ assert.equal(extractComments({}).length, 0);
     assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'type stamped with a time');
     assert.equal(calls.patches[0].bot_state.turn_count, 2, 'stamp merges into bot_state, never replaces it');
 
+    // S11c P3: with a synced sheet, price_quoted is the sheet price, never the corpus one
+    const SHEET_CFG = { ...CFG, price_list: { items: [{ kind: 'service', name: 'LHR FULL BODY 1s', price: 8700 }] } };
+    const svcLead = (service) => ({ ...LEAD, bot_state: { ...LEAD.bot_state, qualification: { ...LEAD.bot_state.qualification, service } } });
+    for (const [service, quoted] of [['LHR FULL BODY 1s', '₹8,700'], ['LHR FULL BODY P/S', '']]) {
+      calls = pushMock({ history: HISTORY });
+      await pushLead(db, svcLead(service), SHEET_CFG);
+      assert.equal(calls.hooks[0].body.price_quoted, quoted, service);
+    }
+
     // Quiet push: "Chat went quiet" summary keeps the earlier handoff; a routed
     // branch is named when the customer never typed one; a fresh post offer wins
     process.env.LEAD_WEBHOOK_KEY = 'mk_123';
@@ -2648,13 +2697,13 @@ assert.equal(extractComments({}).length, 0);
       global.fetch = async (url) => {
         urls.push(url);
         if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify({ mode: 'shadow', draft_digest_hour: hour }) }]);
-        if (url.includes('settings?key=eq.bot_mode')) return json([]);
+        if (url.includes('settings?key=eq.')) return json([]);
         if (url.includes('bot_shadow_log?')) return json([]);
         throw new Error('unexpected fetch: ' + url);
       };
       assert.equal((await hourly()).statusCode, 200);
       assert.equal(urls.filter(u => u.includes('bot_shadow_log')).length, runs, `digest hour ${hour}`);
-      assert.equal(urls.length, 2 + runs, 'no quiet-chat push or owner timers in shadow');
+      assert.equal(urls.filter(u => !u.includes('/settings?')).length, runs, 'no quiet-chat push or owner timers in shadow');
     }
 
     for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
@@ -2674,6 +2723,7 @@ assert.equal(extractComments({}).length, 0);
       if (url.includes('settings?key=eq.telegram_owner')) return json([{ value: JSON.stringify({ chat_id: 555, name: 'Gaurav' }) }]);
       if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify(st.cfg) }]);
       if (url.includes('settings?key=eq.bot_mode')) return json(st.mode ? [{ value: JSON.stringify(st.mode) }] : []);
+      if (url.includes('settings?key=eq.price_list')) return json(st.pl ? [{ value: JSON.stringify(st.pl) }] : []);
       if (url.includes('/settings') && opts.method === 'POST') {
         const b = JSON.parse(opts.body);
         st.upserts.push(b);
@@ -2693,6 +2743,13 @@ assert.equal(extractComments({}).length, 0);
     assert.deepEqual(await botReply({ id: 'L1', bot_active: true }, { messageText: 'hi' }, 'instagram'), { skipped: 'mode_off' });
     st.mode = { mode: 'banana' };
     assert.equal((await getBotConfig()).mode, 'live');
+    // S11c P3: price_list rides along only when it has items (a failed first sync saves just the error)
+    st.mode = null;
+    st.pl = { error: 'Google Sheets 404', alerted_at: '2026-10-14T06:00:00.000Z' };
+    assert.deepEqual(await getBotConfig(), { mode: 'live', model: 'm' });
+    st.pl = { synced_at: '2026-10-14T06:00:00.000Z', items: [{ kind: 'service', name: 'HYDRA FACIAL 1s', price: 3000 }] };
+    assert.deepEqual(await getBotConfig(), { mode: 'live', model: 'm', price_list: st.pl });
+    st.pl = null;
 
     const cmd  = (text, chatId = 555) => handleOwnerUpdate({ message: { message_id: 40, text, chat: { id: chatId } } });
     const tap  = (data) => handleOwnerUpdate({ callback_query: { id: 'cq', data, message: { message_id: 41, chat: { id: 555 } } } });
