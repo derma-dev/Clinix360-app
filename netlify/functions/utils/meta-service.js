@@ -2270,12 +2270,13 @@ async function handleOwnerUpdate(update) {
   const chatId = msg?.chat?.id ?? cq?.message?.chat?.id;
   const owner  = chatId && await getSettingJson('telegram_owner');
   if (!owner?.chat_id || owner.chat_id !== chatId) return;
-  const modeCmd = /^\/mode(@\w+)?$/.test(msg?.text?.trim() || '') || /^mode:/.test(cq?.data || '');
+  const cmd = /^\/(mode|prices)(@\w+)?$/.exec(msg?.text?.trim() || '')?.[1] || (/^mode:/.test(cq?.data || '') && 'mode');
   try {
     if (cq) {
       const d = cq.data || '';
       await (/^mode:/.test(d) ? modeTap(cq, owner) : /^sd:/.test(d) ? shadowVerdict(cq) : undoOwnerKbSave(cq));
-    } else if (modeCmd) await sendModeMenu(chatId);
+    } else if (cmd === 'mode') await sendModeMenu(chatId);
+    else if (cmd === 'prices') await refreshPrices(chatId);
     else if (msg.text) {
       const fixOf = msg.reply_to_message &&
         await createSupabaseClient().findShadowRow('fix_prompt_msg_id', msg.reply_to_message.message_id);
@@ -2284,8 +2285,22 @@ async function handleOwnerUpdate(update) {
   } catch (e) {
     console.error('[meta-service] owner update failed:', e.message);
     await sendTelegram(chatId, `⚠️ That didn’t go through (${e.message}).` +
-      (modeCmd ? ' Try /mode again.' : ' Please answer them in the Instagram app.')).catch(() => {});
+      (cmd ? ` Try /${cmd} again.` : ' Please answer them in the Instagram app.')).catch(() => {});
   }
+}
+
+// /prices (S11c P4) → sync now and say what was read. A failed read keeps the
+// last list (syncPriceSheet), and the reason goes back to the owner.
+async function refreshPrices(chatId) {
+  let text;
+  try {
+    const c = await syncPriceSheet();
+    text = c ? `📄 Prices refreshed: ${c.services} services, ${c.packages} packages, ${c.owner} from Bot answers`
+             : '⚠️ No price sheet is set up yet.';
+  } catch (e) {
+    text = `⚠️ Couldn't read the price sheet (${e.message}). The bot keeps the last prices.`;
+  }
+  await sendTelegram(chatId, text);
 }
 
 // ── Owner timeouts · service tracker S6 (Q14) ──

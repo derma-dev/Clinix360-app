@@ -1623,8 +1623,9 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(calls.telegrams.length, 2);
     assert.equal(calls.telegrams[0].chat_id, 555);
     assert.match(calls.telegrams[0].text, /^✅ Linked[\s\S]*\/mode/);
-    assert.deepEqual(calls.telegrams[1], { commands: [{ command: 'mode', description: 'Switch the bot off / shadow / live' }] },
-                     'S11b: /mode in the bot menu');
+    assert.deepEqual(calls.telegrams[1], { commands: [{ command: 'mode', description: 'Switch the bot off / shadow / live' },
+                                                      { command: 'prices', description: 'Refresh prices from the price sheet' }] },
+                     'S11b /mode + S11c /prices in the bot menu');
     calls.telegrams = [];
 
     // wrong code, plain /start, other text, non-message updates → 200, nothing done
@@ -3045,6 +3046,55 @@ assert.equal(extractComments({}).length, 0);
     st = p2({ prev: { ...PREV, counts: { services: 10, packages: 3, owner: 0 }, error: 'x', alerted_at: new Date(NOW).toISOString() } });
     assert.deepEqual(await syncPriceSheet(NOW + HOUR), { services: 7, packages: 3, owner: 2 });
     assert.deepEqual(Object.keys(st.saved()[0]), ['synced_at', 'items', 'counts']);
+
+    // ── S11c P4: bot-hourly syncs in any mode but off; the owner's /prices ──
+    const { handler: hourly } = require('../bot-hourly');
+    const { handleOwnerUpdate } = require('./meta-service');
+    const SHEET_CFG = { price_sheet_id: 'SHEET_ID', price_name_fixes: FIXES };
+    // p2 plus the hourly run's table reads (no drafts, no open questions, no chats)
+    const p4 = (o) => {
+      const s = p2(o), inner = global.fetch;
+      s.rest = [];
+      global.fetch = async (url, opts) => /\/rest\/v1\/(leads|lead_messages|bot_shadow_log)\?/.test(url)
+        ? (s.rest.push(url), json([])) : inner(url, opts);
+      return s;
+    };
+    const otherHour = (new Date(Date.now() + 5.5 * HOUR).getUTCHours() + 1) % 24;
+    // shadow, not the digest hour: synced, and still no digest
+    st = p4({ cfg: { ...SHEET_CFG, mode: 'shadow', draft_digest_hour: otherHour } });
+    assert.equal((await hourly()).statusCode, 200);
+    assert.equal(st.sheets.length, 1);
+    assert.deepEqual(st.saved()[0].counts, { services: 7, packages: 3, owner: 2 });
+    assert.equal(st.rest.length, 0);
+    // off: no sync, nothing else
+    st = p4({ cfg: { ...SHEET_CFG, mode: 'off' } });
+    await hourly();
+    assert.equal(st.sheets.length + st.upserts.length + st.rest.length, 0);
+    // live with a failing sheet: the S6 + S2 reads still run
+    st = p4({ cfg: { ...SHEET_CFG, mode: 'live' }, prev: PREV, sheet: () => json({}, 404) });
+    assert.equal((await hourly()).statusCode, 200);
+    assert.equal(st.sheets.length, 1);
+    assert.ok(st.rest.some(u => u.includes('handoff_reason=eq.kb_miss')), 'S6 owner timers checked');
+    assert.ok(st.rest.some(u => u.includes('lead_messages?created_at=gt.')), 'S2 quiet chats checked');
+
+    // /prices from the bound owner (chat 42): sync, then the counts
+    const prices = (text, chat = 42) => handleOwnerUpdate({ message: { message_id: 50, text, chat: { id: chat } } });
+    st = p2();
+    await prices('/prices');
+    assert.equal(st.sheets.length, 1);
+    assert.deepEqual(st.tg, [{ chat_id: 42, text: '📄 Prices refreshed: 7 services, 3 packages, 2 from Bot answers' }]);
+    st = p2();
+    await prices('/prices@DSkinBot');
+    assert.equal(st.tg.length, 1, 'the menu form of the command works too');
+    // a failed read: the reason, and the last list stays (alerted already today, so no second message)
+    st = p2({ prev: { ...PREV, alerted_at: new Date().toISOString() }, sheet: () => json({ error: { message: 'Requested entity was not found.' } }, 404) });
+    await prices('/prices');
+    assert.deepEqual(st.tg.map(t => t.text), ["⚠️ Couldn't read the price sheet (Google Sheets 404: Requested entity was not found.). The bot keeps the last prices."]);
+    assert.equal(st.saved().length, 0);
+    // another chat → ignored, nothing read
+    st = p2();
+    await prices('/prices', 666);
+    assert.equal(st.sheets.length + st.tg.length, 0);
 
     for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
   }

@@ -10,8 +10,8 @@
 // sends "/start <code>" and saves their chat id in settings.telegram_owner.
 // Opening the link from another account moves the alerts there.
 // S4: everything else goes to handleOwnerUpdate (the owner's answers to price
-// questions, [Don't save] taps, S11a digest taps, S11b /mode; other chats are
-// ignored there).
+// questions, [Don't save] taps, S11a digest taps, S11b /mode, S11c /prices;
+// other chats are ignored there).
 // .mjs (modern syntax) like meta-webhook: the body arrives decoded.
 // ============================================================
 
@@ -33,8 +33,9 @@ export default async (req, context) => {
     await createSupabaseClient().upsertSetting('telegram_owner',
       JSON.stringify({ chat_id: msg.chat.id, name: msg.from?.first_name || '' }));
     await sendTelegram(msg.chat.id, '✅ Linked. DSkin bot alerts will arrive in this chat.\nSend /mode to switch the bot off, shadow or live.');
-    // S11b: /mode in the bot's menu. Cosmetic, so a failure never blocks the link.
-    await telegramApi('setMyCommands', { commands: [{ command: 'mode', description: 'Switch the bot off / shadow / live' }] })
+    // S11b /mode + S11c /prices in the bot's menu. Cosmetic, so a failure never blocks the link.
+    await telegramApi('setMyCommands', { commands: [{ command: 'mode', description: 'Switch the bot off / shadow / live' },
+                                                    { command: 'prices', description: 'Refresh prices from the price sheet' }] })
       .catch(e => console.warn('[telegram-webhook] setMyCommands failed:', e.message));
     console.log(`[telegram-webhook] owner linked: chat ${msg.chat.id}`);
   } else {

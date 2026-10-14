@@ -1,6 +1,7 @@
 // ============================================================
 // Netlify Scheduled Function: bot-hourly
 // Runs every hour, on the hour.
+// Shadow or live (S11c P4): the price sheet → settings.price_list (syncPriceSheet).
 // Shadow mode (S11a): at chatbot_config.draft_digest_hour (IST, default 20) →
 // one Telegram digest of the day's drafts to the owner (sendDraftDigest). Nothing else.
 // Live mode:
@@ -12,7 +13,7 @@
 // ============================================================
 
 const { schedule } = require('@netlify/functions');
-const { createSupabaseClient, getBotConfig, pushLead, ownerQuestionOpen, runOwnerTimer, sendDraftDigest } = require('./utils/meta-service');
+const { createSupabaseClient, getBotConfig, pushLead, ownerQuestionOpen, runOwnerTimer, sendDraftDigest, syncPriceSheet } = require('./utils/meta-service');
 
 // ponytail: only chats active in the 48 h before they went quiet are checked, so a
 // push that keeps failing gives up after 2 days (we were emailed on the first failure).
@@ -31,6 +32,12 @@ const handler = async () => {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) { console.error('[bot-hourly] missing env vars'); return { statusCode: 500 }; }
   const cfg = (await getBotConfig()) || {};
+  // S11c P4: the price sheet, any mode but off. A failure keeps the last list and
+  // alerts the owner (syncPriceSheet), and never stops the work below.
+  if (cfg.mode === 'shadow' || cfg.mode === 'live') {
+    try { console.log('[bot-hourly] price sheet:', (await syncPriceSheet()) || 'not set up'); }
+    catch (e) { console.error('[bot-hourly] price sheet sync failed:', e.message); }
+  }
   if (cfg.mode === 'shadow') {
     const istHour = new Date(Date.now() + 5.5 * 3600e3).getUTCHours();
     if (istHour !== Number(cfg.draft_digest_hour ?? 20)) return { statusCode: 200 };
