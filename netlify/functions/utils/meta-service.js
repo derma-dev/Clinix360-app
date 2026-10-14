@@ -381,18 +381,21 @@ async function refreshIgToken(now = Date.now()) {
     return 'refreshed';
   } catch (e) {
     console.error('[meta-service] IG token refresh failed:', e.message);
-    const text = `⚠️ Instagram token refresh failed (${e.message}).` +
+    await alertOwner('Instagram token refresh failed', `⚠️ Instagram token refresh failed (${e.message}).` +
       (s?.expires_at ? ` The token stops working on ${istStamp(s.expires_at)}.` : '') +
-      ' Open the Connect Instagram link again before then, or the bot stops replying on Instagram.';
-    try {
-      const owner = await getSettingJson('telegram_owner');
-      if (!owner?.chat_id) throw new Error('no owner linked');
-      await sendTelegram(owner.chat_id, text);
-    } catch (e2) {
-      await sendAlertEmail(null, '⚠️ Instagram token refresh failed', 'Instagram token refresh failed', text,
-        `Sent by email because the Telegram alert failed (${e2.message}).`);
-    }
+      ' Open the Connect Instagram link again before then, or the bot stops replying on Instagram.');
     return 'failed';
+  }
+}
+
+// The owner's Telegram, or an email when that fails. Never throws.
+async function alertOwner(title, text) {
+  try {
+    const owner = await getSettingJson('telegram_owner');
+    if (!owner?.chat_id) throw new Error('no owner linked');
+    await sendTelegram(owner.chat_id, text);
+  } catch (e) {
+    await sendAlertEmail(null, `⚠️ ${title}`, title, text, `Sent by email because the Telegram alert failed (${e.message}).`);
   }
 }
 
@@ -451,6 +454,74 @@ async function appendAnswerRow(id, row) {
 }
 
 const clearAnswerRow = (id, range) => sheetsApi(id, `/values/${enc(range)}:clear`, { method: 'POST', body: '{}' });
+
+// A sheet cell → whole rupees. A blank or non-number → null; 0 stays 0.
+function sheetPrice(v) {
+  if (typeof v === 'number') return Math.round(v);
+  const s = String(v ?? '').replace(/[₹,\s]/g, '');
+  return s && Number.isFinite(+s) ? Math.round(+s) : null;
+}
+
+// Prices rows + 'Bot answers' rows → [{ kind: 'service'|'package'|'owner', name, price }].
+// Columns are found by header text: the 1st Name/Customer Price pair is Services,
+// the 2nd is Packages. Only those columns are read: Service Number never is.
+// Spelling fixes are ours (Q45). CONSULTATION* is skipped until Q41 is answered.
+function parsePriceSheet(pricesRows, answerRows, fixes = {}) {
+  const cell = (v) => String(v ?? '').trim();
+  const fix = (n) => Object.entries(fixes || {}).reduce((s, [bad, good]) => s.replaceAll(bad, good), n);
+  const h = pricesRows.findIndex(r => r.some(c => cell(c) === 'Name') && r.some(c => cell(c) === 'Customer Price'));
+  const pairs = [];
+  let open = -1;                 // a Name column waiting for its Customer Price
+  (pricesRows[h] || []).forEach((c, i) => {
+    if (cell(c) === 'Name') open = i;
+    else if (cell(c) === 'Customer Price' && open >= 0) { pairs.push([open, i]); open = -1; }
+  });
+  if (pairs.length < 2) throw new Error('header missing: need Name + Customer Price for Services and Packages');
+  const items = [];
+  for (const row of pricesRows.slice(h + 1))
+    for (const [kind, [n, p]] of [['service', pairs[0]], ['package', pairs[1]]]) {
+      const name = fix(cell(row[n]));
+      if (name && !/^CONSULTATION/i.test(name)) items.push({ kind, name, price: sheetPrice(row[p]) });
+    }
+  const a = answerRows.findIndex(r => cell(r[1]) === 'Item');
+  for (const row of answerRows.slice(a + 1)) {
+    const name = fix(cell(row[1]));
+    if (name) items.push({ kind: 'owner', name, price: sheetPrice(row[2]) });
+  }
+  return items;
+}
+
+// Sheet → settings.price_list { synced_at, items, counts } (its own row, so a
+// console Settings save can't put old prices back). Returns counts, or null when
+// no sheet is set up. A bad read, a missing header, no services or fewer than half
+// of last time keeps the last list, alerts the owner (once a day while it lasts),
+// saves the error on the row and throws.
+const DAY_MS = 86400e3;
+async function syncPriceSheet(now = Date.now()) {
+  const [cfg, prev] = await Promise.all([getSettingJson('chatbot_config'), getSettingJson('price_list')]);
+  if (!cfg?.price_sheet_id) return null;
+  const db = createSupabaseClient();
+  try {
+    const [prices = [], answers = []] = await readSheet(cfg.price_sheet_id, ['Prices!A:F', `${ANSWERS_TAB}A:C`]);
+    const items = parsePriceSheet(prices, answers, cfg.price_name_fixes);
+    const counts = { services: 0, packages: 0, owner: 0 };
+    for (const it of items) counts[it.kind === 'service' ? 'services' : it.kind === 'package' ? 'packages' : 'owner']++;
+    if (!counts.services) throw new Error('no services found');
+    if (counts.services < (prev?.counts?.services || 0) / 2)
+      throw new Error(`only ${counts.services} services (the last sync had ${prev.counts.services})`);
+    await db.upsertSetting('price_list', JSON.stringify({ synced_at: isoAt(now), items, counts }));
+    return counts;
+  } catch (e) {
+    console.error('[meta-service] price sheet sync failed, last list kept:', e.message);
+    if (!(now - Date.parse(prev?.alerted_at) < DAY_MS)) {
+      await alertOwner('Price sheet sync failed', `⚠️ Couldn't read the price sheet (${e.message}). ` +
+        (prev?.items ? `The bot keeps the prices from ${istStamp(prev.synced_at)}.` : 'The bot has no sheet prices yet.'));
+      try { await db.upsertSetting('price_list', JSON.stringify({ ...prev, error: e.message, alerted_at: isoAt(now) })); }
+      catch (e2) { console.error('[meta-service] price_list alert stamp not saved:', e2.message); }
+    }
+    throw e;
+  }
+}
 
 // ── Fetch a DM sender's Instagram profile ─────────────────────
 // Uses the User Profile API. Consent is auto-granted once the user DMs us.
@@ -2715,4 +2786,6 @@ module.exports = {
   readSheet,
   appendAnswerRow,
   clearAnswerRow,
+  parsePriceSheet,
+  syncPriceSheet,
 };

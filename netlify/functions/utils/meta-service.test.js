@@ -2880,7 +2880,116 @@ assert.equal(extractComments({}).length, 0);
     g({ sheets: [json({ error: { message: 'The caller does not have permission' } }, 403)] });
     await assert.rejects(appendAnswerRow('SHEET_ID', ['x']), new RegExp(`does not have permission.*shared with ${SA.replace(/\./g, '\\.')}`));
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY']) delete process.env[k];
+    // ── S11c P2: the sheet → settings.price_list; a bad read keeps the last list ──
+    const { parsePriceSheet, syncPriceSheet } = require('./meta-service');
+    const FIXES = { 'DOUBE CHIN': 'DOUBLE CHIN', MAINTAINANCE: 'MAINTENANCE' };
+    // Shaped like the real Prices tab. Service Numbers (col C) are unique, so a leak would show.
+    const PRICES = [
+      ['SERVICES', '', '', '', 'PACKAGES'],
+      ['Name', 'Customer Price', 'Service Number', '', 'Name', 'Customer Price'],
+      ['ACNE BUSTER 1s', 4500, 3001, '', 'LHR FULL BODY 6S + 2YR MAINTAINANCE', 35000],
+      ['CARBON BODY 1s', 6562.5, 4375, '', 'LHR FULL BODY 12S', 35000],
+      ['CONSULTATION', 750, 501, '', 'LHR FULL BODY (6S)+ 2 YR MAINTAINANCE + HYDRA (2S)', 35000],
+      ['CONSULTATION FREE', 0],
+      ['DOUBE CHIN 1s', 4500, 3002],
+      ['HYDRA FACIAL 1s', 3000, 2001],
+      ['NEW SERVICE', '', 9999],
+      ['PATCH TEST', 0, 7777],
+      ['Thread cog single ', '₹9,000', 6001],
+      [],
+    ];
+    const ANSWERS = [['Date', 'Item', 'Customer Price'], ['2026-10-14 11:30', 'AKAR SKIN BOOSTER', 6000], [], ['2026-10-14 12:00', 'GOLD FACIAL', 'ask']];
+    const items = parsePriceSheet(PRICES, ANSWERS, FIXES);
+    const of = (kind) => items.filter(i => i.kind === kind).map(i => [i.name, i.price]);
+    assert.deepEqual(of('service'), [['ACNE BUSTER 1s', 4500], ['CARBON BODY 1s', 6563], ['DOUBLE CHIN 1s', 4500],
+      ['HYDRA FACIAL 1s', 3000], ['NEW SERVICE', null], ['PATCH TEST', 0], ['Thread cog single', 9000]],
+      'fixes applied, consultation skipped, 6562.5 → 6563, blank → null, 0 stays 0, names trimmed, ₹9,000 text → 9000');
+    assert.deepEqual(of('package'), [['LHR FULL BODY 6S + 2YR MAINTENANCE', 35000], ['LHR FULL BODY 12S', 35000],
+      ['LHR FULL BODY (6S)+ 2 YR MAINTENANCE + HYDRA (2S)', 35000]]);
+    assert.deepEqual(of('owner'), [['AKAR SKIN BOOSTER', 6000], ['GOLD FACIAL', null]]);
+    for (const n of [3001, 4375, 501, 3002, 2001, 9999, 7777, 6001])
+      assert.ok(!JSON.stringify(items).includes(String(n)), `Service Number ${n} never leaves the sheet`);
+    assert.ok(!JSON.stringify(items).includes('Service Number'));
+    // header found by text: a moved block still parses; a renamed or missing header throws
+    assert.deepEqual(parsePriceSheet([['Name', 'Customer Price', 'Name', 'Customer Price'], ['A', 1, 'B', 2]], []),
+                     [{ kind: 'service', name: 'A', price: 1 }, { kind: 'package', name: 'B', price: 2 }]);
+    assert.throws(() => parsePriceSheet([PRICES[1].map(c => c === 'Customer Price' ? 'Price' : c)], []), /header missing/);
+    assert.throws(() => parsePriceSheet([['Name', 'Service Number', '', 'Name', 'Customer Price']], []), /header missing/,
+                  'a Services block without its price column never borrows the Packages one');
+    assert.throws(() => parsePriceSheet([], []), /header missing/);
+
+    process.env.TELEGRAM_BOT_TOKEN = 'tg';
+    const p2 = ({ cfg = { price_sheet_id: 'SHEET_ID', price_name_fixes: FIXES }, prev = null,
+                  sheet = () => json({ valueRanges: [{ values: PRICES }, { values: ANSWERS }] }) } = {}) => {
+      const st = { upserts: [], tg: [], sheets: [] };
+      global.fetch = async (url, opts = {}) => {
+        url = String(url);
+        if (url.includes('/rest/v1/settings?key=eq.')) {
+          const v = { chatbot_config: cfg, price_list: prev, telegram_owner: { chat_id: 42 } }[url.split('key=eq.')[1].split('&')[0]];
+          return json(v ? [{ value: JSON.stringify(v) }] : []);
+        }
+        if (url === 'http://supabase.test/rest/v1/settings' && opts.method === 'POST') { st.upserts.push(JSON.parse(opts.body)); return json(null, 201); }
+        if (url.startsWith('http://supabase.test/rest/v1/secrets')) return json([{ value: { client_email: SA, private_key: privateKey } }]);
+        if (url === 'https://oauth2.googleapis.com/token') return json({ access_token: 'GTOKEN' });
+        if (url.startsWith('https://sheets.googleapis.com/')) { st.sheets.push(url); return sheet(); }
+        if (url.includes('api.telegram.org')) { st.tg.push(JSON.parse(opts.body)); return json({ ok: true, result: { message_id: 1 } }); }
+        throw new Error('unexpected fetch ' + url);
+      };
+      st.saved = () => st.upserts.filter(u => u.key === 'price_list').map(u => JSON.parse(u.value));
+      return st;
+    };
+    const HOUR = 3600e3;
+    const PREV = { synced_at: '2026-10-13T06:00:00.000Z', items: [{ kind: 'service', name: 'OLD', price: 1 }],
+                   counts: { services: 144, packages: 3, owner: 0 } };
+
+    // first sync: both tabs read in one call, saved to its own row, counts returned, nobody alerted
+    st = p2();
+    assert.deepEqual(await syncPriceSheet(NOW), { services: 7, packages: 3, owner: 2 });
+    assert.match(st.sheets[0], /ranges=Prices!A%3AF&ranges='Bot%20answers'!A%3AC/);
+    assert.deepEqual(st.saved(), [{ synced_at: '2026-10-14T06:00:00.000Z', items, counts: { services: 7, packages: 3, owner: 2 } }]);
+    assert.equal(st.upserts.some(u => u.key === 'chatbot_config'), false, 'chatbot_config is never written');
+    assert.equal(st.tg.length, 0);
+    // no sheet set up → nothing read, nothing saved
+    st = p2({ cfg: { mode: 'shadow' } });
+    assert.equal(await syncPriceSheet(NOW), null);
+    assert.equal(st.sheets.length + st.upserts.length, 0);
+
+    // a failed read: the last list is kept, the owner is told once, and the error is thrown
+    st = p2({ prev: PREV, sheet: () => json({ error: { message: 'Requested entity was not found.' } }, 404) });
+    await assert.rejects(syncPriceSheet(NOW), /Google Sheets 404/);
+    assert.equal(st.tg.length, 1);
+    assert.match(st.tg[0].text, /Couldn't read the price sheet \(Google Sheets 404.*\)\. The bot keeps the prices from 13 Oct/);
+    assert.deepEqual(st.saved(), [{ ...PREV, error: 'Google Sheets 404: Requested entity was not found.', alerted_at: '2026-10-14T06:00:00.000Z' }]);
+    // still failing an hour later: no second alert, nothing rewritten
+    const alerted = st.saved()[0];
+    st = p2({ prev: alerted, sheet: () => json({}, 404) });
+    await assert.rejects(syncPriceSheet(NOW + HOUR), /404/);
+    assert.equal(st.tg.length + st.upserts.length, 0);
+    // a day later: one more alert
+    st = p2({ prev: alerted, sheet: () => json({}, 404) });
+    await assert.rejects(syncPriceSheet(NOW + 25 * HOUR), /404/);
+    assert.equal(st.tg.length, 1);
+    // the first sync failing: there's no list to keep
+    st = p2({ sheet: () => json({}, 404) });
+    await assert.rejects(syncPriceSheet(NOW), /404/);
+    assert.match(st.tg[0].text, /The bot has no sheet prices yet/);
+
+    // a missing header, an empty tab, or under half the services of last time: same guard
+    const bad = (rows) => () => json({ valueRanges: [{ values: rows }, { values: ANSWERS }] });
+    for (const [rows, why] of [[[PRICES[0], PRICES[1].map(c => c === 'Customer Price' ? 'Price' : c), ...PRICES.slice(2)], /header missing/],
+                               [PRICES.slice(0, 2), /no services found/],
+                               [PRICES, /only 7 services \(the last sync had 144\)/]]) {
+      st = p2({ prev: PREV, sheet: bad(rows) });
+      await assert.rejects(syncPriceSheet(NOW), why);
+      assert.deepEqual(st.saved()[0].items, PREV.items, 'the last list is kept');
+      assert.equal(st.tg.length, 1);
+    }
+    // a good sync after a failure: a clean row (no error, no alert stamp), so the next failure alerts at once
+    st = p2({ prev: { ...PREV, counts: { services: 10, packages: 3, owner: 0 }, error: 'x', alerted_at: new Date(NOW).toISOString() } });
+    assert.deepEqual(await syncPriceSheet(NOW + HOUR), { services: 7, packages: 3, owner: 2 });
+    assert.deepEqual(Object.keys(st.saved()[0]), ['synced_at', 'items', 'counts']);
+
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
   }
 
   global.fetch = realFetch;
