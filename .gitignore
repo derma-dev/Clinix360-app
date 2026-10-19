@@ -47,3 +47,9 @@ CHATBOT_SERVICE_TRACKER.md
 Questions.md
 CLIENT_IG_GO_LIVE.md
 PRICE_SHEET_TRACKER.md
+
+*.md
+!/README.md
+*.sql
+artifacts/
+.claude/
