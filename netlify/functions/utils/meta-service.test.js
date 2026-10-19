@@ -595,9 +595,11 @@ assert.equal(extractComments({}).length, 0);
         '- PACKAGE LHR FULL BODY 12S: ₹35,000', '- SERVICE AKAR SKIN BOOSTER: ₹6,000'].join('\n'), 'no corpus price in the prompt');
       assert.match(sysParts()[0], /Quote a price with the unit its name states, in words \(1s or P\/S = per session/);
       assert.match(sysParts()[0], /never the list's codes/);
-      assert.match(sysParts()[0], /When a PACKAGE exists for that same service and area, mention it too/);
+      assert.match(sysParts()[0], /Give the session price when the list has one; when a PACKAGE exists for that same service and area, mention it too/);
       assert.match(sysParts()[0], /NEVER multiply a session price into a course total/);
       assert.match(sysParts()[0], /area or variant isn't listed.*a price you don't have/);
+      assert.match(sysParts()[0], /A brand the list doesn't name.*NEVER quote the closest listed product/);
+      assert.match(sysParts()[0], /Plain words for a listed service still match it/);
       assert.ok(!/starts from/.test(sysParts()[0]), 'the "starts from" rule is gone');
       // a failed first sync saves only { error, alerted_at }: that's no list
       await callAssistant({ kb: KB, priceList: { error: 'x', alerted_at: 't' }, inboundText: 'x' });
@@ -645,11 +647,14 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(r.service, 'LHR FULL BODY P/S');
     assert.equal(r.offer_price, 9999);
 
-    // service not in the key list / no price / "" service → null (no offer)
+    // service not in the key list / "" service → null (no offer)
     global.fetch = okFetch({ service: 'Not A Service', offer_price: 5000 });
     assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
+    // a service with no price (or a junk one) is kept: "price?" on it means that service
     global.fetch = okFetch({ service: 'HYDRA FACIAL P/S', offer_price: 0 });
-    assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
+    assert.deepEqual(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), { service: 'HYDRA FACIAL P/S', offer_price: 0 });
+    global.fetch = okFetch({ service: 'HYDRA FACIAL P/S', offer_price: -5 });
+    assert.equal((await parseOfferCaption({ caption: 'x', serviceKeys: KEYS })).offer_price, 0);
     global.fetch = okFetch({ service: '', offer_price: 5000 });
     assert.equal(await parseOfferCaption({ caption: 'x', serviceKeys: KEYS }), null);
 
@@ -1233,38 +1238,71 @@ assert.equal(extractComments({}).length, 0);
     {
       const KB   = { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 }] };
       const now  = new Date().toISOString();
-      const CASH = { service: 'LHR FULL BODY P/S', offer_price: 9999, last_seen: now, source_caption: 'Full body laser special!' };
+      const OLD  = new Date(Date.now() - 90 * 86400000).toISOString();
+      const CASH = { service: 'LHR FULL BODY P/S', offer_price: 9999, last_seen: now, source_caption: 'Full body laser special 9999!' };
       const shareEv = (mediaId = 'M1', title = 'Full body laser special 9999!') =>
         ({ ...EV, messageText: '🔗 shared post: ' + title, attachment: { type: 'ig_post', mediaId, title } });
+      const BARE = 'A price question that names no other service ("price?", "how much?", "details?") is about LHR FULL BODY P/S';
 
-      // a) cache HIT + fresh → LIVE OFFER in the prompt, no parse call, no write
+      // a) cache HIT → LIVE OFFER in the prompt, no parse call, no write. The post
+      //    was first seen 90 days ago, but it's still up (shared now) → fresh (client, 2026-10-19)
       {
         const calls = botMock({ config: CFG('live', { offer_stale_days: 30, kb: KB }),
-                                offerCache: { offers: { M1: CASH } }, decision: REPLY_DECISION });
+                                offerCache: { offers: { M1: { ...CASH, last_seen: OLD } } }, decision: REPLY_DECISION });
         const r = await botReply(LEAD, shareEv(), 'instagram');
         assert.deepEqual(r, { sent: true });
         assert.equal(calls.gemini.length, 1, 'cache hit must not re-parse the post');
         const sys = JSON.parse(calls.gemini[0].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
         assert.ok(sys.includes('looking at our post offering LHR FULL BODY P/S at ₹9999'),
-          'fresh offer is marked quotable');
+          'an old post seen again is quotable');
+        assert.ok(sys.includes(BARE), 'a bare "price?" is about the post');
         assert.ok(!sys.includes('sighting is older'));
-        assert.ok(sys.includes('"""Full body laser special!"""'),
+        assert.ok(sys.includes('"""Full body laser special 9999!"""'),
           'a live offer carries its caption (session count / branch live there)');
+        assert.ok(sys.includes('the offer is ONLY at that branch'), 'a branch-tied offer never moves to another branch');
         assert.equal(calls.settingUpserts.length, 0);
-        assert.equal(calls.patches[0].body.bot_state.last_offer.offer_price, 9999,
-          'the thread remembers its latest offer');
+        const lo =calls.patches[0].body.bot_state.last_offer;
+        assert.equal(lo.offer_price, 9999, 'the thread remembers its latest offer');
+        assert.ok(Date.now() - Date.parse(lo.last_seen) < 60000, 'follow-ups age from this sighting');
       }
 
-      // b) same share, offer_stale_days=0 → STALE block (KB ladder instead)
+      // b) a follow-up after the offer window (last_offer older than offer_stale_days) → STALE block
       {
-        const calls = botMock({ config: CFG('live', { offer_stale_days: 0, kb: KB }),
-                                offerCache: { offers: { M1: CASH } }, decision: REPLY_DECISION });
-        await botReply(LEAD, shareEv(), 'instagram');
+        const calls = botMock({ config: CFG('live', { offer_stale_days: 30, kb: KB }), decision: REPLY_DECISION });
+        await botReply({ ...LEAD, bot_state: { last_offer: { ...CASH, last_seen: OLD } } }, EV, 'instagram');
         const sys = JSON.parse(calls.gemini[0].opts.body).systemInstruction.parts.map(p => p.text).join('\n');
-        assert.ok(sys.includes('sighting is older than the offer window'),
-          'stale_days=0 makes any sighting stale');
+        assert.ok(sys.includes('sighting is older than the offer window'));
+        assert.ok(sys.includes(BARE), 'a stale post still names the service a bare "price?" is about');
         assert.ok(!sys.includes('looking at our post offering'));
         assert.ok(!sys.includes('Full body laser special'), 'a stale offer never carries its caption');
+      }
+
+      // b2) a cached parse is redone when the caption changed or its service left the list
+      for (const hit of [{ ...CASH, source_caption: 'Full body laser special 7777!' },
+                         { ...CASH, service: 'HAIR PRP P/S' }]) {
+        const calls = botMock({ config: CFG('live', { kb: KB }), offerCache: { offers: { M1: hit } },
+                                decision: REPLY_DECISION, offerParse: { service: 'LHR FULL BODY P/S', offer_price: 9999 } });
+        await botReply(LEAD, shareEv(), 'instagram');
+        assert.equal(calls.gemini.length, 2, 're-parse + assistant');
+        assert.equal(JSON.parse(calls.settingUpserts[0].value).offers.M1.offer_price, 9999, 'the cache entry is replaced');
+      }
+
+      // b3) a post with a service but no price → POST block: "price?" means that service, from the list
+      {
+        const calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION,
+                                offerParse: { service: 'LHR FULL BODY P/S', offer_price: 0 } });
+        await botReply(LEAD, shareEv('NP1', 'Laser hair removal, smooth skin all year!'), 'instagram');
+        const parts = JSON.parse(calls.gemini[1].opts.body).systemInstruction.parts.map(p => p.text);
+        const post = parts.find(t => t.startsWith('POST: '));
+        assert.ok(post.includes('our post about LHR FULL BODY P/S; the post states no price'));
+        assert.ok(post.includes(BARE));
+        assert.ok(!post.includes('₹0'));
+        assert.ok(!parts.some(t => t.startsWith('LIVE OFFER') || t.startsWith('STALE OFFER')));
+        assert.equal(calls.patches[0].body.bot_state.last_offer.service, 'LHR FULL BODY P/S');
+        // the follow-up keeps it; priceQuoted falls back to the list price for that service
+        const f = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION });
+        await botReply({ ...LEAD, bot_state: { last_offer: calls.patches[0].body.bot_state.last_offer } }, EV, 'instagram');
+        assert.ok(JSON.parse(f.gemini[0].opts.body).systemInstruction.parts.some(p => p.text.startsWith('POST: ')));
       }
 
       // c) cache MISS → one caption parse, offer cached cross-lead, last_offer set
@@ -2366,12 +2404,16 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(st.hooks[0].post_url, POST_URL);
     assert.equal(st.hooks[0].price_quoted, '₹9999 (post offer)');
 
-    // A post already in the cache isn't parsed again; a post that can't be fetched
-    // costs the offer and post_url, never the DM
-    st = s7({ offerCache: { offers: { MEDIA_1: { service: 'LHR FULL BODY P/S', offer_price: 8888, last_seen: new Date().toISOString() } } } });
+    // A post already in the cache isn't parsed again, and a comment on an old post
+    // makes its offer fresh (the post is still up, client 2026-10-19); a post that
+    // can't be fetched costs the offer and post_url, never the DM
+    st = s7({ offerCache: { offers: { MEDIA_1: { service: 'LHR FULL BODY P/S', offer_price: 8888,
+      last_seen: new Date(Date.now() - 90 * 86400000).toISOString(),
+      source_caption: 'Full body laser this month: ₹9,999 per session!' } } } });
     await handleWebhook(comment('cost?'));
     assert.equal(st.parses, 0);
     assert.equal(st.leads[0].bot_state.last_offer.offer_price, 8888);
+    assert.ok(Date.now() - Date.parse(st.leads[0].bot_state.last_offer.last_seen) < 60000, 'fresh from this comment');
     st = s7({ media: false });
     st.leads.push({ id: 'LC', branch_id: 'JPR', bot_active: true, bot_state: { turn_count: 3 } });   // a returning customer
     await handleWebhook(comment('cost?'));

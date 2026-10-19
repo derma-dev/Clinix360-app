@@ -49,7 +49,6 @@ CLIENT_IG_GO_LIVE.md
 PRICE_SHEET_TRACKER.md
 
 *.md
-!/README.md
 *.sql
 artifacts/
 .claude/

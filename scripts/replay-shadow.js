@@ -179,7 +179,9 @@ async function replayThread(thread, cfg, append) {
         if (m.text.startsWith('[shared post:')) {
           const caption = m.text.slice('[shared post: '.length, m.text.replace(/\s+$/, '').length - 1);
           const k = normCap(caption);
-          offer = offerCache.get(k) || await withBackoff(() => parseOfferCaption(
+          // A re-share is a new sighting: fresh again, as in live resolveOffer.
+          const hit = offerCache.get(k);
+          offer = hit ? { ...hit, last_seen: m.at, fresh: true } : await withBackoff(() => parseOfferCaption(
             { model: cfg.model, caption, serviceKeys: priceNames(cfg.kb, cfg.price_list) }
           ).then(p => p && { ...p, last_seen: m.at, source_caption: caption.slice(0, 500),
                               // A just-parsed offer is fresh by definition (live resolveOffer
