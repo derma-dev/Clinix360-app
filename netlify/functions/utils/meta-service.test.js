@@ -1287,6 +1287,24 @@ assert.equal(extractComments({}).length, 0);
         assert.equal(JSON.parse(calls.settingUpserts[0].value).offers.M1.offer_price, 9999, 'the cache entry is replaced');
       }
 
+      // b2b) a comment starts a new conversation: an older chat (another service)
+      //      never reaches the model (live 2026-10-20: "the price" after a Hydra
+      //      comment was taken as the old Akar question)
+      {
+        const old = [{ id: 'h1', direction: 'incoming', message: 'What is the price for akar skin booster?' },
+                     { id: 'h2', direction: 'outgoing', message: 'Let me check with our team.', is_bot: true }];
+        const now = [{ id: 'h3', direction: 'incoming', message: '[comment] price' },
+                     { id: 'h4', direction: 'outgoing', message: 'Which branch is closest to you?' }];
+        let calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION, history: [...old, ...now] });
+        await botReply(LEAD, { ...EV, messageText: 'Janakpuri' }, 'instagram');
+        const sent = JSON.stringify(JSON.parse(calls.gemini[0].opts.body).contents);
+        assert.ok(sent.includes('[comment] price') && !sent.includes('akar'), 'history starts at the comment');
+        // no comment in the thread → the whole recent history, as before
+        calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION, history: old });
+        await botReply(LEAD, EV, 'instagram');
+        assert.ok(JSON.stringify(JSON.parse(calls.gemini[0].opts.body).contents).includes('akar'));
+      }
+
       // b3) a post with a service but no price → POST block: "price?" means that service, from the list
       {
         const calls = botMock({ config: CFG('live', { kb: KB }), decision: REPLY_DECISION,
@@ -2384,6 +2402,7 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(lead.bot_state.source, 'instagram_comment');
     assert.equal(lead.bot_state.post_url, POST_URL);
     assert.deepEqual([lead.bot_state.last_offer.service, lead.bot_state.last_offer.offer_price], ['LHR FULL BODY P/S', 9999]);
+    assert.equal(lead.bot_state.qualification.service, 'LHR FULL BODY P/S', 'the post’s service is the lead’s service');
     assert.equal(st.parses, 1);
     assert.equal(st.cache.length, 1);
     assert.equal(st.cache[0].key, 'offer_cache', 'the post joins the offer cache');
@@ -2415,9 +2434,12 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(st.leads[0].bot_state.last_offer.offer_price, 8888);
     assert.ok(Date.now() - Date.parse(st.leads[0].bot_state.last_offer.last_seen) < 60000, 'fresh from this comment');
     st = s7({ media: false });
-    st.leads.push({ id: 'LC', branch_id: 'JPR', bot_active: true, bot_state: { turn_count: 3 } });   // a returning customer
+    st.leads.push({ id: 'LC', branch_id: 'JPR', bot_active: true,
+                    bot_state: { turn_count: 3, qualification: { service: 'akar skin booster', phone: '9876543210' } } });   // a returning customer
     await handleWebhook(comment('cost?'));
     assert.equal(st.leads[0].bot_state.turn_count, 3, 'the rest of bot_state is kept');
+    assert.deepEqual(st.leads[0].bot_state.qualification, { phone: '9876543210' },
+      'the old chat’s service is dropped (no post offer to replace it); the phone stays');
     assert.equal(st.dms.length, 1);
     assert.equal(st.leads[0].bot_state.source, 'instagram_comment');
     assert.equal(st.leads[0].bot_state.post_url, '');

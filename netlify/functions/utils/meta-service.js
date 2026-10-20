@@ -1371,8 +1371,12 @@ async function processComment(c) {
   // the post's offer, which the bot quotes after the branch tap (offerFromBotState).
   // Re-read: a quick tap's bot turn may have written bot_state meanwhile.
   // ponytail: a tap before a first-seen post finishes parsing (~seconds) misses the offer.
+  // The comment is the lead's topic now: an older chat's service would mislabel
+  // the lead push and its quoted price.
   const post = await postP;
-  const bs = { ...(await db.getLeadById(lead.id))?.bot_state, source: `${c.platform}_comment`, post_url: post.url || '' };
+  const prev = (await db.getLeadById(lead.id))?.bot_state || {};
+  const bs = { ...prev, source: `${c.platform}_comment`, post_url: post.url || '',
+               qualification: { ...prev.qualification, service: post.offer?.service } };
   if (post.offer) bs.last_offer = { service: post.offer.service, offer_price: post.offer.offer_price,
                                     last_seen: post.offer.last_seen, source_caption: post.offer.source_caption };
   await db.updateLead(lead.id, { bot_state: bs });
@@ -2762,8 +2766,11 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       decision = { reason: 'turn_cap', reply: '', kb_covers: false, handoff: true, category: 'lead' };
     } else {
       // Context: last ~10 turns, minus the inbound this call is answering.
+      // A comment starts a new conversation: an older chat about another service
+      // made "the price" after a Hydra comment mean that service (live 2026-10-20).
       const rows = await db.listRecentMessages(lead.id, 10);
-      const history = rows
+      const fromComment = rows.findLastIndex(m => isIncomingRow(m) && String(m.message).startsWith('[comment] '));
+      const history = rows.slice(Math.max(0, fromComment))
         .filter(m => !inboundRow?.id || m.id !== inboundRow.id)
         .map(m => ({ role: ['in', 'incoming'].includes(m.direction) ? 'user' : 'model',
                      text: m.message, is_bot: !!m.is_bot }));
