@@ -1559,9 +1559,15 @@ const ASSISTANT_DECISION_SCHEMA = {
         branch:         { type: 'STRING' },
         preferred_time: { type: 'STRING' },
       },
+      propertyOrdering: ['service', 'branch', 'location', 'phone', 'preferred_time'],
     },
   },
   required: ['category', 'is_medical', 'reply', 'kb_covers', 'asks_price', 'handoff', 'reason'],
+  // Gemini writes keys alphabetically unless told: qualification came before reply,
+  // and flash-lite looped inside its service field (live 2026-11-04: 2 of 10 replays
+  // failed twice → llm_error). Qualification last: 12 of 12 clean. reply stays after
+  // the decision fields: written first, English got Hinglish replies 6 of 12 times.
+  propertyOrdering: ['asks_price', 'category', 'handoff', 'is_medical', 'kb_covers', 'reason', 'reply', 'qualification'],
 };
 
 // S11c: sheet prices are list prices with their unit in the name (design §6.2, Q40).
@@ -1582,8 +1588,8 @@ HARD RULES — breaking any is a failure:
 - NEVER guarantee results.
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
 - Reply in the language and script of the customer's LATEST message, even if earlier messages were in another language: Hinglish in Roman letters ("kya aapki koi aur branch hai?") → reply in Roman Hinglish; Hindi in Devanagari → Hindi in Devanagari; English → English. Keep replies warm, 2–4 sentences.
-- When qualifying a lead, ask ONE question at a time, in order: service → branch/location → WhatsApp number → preferred time. Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one). Never re-ask something the conversation already answered — if they named a branch or area (even two), note it and move on to the next question. Ask any one question at most twice in the whole chat — the WhatsApp number included; if it is still unanswered, move on.
-- Soft booking: once a lead is engaged, work toward their preferred day/time for a visit. When they want to book, confirm what you have (service, branch, preferred time), ask for their WhatsApp number if you don't have it yet, thank them, and hand off with reason 'wants_booking' — the human team locks the appointment in the clinic system. NEVER confirm a slot or appointment yourself.
+- When qualifying a lead, ask ONE question at a time, in order: service → branch/location → preferred date and time for the visit → WhatsApp number (always the last question). Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one). Never re-ask something the conversation already answered — if they named a branch or area (even two), note it and move on to the next question. Ask any one question at most twice in the whole chat — the WhatsApp number included; if it is still unanswered, move on.
+- Soft booking: once a lead is engaged, work toward their preferred day/time for a visit. When they want to book, confirm what you have (service, branch, preferred time). Without their WhatsApp number yet, ask for it and do NOT hand off on that turn; with it, thank them and hand off with reason 'wants_booking' — the human team locks the appointment in the clinic system. NEVER confirm a slot or appointment yourself.
 - A deflected or partial answer always ends with a soft cue to the human team — never a dead end.
 - Keep the conversation going yourself: do NOT hand off merely because the basics are answered. "Fully qualified" means you have asked for their WhatsApp number and they gave it or clearly refused it — never hand off with the number still unasked. If they wind down ("okay", "I'll think", "thanks") and you have not yet asked for their WhatsApp number, ask for it now so the team can share details there — never let the chat end with the number unasked. Staff take over only at a real closing point.
 
@@ -2163,10 +2169,13 @@ async function pushLead(db, lead, cfg, quiet = false) {
     if (wa) {
       where = `the ${branch} WhatsApp`;
       hint  = `401 = the token; 132001 = the template isn't approved; no number = branch_whatsapp has no entry for ${branch}.`;
-      // The chat itself isn't sent (W9): the branch follows up from the summary.
+      // The chat itself isn't sent (W9). Its summary is the customer's own words, oldest
+      // first: chat details, not the bot's handoff reason (asked 2026-11-04). The other
+      // fields carry service, phone, time and price; the alert email keeps `summary`.
+      const words = (await db.listRecentMessages(lead.id, 50)).filter(isIncomingRow).map(m => m.message).join(' / ');
       r = !wa[branch] ? { ok: false, error: `no number for ${branch} in branch_whatsapp` }
         : await sendWhatsAppTemplate(wa[branch], 'lead_alert', [type.replace('_', ' '), branch, lead.customer_name,
-            q.phone, q.service, q.preferred_time, priceQuoted(bs, cfg), summary, conversationUrl])
+            q.phone, q.service, q.preferred_time, priceQuoted(bs, cfg), words, conversationUrl])
             .then(() => ({ ok: true }), e => ({ ok: false, error: e.message }));
     } else {
       // ponytail: 500 newest messages; a longer thread loses its oldest lines.
@@ -2834,6 +2843,18 @@ function settleDecision(decision, leadCategory, cfg) {
   return decision;
 }
 
+// The number is the last question (service → branch → date/time → number). When it
+// arrives for a known service and branch, a fixed closing goes out at once and the
+// lead is handed off: no wait on the model (asked 2026-11-04). A question in the
+// same message ('?') still goes to the model, so it gets answered.
+const QUALIFIED_COPY = 'Thank you! Our team will contact you on WhatsApp soon to confirm your appointment. 🙏';
+function closingTurn(bs, text, cfg) {
+  const q = bs?.qualification || {};
+  if (q.phone || !q.service || !q.branch || String(text).includes('?') || !normalizePhone(text)) return null;
+  return { category: 'lead', is_medical: false, kb_covers: true, asks_price: false, handoff: true, reason: 'qualified',
+           reply: cannedCopy(cfg, 'qualified') || QUALIFIED_COPY, qualification: { phone: text } };
+}
+
 async function botReply(lead, ev, platform, inboundRow = null) {
   const t0 = Date.now();
   try {
@@ -2895,7 +2916,8 @@ async function botReply(lead, ev, platform, inboundRow = null) {
         if (ev.attachment?.type === 'image') image = await fetchImageBase64(ev.attachment.url);
       } catch (e) { console.warn('[meta-service] image fetch failed (continuing without vision):', e.message); }
       try {
-        decision = await callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history,
+        decision = closingTurn(lead.bot_state, ev.messageText, cfg)
+                || await callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history,
                                          inboundText: ev.messageText, offer, image });
       } catch (err) {
         // D13 — an LLM failure never silences the thread: canned handoff in live,

@@ -1294,6 +1294,7 @@ const DEFAULT_CHATBOT_CONFIG = {
     disclosure:    'Hi! I am the clinic’s assistant 🤖 — I can help with prices, services and bookings, and our team joins in whenever needed.',
     refusal_ok:    'No problem at all — our team will continue here. 🙏',
     owner_no_reply:'Thanks for waiting! Our team will get in touch with you here about this soon. 🙏',
+    qualified:     'Thank you! Our team will contact you on WhatsApp soon to confirm your appointment. 🙏',
   },
   offer_stale_days: 30,              // D10
   turn_cap: 10,                      // pending open #17

@@ -636,6 +636,10 @@ assert.equal(extractComments({}).length, 0);
       assert.deepEqual(await callAssistant({ inboundText: 'x' }), { category: 'lead', reply: 'Which branch?' });
       assert.equal(sent.length, 2);
       assert.equal(sent[0].generationConfig.maxOutputTokens, 1024);
+      // qualification is written last (alphabetical put it before reply, and it looped there)
+      assert.deepEqual(sent[0].generationConfig.responseSchema.propertyOrdering.slice(-2), ['reply', 'qualification']);
+      assert.match(sent[0].systemInstruction.parts[0].text,
+        /service → branch\/location → preferred date and time for the visit → WhatsApp number \(always the last question\)/);
 
       // blocked / empty candidates → throws
       global.fetch = async () => ({ ok: true, json: async () => ({ candidates: [] }) });
@@ -1259,6 +1263,31 @@ assert.equal(extractComments({}).length, 0);
                             decision: { ...REPLY_DECISION, qualification: { service: said } } });
         await botReply(LEAD, { ...EV, messageText: 'ok' }, 'instagram');
         assert.equal(c.patches[0].body.bot_state.qualification.service, stored, said);
+      }
+    }
+
+    // 8c) The number for a known service + branch → the fixed closing goes out at once,
+    //     no model call, and the lead is handed off (2026-11-04). A question in the
+    //     same message, or a branch not known yet, still goes to the model.
+    {
+      const KNOWN = { ...LEAD, bot_state: { turn_count: 3, qualification: { service: 'HYDRA FACIAL 1s', branch: 'Janakpuri' } } };
+      let c = botMock({ config: CFG('live'), history: [{ id: 'b1', direction: 'outgoing', is_bot: true, message: 'Your WhatsApp number?' }] });
+      let r = await botReply(KNOWN, { ...EV, messageText: '98765 43210' }, 'instagram');
+      assert.equal(r.handoff, 'qualified');
+      assert.equal(c.gemini.length, 0, 'no model call');
+      assert.equal(c.sends[0].message.text, 'Thank you! Our team will contact you on WhatsApp soon to confirm your appointment. 🙏');
+      assert.equal(c.patches[0].body.bot_state.qualification.phone, '9876543210');
+      c = botMock({ config: CFG('live', { canned: { ...CFG('live').canned, qualified: 'Shukriya! 🙏' } }),
+                   history: [{ id: 'b1', direction: 'outgoing', is_bot: true, message: 'Your WhatsApp number?' }] });
+      await botReply(KNOWN, { ...EV, messageText: '9876543210' }, 'instagram');
+      assert.equal(c.sends[0].message.text, 'Shukriya! 🙏', "the console's copy wins");
+      for (const [lead, text] of [[KNOWN, '9876543210, is parking available?'],
+                                  [{ ...KNOWN, bot_state: { qualification: { service: 'HYDRA FACIAL 1s' } } }, '9876543210'],
+                                  [{ ...KNOWN, bot_state: { qualification: { service: 'X', branch: 'Janakpuri', phone: '9123456780' } } }, '9876543210']]) {
+        c = botMock({ config: CFG('live'), decision: REPLY_DECISION,
+                      history: [{ id: 'b1', direction: 'outgoing', is_bot: true, message: 'Your WhatsApp number?' }] });
+        await botReply(lead, { ...EV, messageText: text }, 'instagram');
+        assert.equal(c.gemini.length, 1, text);
       }
     }
 
@@ -2291,8 +2320,9 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.wa.length, 1);
       assert.equal(calls.wa[0].to, '91111', "the customer's branch's number");
       assert.equal(calls.wa[0].template.name, 'lead_alert');
+      // The summary is the customer's own words, not the bot's handoff reason (2026-11-04)
       assert.deepEqual(params(calls), ['lead', 'Janakpuri', 'Riya Sharma', '9876543210', 'LHR FULL BODY P/S',
-        'Saturday evening', 'from ₹35000', 'Bot handed off (wants_booking) — service LHR FULL BODY P/S', 'https://ig.me/m/riya.s']);
+        'Saturday evening', 'from ₹35000', 'laser price? / 9876543210', 'https://ig.me/m/riya.s']);
       assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'send OK → stamped');
 
       calls = pushMock({ history: HISTORY });
