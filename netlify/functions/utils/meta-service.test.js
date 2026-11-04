@@ -14,6 +14,9 @@ const {
   callAssistant,
   botReply,
   sendByPlatform,
+  sendWhatsAppMessage,
+  sendWhatsAppTemplate,
+  templateParam,
   normalizePhone,
   createSupabaseClient,
   maybeCaptureKbCandidate,
@@ -714,6 +717,43 @@ assert.equal(extractComments({}).length, 0);
     assert.deepEqual(hit, ['fb', 'wa', 'ig'], 'each platform hits its own sender endpoint');
     delete process.env.META_PAGE_ACCESS_TOKEN; delete process.env.WHATSAPP_ACCESS_TOKEN;
     delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+  }
+
+  // ── WhatsApp template sender (S2b L1): one-line params, 132018-safe ──
+  {
+    assert.equal(templateParam('line one\nline two'), 'line one line two');
+    assert.equal(templateParam('a\tb'), 'a b');
+    assert.equal(templateParam('a     b'), 'a b', '5 spaces become one');
+    assert.equal(templateParam('  x  '), 'x');
+    for (const v of ['', '   ', null, undefined]) assert.equal(templateParam(v), '–');
+    assert.equal(templateParam(0), '0');
+    const long = templateParam('w'.repeat(400));
+    assert.equal(long.length, 300);
+    assert.ok(long.endsWith('…'));
+    assert.equal(templateParam('w'.repeat(300)), 'w'.repeat(300), 'exactly max is not cut');
+
+    process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'PNID';
+    let sent;
+    global.fetch = async (url, opts) => { sent = { url, body: JSON.parse(opts.body) };
+      return { ok: true, json: async () => ({ messages: [{ id: 'wamid.X' }] }) }; };
+    const params = ['lead', 'Janakpuri', 'TEST', '9876543210', 'HYDRA FACIAL 1s', '', '₹3,000', 'line one\nline two', null];
+    assert.equal(await sendWhatsAppTemplate('919999999999', 'lead_alert', params), 'wamid.X', "returns Meta's message id");
+    assert.ok(sent.url.endsWith('/PNID/messages'));
+    assert.deepEqual(sent.body, {
+      messaging_product: 'whatsapp', recipient_type: 'individual', to: '919999999999', type: 'template',
+      template: { name: 'lead_alert', language: { code: 'en' }, components: [{ type: 'body', parameters:
+        ['lead', 'Janakpuri', 'TEST', '9876543210', 'HYDRA FACIAL 1s', '–', '₹3,000', 'line one line two', '–']
+          .map(text => ({ type: 'text', text })) }] },
+    });
+
+    await sendWhatsAppMessage('919999999999', 'hi');
+    assert.deepEqual(sent.body, { messaging_product: 'whatsapp', recipient_type: 'individual',
+      to: '919999999999', type: 'text', text: { body: 'hi' } }, 'text sender request unchanged');
+
+    global.fetch = async () => ({ ok: false, status: 400,
+      json: async () => ({ error: { message: '(#132001) Template name does not exist in the translation' } }) });
+    await assert.rejects(sendWhatsAppTemplate('919999999999', 'lead_alert', params), /400 \(#132001\) Template name/);
+    delete process.env.WHATSAPP_ACCESS_TOKEN; delete process.env.WHATSAPP_PHONE_NUMBER_ID;
   }
 
   // ── routing happens BEFORE the inbound insert: the row carries the new branch,

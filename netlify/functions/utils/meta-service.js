@@ -1072,7 +1072,7 @@ async function sendFacebookMessage(recipientId, text) {
 // Note: 24-hour service window — free-form replies only work within 24h of the
 // customer's last message. Outside it, WhatsApp requires a paid template and
 // this call fails (surfaced as a 502 by meta-send).
-async function sendWhatsAppMessage(recipientId, text) {
+async function waSend(body) {
   const token         = process.env.WHATSAPP_ACCESS_TOKEN;
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   if (!token)         throw new Error('Missing WHATSAPP_ACCESS_TOKEN env var');
@@ -1086,13 +1086,7 @@ async function sendWhatsAppMessage(recipientId, text) {
         Authorization:  `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type:    'individual',
-        to:                recipientId,
-        type:              'text',
-        text:              { body: text },
-      }),
+      body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', ...body }),
     }
   );
 
@@ -1101,8 +1095,29 @@ async function sendWhatsAppMessage(recipientId, text) {
     const msg = data?.error?.message || JSON.stringify(data);
     throw new Error(`WhatsApp send failed: ${res.status} ${msg}`);
   }
-  console.log(`[meta-service] WhatsApp message sent to ${recipientId} (message_id=${data.messages?.[0]?.id || 'n/a'})`);
+  console.log(`[meta-service] WhatsApp ${body.type} sent to ${body.to} (message_id=${data.messages?.[0]?.id || 'n/a'})`);
   return data; // { messaging_product, contacts:[...], messages:[{ id }] }
+}
+
+function sendWhatsAppMessage(recipientId, text) {
+  return waSend({ to: recipientId, type: 'text', text: { body: text } });
+}
+
+// A template body param may not hold a newline, a tab, 5+ spaces in a row, or
+// be empty (Meta error 132018): flatten to one line, cap the length, '–' if blank.
+function templateParam(v, max = 300) {
+  const s = String(v ?? '').replace(/\s+/g, ' ').trim();
+  return !s ? '–' : s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+// Business-initiated, so it works outside the 24h window — the template must be
+// APPROVED in WhatsApp Manager, and params fill {{1}}, {{2}}, … in order.
+async function sendWhatsAppTemplate(to, name, params) {
+  const data = await waSend({ to, type: 'template', template: {
+    name, language: { code: 'en' },
+    components: [{ type: 'body', parameters: params.map(p => ({ type: 'text', text: templateParam(p) })) }],
+  } });
+  return data.messages?.[0]?.id;
 }
 
 // ── Instagram comment automation ──────────────────────────────
@@ -2882,6 +2897,8 @@ module.exports = {
   sendInstagramMessage,
   sendFacebookMessage,
   sendWhatsAppMessage,
+  sendWhatsAppTemplate,
+  templateParam,
   createSupabaseClient,
   // exported for tests
   extractEvents,
