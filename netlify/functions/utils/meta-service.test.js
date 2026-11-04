@@ -790,6 +790,12 @@ assert.equal(extractComments({}).length, 0);
     calls = await run(true);
     assert.equal(calls.inserts.length, 1, 'a routing failure never drops the message');
     assert.equal(calls.inserts[0].branch_id, 'FALLBACK');
+    // Instagram's contact card for a typed number is no customer turn (live 2026-11-04)
+    const seen = [];
+    global.fetch = async (url) => { seen.push(url); return { ok: true, json: async () => [] }; };
+    await handleWebhook({ object: 'instagram', entry: [{ messaging: [{ sender: { id: 'IGS_R' },
+      message: { mid: 'm_card', attachments: [{ type: 'template', payload: {} }] } }] }] });
+    assert.deepEqual(seen.filter(u => !u.includes('settings?key=eq.')), [], 'no lead lookup, no row, no bot turn');
     delete process.env.META_BRANCH_ID;
   }
 
@@ -997,6 +1003,7 @@ assert.equal(extractComments({}).length, 0);
           calls.shadowLogs.push(JSON.parse(opts.body));
           return { ok: true, json: async () => [{ id: 1 }] };
         }
+        if (url.includes('/branches?')) return { ok: true, json: async () => [{ id: 'JPR', name: 'Janakpuri' }, { id: 'KN', name: 'Kirti Nagar' }] };
         throw new Error('unexpected fetch: ' + url);
       };
       return calls;
@@ -1208,6 +1215,30 @@ assert.equal(extractComments({}).length, 0);
       const r2 = await botReply({ ...LEAD, bot_active: b.bot_active, bot_state: b.bot_state }, EV, 'instagram');
       assert.deepEqual(r2, { sent: true });
       assert.equal(next.sends.length, 1);
+    }
+
+    // 8b) The model dropped a branch and a number the customer had just typed
+    //     (live 2026-11-04): their messages since the bot's last reply fill the
+    //     gap, and the KB line's pasted price never rides in the service name.
+    {
+      const calls = botMock({
+        config: CFG('live'),
+        history: [{ id: 'b1', direction: 'outgoing', is_bot: true, message: 'Which branch is nearest?' },
+                  { id: 'm1', direction: 'incoming', message: 'Janakpuri' }],
+        decision: { ...REPLY_DECISION, qualification: { service: 'SERVICE HYDRA FACIAL 1s: ₹3,000' } },
+      });
+      await botReply(LEAD, { ...EV, messageText: 'yes here it is 98765 43210' }, 'instagram');
+      assert.deepEqual(calls.patches[0].body.bot_state.qualification,
+        { service: 'HYDRA FACIAL 1s', phone: '9876543210', branch: 'Janakpuri' });
+      // The model's own values win; words from before the bot's last reply don't count.
+      const kept = botMock({
+        config: CFG('live'),
+        history: [{ id: 'm0', direction: 'incoming', message: 'Kirti Nagar 9123456780' },
+                  { id: 'b1', direction: 'outgoing', is_bot: true, message: 'Noted!' }],
+        decision: { ...REPLY_DECISION, qualification: { phone: '9876543210' } },
+      });
+      await botReply(LEAD, { ...EV, messageText: 'ok' }, 'instagram');
+      assert.deepEqual(kept.patches[0].body.bot_state.qualification, { phone: '9876543210' });
     }
 
     // 9) kb_miss → canned hold copy + handoff; the missed question rides in the
@@ -2147,9 +2178,13 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(calls.patches[0].bot_state.turn_count, 2, 'stamp merges into bot_state, never replaces it');
 
     // S11c P3: with a synced sheet, price_quoted is the sheet price, never the corpus one
-    const SHEET_CFG = { ...CFG, price_list: { items: [{ kind: 'service', name: 'LHR FULL BODY 1s', price: 8700 }] } };
+    const SHEET_CFG = { ...CFG, price_list: { items: [{ kind: 'service', name: 'LHR FULL BODY 1s', price: 8700 },
+                                                      { kind: 'package', name: 'LHR FULL BODY 6s', price: 45000 }] } };
     const svcLead = (service) => ({ ...LEAD, bot_state: { ...LEAD.bot_state, qualification: { ...LEAD.bot_state.qualification, service } } });
-    for (const [service, quoted] of [['LHR FULL BODY 1s', '₹8,700'], ['LHR FULL BODY P/S', '']]) {
+    // The model's case or a dropped unit code still finds the price (live 2026-11-04);
+    // a vaguer name ("LHR") never borrows a longer service's price.
+    for (const [service, quoted] of [['LHR FULL BODY 1s', '₹8,700'], ['LHR FULL BODY P/S', ''],
+                                     ['Lhr full body', '₹8,700'], ['LHR', ''], ['LHR FULL BODY 6s', '₹45,000']]) {
       calls = pushMock({ history: HISTORY });
       await pushLead(db, svcLead(service), SHEET_CFG);
       assert.equal(calls.hooks[0].body.price_quoted, quoted, service);

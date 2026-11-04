@@ -944,6 +944,11 @@ async function handleWebhook(payload) {
       continue;
     }
 
+    // Instagram turns a number the customer types into a contact card, sent as its
+    // own text-less `template` message. As a turn it outranked the number itself
+    // (burst) and the model lost the number (live 2026-11-04). Their text has it.
+    if (ev.attachment?.type === 'template') continue;
+
     // A button tap carrying a routing payload is actionable even if it somehow
     // arrives with no title — the payload IS the answer.
     if (!ev.senderId || (!ev.messageText && !ev.payload)) {
@@ -1848,8 +1853,8 @@ function mergeBotState(prev, decision) {
       next[k] = String(q[k]).slice(0, 120);
     }
   }
-  // The model sometimes copies the KB line's label too: "SERVICE HYDRA FACIAL 1s".
-  if (q.service) next.service = next.service.replace(/^(SERVICE|PACKAGE)\s+/, '');
+  // The model sometimes copies the KB line's label and price too: "SERVICE HYDRA FACIAL 1s: ₹3,000".
+  if (q.service) next.service = next.service.replace(/^(SERVICE|PACKAGE)\s+/, '').replace(/:\s*₹.*$/, '');
   return { ...(prev || {}), qualification: next };
 }
 
@@ -2065,7 +2070,11 @@ function priceQuoted(botState, cfg) {
   if (offer?.fresh && offer.offer_price > 0) return `₹${offer.offer_price} (post offer)`;
   const svc = botState?.qualification?.service || offer?.service;
   if (cfg?.price_list?.items) {
-    const it = cfg.price_list.items.find(i => i.name === svc && i.price != null);
+    // The model may change the case or drop the unit code: "Face Booster" for "FACE BOOSTER 1s".
+    const s = String(svc || '').toLowerCase(), priced = cfg.price_list.items.filter(i => i.price != null);
+    const plusUnit = priced.filter(i => { const n = i.name.toLowerCase();
+      return i.kind !== 'package' && n.startsWith(s + ' ') && !n.slice(s.length + 1).includes(' '); });
+    const it = priced.find(i => i.name.toLowerCase() === s) || (plusUnit.length === 1 ? plusUnit[0] : null);
     return it ? fmtPrice(it.price) : '';
   }
   const e = (cfg?.kb?.entries || []).find(x => x.type === 'service' && x.key === svc && x.price);
@@ -2819,7 +2828,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
 
     // D7 layer 1 — the keyword net fires BEFORE Gemini ever runs (both modes).
     // D7 layer 2 — is_medical on the model's own decision overrides its reply.
-    let decision, llmError = null, firstBotTurn = true, offer = null, image = null;
+    let decision, llmError = null, firstBotTurn = true, offer = null, image = null, said = [ev.messageText];
     const tier = classifyInbound(ev.messageText);
     // Open #17 caps — checked after the safety net (a medical/urgent inbound on a
     // capped thread still hands off as medical, which outranks the cap) and before
@@ -2844,6 +2853,9 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       // A comment starts a new conversation: an older chat about another service
       // made "the price" after a Hydra comment mean that service (live 2026-10-20).
       const rows = await db.listRecentMessages(lead.id, 10);
+      // What the customer has said since our last reply, this message included.
+      said = [...rows.slice(rows.findLastIndex(m => !isIncomingRow(m)) + 1)
+                .filter(m => m.id !== inboundRow?.id).map(m => m.message), ev.messageText];
       const fromComment = rows.findLastIndex(m => isIncomingRow(m) && String(m.message).startsWith('[comment] '));
       const history = rows.slice(Math.max(0, fromComment))
         .filter(m => !inboundRow?.id || m.id !== inboundRow.id)
@@ -2893,6 +2905,12 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // the answering turn's counters and bot_state can't race it.
     if (await yieldsToBurst(db, lead.id, inboundRow, decision)) return { skipped: 'burst' };
     const botState = mergeBotState(lead.bot_state, decision);
+    // The model can drop a branch or number the customer just gave ("Janakpuri"
+    // kept in 1 run of 3, live 2026-11-04); their own words fill the gap.
+    const q = botState.qualification, phone = said.map(normalizePhone).find(Boolean);
+    if (!q.phone && phone) q.phone = phone;
+    const branch = !q.branch && matchBranch(said.join('\n'), await db.listBranches().catch(() => []));
+    if (branch) q.branch = branch.name;
     if (offer) {
       // The thread remembers its latest offer for follow-up "price?" turns;
       // a newly parsed post joins the cross-lead cache (parse once per post).
