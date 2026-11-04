@@ -1973,7 +1973,7 @@ assert.equal(extractComments({}).length, 0);
       'Top services: laser 3 · PRP 1',
       'Leads per branch: Dwarka 2 · Adajan 1 · no branch yet 1',
       '',
-      'Leads sent to Make: 3 · ⚠️ 1 failed, check the webhook',
+      'Leads sent: 3 · ⚠️ 1 failed, check the alert email',
       'Price questions to you: 2 · 1 answered · 1 no reply in time',
       'Medical / emergency: 2',
       'Bot didn’t know (kb_miss): 1',
@@ -1982,7 +1982,7 @@ assert.equal(extractComments({}).length, 0);
       '',
       'Change or stop this report in Settings → Chatbot → Report.',
     ].join('\n'));
-    assert.ok(reportText(empty, 7).includes('\nLeads sent to Make: 0\n'), 'no ⚠️ when nothing failed');
+    assert.ok(reportText(empty, 7).includes('\nLeads sent: 0\n'), 'no ⚠️ when nothing failed');
     assert.ok(reportText(empty, 7).startsWith('📊 DSkin DM Assistant — weekly report (last 7 days)'));
   }
 
@@ -2013,14 +2013,20 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(leadPushDue(L({ service: 'LHR' }, { lead_pushed: { lead: 't' } })), null);
 
     // `hook` = the webhook's answers in order (a number = status, 'net' = network error)
-    const pushMock = ({ hook = [200], history = [], botTurn = null } = {}) => {
-      const calls = { hooks: [], alerts: [], patches: [], profiles: 0, sends: [], inserts: [] };
+    // `waError` = Meta's error message for a WhatsApp send (else it's accepted)
+    const pushMock = ({ hook = [200], history = [], botTurn = null, waError = null } = {}) => {
+      const calls = { hooks: [], alerts: [], patches: [], profiles: 0, sends: [], inserts: [], wa: [] };
       global.fetch = async (url, opts = {}) => {
         if (url.startsWith('https://hook.make.test')) {
           calls.hooks.push({ headers: opts.headers, body: JSON.parse(opts.body) });
           const r = hook[calls.hooks.length - 1] ?? hook.at(-1);
           if (r === 'net') throw new Error('fetch failed');
           return { ok: r < 300, status: r };
+        }
+        if (url.includes('graph.facebook.com')) {
+          calls.wa.push(JSON.parse(opts.body));
+          return waError ? { ok: false, status: 401, json: async () => ({ error: { message: waError } }) }
+                         : { ok: true, json: async () => ({ messages: [{ id: 'wamid.1' }] }) };
         }
         if (url.includes('api.resend.com')) { calls.alerts.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({}) }; }
         if (url.includes('graph.instagram.com') && url.includes('fields=')) {
@@ -2031,7 +2037,8 @@ assert.equal(extractComments({}).length, 0);
           calls.sends.push(JSON.parse(opts.body));
           return { ok: true, json: async () => ({ message_id: 'm' }) };
         }
-        if (url.includes('/branches?')) return { ok: true, json: async () => [{ id: 'DWK', name: 'Dwarka Sec 12' }] };
+        if (url.includes('/branches?'))
+          return { ok: true, json: async () => [{ id: 'DWK', name: 'Dwarka Sec 12' }, { id: 'JPR', name: 'Janakpuri' }, { id: 'KN', name: 'Kirti Nagar' }] };
         if (url.includes('lead_messages?lead_id=eq.')) return { ok: true, json: async () => [...history].reverse() };
         if (url.includes('/lead_messages') && opts.method === 'POST') { calls.inserts.push(JSON.parse(opts.body)); return { ok: true, json: async () => [{ id: 'o1' }] }; }
         if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') { calls.patches.push(JSON.parse(opts.body)); return { ok: true, json: async () => [] }; }
@@ -2148,6 +2155,76 @@ assert.equal(extractComments({}).length, 0);
     await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, team_questions: ['is there parking?', 'open Sunday?'] } }, CFG);
     assert.equal(calls.hooks[0].body.summary,
       'Bot handed off (wants_booking) — service LHR FULL BODY P/S\nTeam to confirm: "is there parking?", "open Sunday?"');
+
+    // S2b L2: branch_whatsapp set → the branch's WhatsApp gets the lead_alert
+    // template instead of Make, and only once a branch is known (W18)
+    {
+      const { leadBranch } = require('./meta-service');
+      const BR = [{ id: 'DWK', name: 'Dwarka Sec 12' }, { id: 'JPR', name: 'Janakpuri' }, { id: 'KN', name: 'Kirti Nagar' }];
+      const at = (branch, branch_id) => ({ branch_id, bot_state: { qualification: { branch } } });
+      assert.equal(leadBranch(at('dwarka', 'JPR'), BR).name, 'Dwarka Sec 12', "the customer's pick wins over branch_id");
+      assert.equal(leadBranch(at('', 'JPR'), BR).name, 'Janakpuri', 'no pick → the assigned branch');
+      assert.equal(leadBranch(at(undefined, 'FALLBACK'), BR), null, 'the fallback branch is "never chose"');
+      assert.equal(leadBranch(at('Uttam Nagar', 'FALLBACK'), BR), null, 'a pick that is no branch');
+      assert.equal(leadBranch({ branch_id: 'KN' }, BR).name, 'Kirti Nagar', 'no bot_state yet');
+
+      process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'PNID';
+      const WA_CFG = { ...CFG, branch_whatsapp: { 'Janakpuri': '91111', 'Dwarka Sec 12': '91333' } };   // no Kirti Nagar
+      const withQ = (qual, extra = {}) => ({ ...LEAD, ...extra, bot_state: { ...LEAD.bot_state, qualification: qual } });
+      const params = (c) => c.wa[0].template.components[0].parameters.map(p => p.text);
+
+      calls = pushMock({ history: HISTORY });
+      assert.equal(await pushLead(db, LEAD, WA_CFG), 'lead');
+      assert.equal(calls.hooks.length, 0, 'not to Make');
+      assert.equal(calls.wa.length, 1);
+      assert.equal(calls.wa[0].to, '91111', "the customer's branch's number");
+      assert.equal(calls.wa[0].template.name, 'lead_alert');
+      assert.deepEqual(params(calls), ['lead', 'Janakpuri', 'Riya Sharma', '9876543210', 'LHR FULL BODY P/S',
+        'Saturday evening', 'from ₹35000', 'Bot handed off (wants_booking) — service LHR FULL BODY P/S', 'https://ig.me/m/riya.s']);
+      assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'send OK → stamped');
+
+      calls = pushMock({ history: HISTORY });
+      assert.equal(await pushLead(db, withQ({ service: 'LHR FULL BODY P/S', branch: 'dwarka' }), WA_CFG, true), 'potential_lead');
+      assert.equal(calls.wa[0].to, '91333');
+      assert.deepEqual(params(calls).slice(0, 4), ['potential lead', 'Dwarka Sec 12', 'Riya Sharma', '–'], "a potential lead's phone is –");
+
+      // No branch, no message: not sent, not stamped, no email — the hourly run tries again
+      for (const qual of [{ service: 'LHR FULL BODY P/S', phone: '9876543210' },
+                          { service: 'LHR FULL BODY P/S', phone: '9876543210', branch: 'Uttam Nagar' }]) {
+        calls = pushMock({ history: HISTORY });
+        assert.equal(await pushLead(db, withQ(qual), WA_CFG), null);
+        assert.equal(calls.wa.length + calls.hooks.length + calls.patches.length + calls.alerts.length, 0, qual.branch || 'no pick');
+      }
+
+      // A branch with no number → not sent, not stamped, one email naming it
+      calls = pushMock({ history: HISTORY });
+      assert.equal(await pushLead(db, withQ({ service: 'LHR FULL BODY P/S' }, { branch_id: 'KN' }), WA_CFG, true), null);
+      assert.equal(calls.wa.length, 0);
+      assert.equal(calls.alerts.length, 1);
+      assert.match(calls.alerts[0].html, /Kirti Nagar WhatsApp \(no number for Kirti Nagar in branch_whatsapp\)/);
+      assert.equal(calls.patches[0].bot_state.lead_pushed, undefined, 'not stamped as sent');
+      assert.ok(calls.patches[0].bot_state.lead_push_alerted.potential_lead);
+
+      // Meta error → not stamped, one email with Meta's reason and the WhatsApp hint
+      calls = pushMock({ history: HISTORY, waError: 'Invalid OAuth access token' });
+      assert.equal(await pushLead(db, LEAD, WA_CFG), null);
+      assert.equal(calls.wa.length, 1);
+      assert.equal(calls.alerts.length, 1);
+      assert.match(calls.alerts[0].subject, /Lead push failed — Riya Sharma/);
+      assert.match(calls.alerts[0].html, /Janakpuri WhatsApp \(WhatsApp send failed: 401 Invalid OAuth access token\)/);
+      assert.match(calls.alerts[0].html, /401 = the token; 132001 = the template/);
+      assert.equal(calls.patches[0].bot_state.lead_pushed, undefined);
+      calls = pushMock({ history: HISTORY, waError: 'x' });
+      await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_push_alerted: { lead: 't' } } }, WA_CFG);
+      assert.equal(calls.alerts.length, 0, 'one email per lead + type');
+
+      // Without LEAD_WEBHOOK_URL (L6 deletes it) the WhatsApp path still sends
+      delete process.env.LEAD_WEBHOOK_URL;
+      calls = pushMock({ history: HISTORY });
+      assert.equal(await pushLead(db, LEAD, WA_CFG), 'lead');
+      process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+      delete process.env.WHATSAPP_ACCESS_TOKEN; delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+    }
 
     // Settle trigger 1 — a handoff pushes; a failed push never blocks the handoff
     process.env.GEMINI_API_KEY = 'test_key';

@@ -84,7 +84,7 @@ function reportText(m, days) {
     row('Top services', m.top_services),
     row('Leads per branch', m.branches),
     '',
-    row('Leads sent to Make', m.pushed, m.push_failed ? `⚠️ ${m.push_failed} failed, check the webhook` : ''),
+    row('Leads sent', m.pushed, m.push_failed ? `⚠️ ${m.push_failed} failed, check the alert email` : ''),
     row('Price questions to you', m.price_asked, `${m.price_answered} answered · ${m.price_no_reply} no reply in time`),
     row('Medical / emergency', m.safety),
     row('Bot didn’t know (kb_miss)', m.kb_miss),

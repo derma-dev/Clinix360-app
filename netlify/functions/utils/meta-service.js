@@ -2007,7 +2007,7 @@ async function sendAlertEmail(cfg, subject, title, body, footer) {
   }
 }
 
-// ── Lead push → the client's webhook (Make) · service tracker S2 (Q7 Q31 Q34) ──
+// ── Lead push → the branch's WhatsApp (S2b), else the client's webhook (Make) · service tracker S2 (Q7 Q31 Q34) ──
 // A chat settles at a bot handoff, or after chatbot_config.lead_quiet_hours with
 // no new message (bot-hourly.js). Then: `lead` if a phone is known,
 // `potential_lead` if only a service is, nothing for non-leads or empty chats.
@@ -2065,48 +2065,79 @@ async function postLeadWebhook(url, payload) {
   return { ok: false, error };
 }
 
+// S2b (W18): the customer's own pick first, then a branch staff or a button set.
+// META_BRANCH_ID never counts: there "chose Dwarka" and "never chose" look the same.
+function leadBranch(lead, branches) {
+  return matchBranch(lead.bot_state?.qualification?.branch, branches)
+      || (lead.branch_id !== process.env.META_BRANCH_ID && branches.find(b => b.id === lead.branch_id))
+      || null;
+}
+
 // Never throws: a failed push must not break the handoff or the hourly run.
 // Unstamped failures are retried by the next hourly run; we're emailed once per
 // lead + type so a dead webhook can't flood the inbox.
+// S2b: chatbot_config.branch_whatsapp ({ "Janakpuri": "91…" }) set → the lead goes
+// to its branch's WhatsApp as the lead_alert template, not to Make. Remove the
+// key to roll back to Make.
 async function pushLead(db, lead, cfg, quiet = false) {
   const type = leadPushDue(lead);
+  const wa   = cfg?.branch_whatsapp;
   const url  = process.env.LEAD_WEBHOOK_URL;
   if (!type) return null;
-  if (!url) { console.warn('[meta-service] LEAD_WEBHOOK_URL not set — lead push skipped'); return null; }
+  if (!wa && !url) { console.warn('[meta-service] LEAD_WEBHOOK_URL not set — lead push skipped'); return null; }
   const bs = lead.bot_state || {};
   const q  = bs.qualification || {};
   try {
     let branch = q.branch || '';
-    if (!branch && lead.branch_id && lead.branch_id !== process.env.META_BRANCH_ID) {
+    if (wa) {
+      branch = leadBranch(lead, await db.listBranches())?.name;
+      // No branch, no message (W18). Unstamped, so the hourly run sends it once one is named.
+      if (!branch) { console.log(`[meta-service] lead push: lead ${lead.id} has no branch yet — not sent`); return null; }
+    } else if (!branch && lead.branch_id && lead.branch_id !== process.env.META_BRANCH_ID) {
       branch = (await db.listBranches()).find(b => b.id === lead.branch_id)?.name || '';
     }
     const profile = lead.instagram_user_id ? await fetchInstagramProfile(lead.instagram_user_id) : null;
-    // ponytail: 500 newest messages; a longer thread loses its oldest lines.
-    const rows = await db.listRecentMessages(lead.id, 500);
-    // Fixed field list, every key always present: Make locks its data structure
-    // to the first payload it sees.
-    const payload = {
-      lead_type:        type,
-      source:           bs.source || lead.source || 'instagram',   // S7: 'instagram_comment'
-      ig_user_id:       lead.instagram_user_id || '',
-      name:             lead.customer_name || '',
-      phone:            q.phone || '',
-      service:          q.service || '',
-      branch,
-      location:         q.location || '',
-      preferred_time:   q.preferred_time || '',
-      price_quoted:     priceQuoted(bs, cfg),
-      reason:           bs.handoff_reason || 'quiet',
-      summary:          (quiet ? `Chat went quiet${qualificationBits(q)}` +
-                                   (bs.handoff_summary ? `\nEarlier: ${bs.handoff_summary}` : '')
-                               : bs.handoff_summary) +
-                        (bs.team_questions?.length ? `\nTeam to confirm: ${bs.team_questions.map(x => `"${x}"`).join(', ')}` : ''),
-      conversation:     conversationText(rows),
-      conversation_url: profile?.username ? `https://ig.me/m/${profile.username}` : '',
-      post_url:         bs.post_url || '',                    // S7: the post a comment lead came from
-      created_at:       lead.created_at || '',
-    };
-    const r = await postLeadWebhook(url, payload);
+    const conversationUrl = profile?.username ? `https://ig.me/m/${profile.username}` : '';
+    const summary = (quiet ? `Chat went quiet${qualificationBits(q)}` +
+                               (bs.handoff_summary ? `\nEarlier: ${bs.handoff_summary}` : '')
+                           : bs.handoff_summary) +
+                    (bs.team_questions?.length ? `\nTeam to confirm: ${bs.team_questions.map(x => `"${x}"`).join(', ')}` : '');
+    let r, where, hint;
+    if (wa) {
+      where = `the ${branch} WhatsApp`;
+      hint  = `401 = the token; 132001 = the template isn't approved; no number = branch_whatsapp has no entry for ${branch}.`;
+      // The chat itself isn't sent (W9): the branch follows up from the summary.
+      r = !wa[branch] ? { ok: false, error: `no number for ${branch} in branch_whatsapp` }
+        : await sendWhatsAppTemplate(wa[branch], 'lead_alert', [type.replace('_', ' '), branch, lead.customer_name,
+            q.phone, q.service, q.preferred_time, priceQuoted(bs, cfg), summary, conversationUrl])
+            .then(() => ({ ok: true }), e => ({ ok: false, error: e.message }));
+    } else {
+      // ponytail: 500 newest messages; a longer thread loses its oldest lines.
+      const rows = await db.listRecentMessages(lead.id, 500);
+      // Fixed field list, every key always present: Make locks its data structure
+      // to the first payload it sees.
+      const payload = {
+        lead_type:        type,
+        source:           bs.source || lead.source || 'instagram',   // S7: 'instagram_comment'
+        ig_user_id:       lead.instagram_user_id || '',
+        name:             lead.customer_name || '',
+        phone:            q.phone || '',
+        service:          q.service || '',
+        branch,
+        location:         q.location || '',
+        preferred_time:   q.preferred_time || '',
+        price_quoted:     priceQuoted(bs, cfg),
+        reason:           bs.handoff_reason || 'quiet',
+        summary,
+        conversation:     conversationText(rows),
+        conversation_url: conversationUrl,
+        post_url:         bs.post_url || '',                    // S7: the post a comment lead came from
+        created_at:       lead.created_at || '',
+      };
+      where = 'the webhook';
+      hint  = 'A 4xx usually means the webhook URL is wrong or the scenario is off.';
+      r = await postLeadWebhook(url, payload);
+    }
     const now = new Date().toISOString();
     if (r.ok) {
       await db.updateLead(lead.id, { bot_state: { ...bs, lead_pushed: { ...bs.lead_pushed, [type]: now } } });
@@ -2116,9 +2147,9 @@ async function pushLead(db, lead, cfg, quiet = false) {
     console.error(`[meta-service] lead push failed for lead ${lead.id} (${type}): ${r.error}`);
     if (!bs.lead_push_alerted?.[type]) {
       await sendAlertEmail(cfg, `⚠️ Lead push failed — ${lead.customer_name || lead.id}`,
-        `The ${type} for ${lead.customer_name || lead.id} didn't reach the webhook (${r.error})`,
-        payload.summary,
-        'The hourly job retries it for 2 days. A 4xx usually means the webhook URL is wrong or the scenario is off.');
+        `The ${type} for ${lead.customer_name || lead.id} didn't reach ${where} (${r.error})`,
+        summary,
+        `The hourly job retries it for 2 days. ${hint}`);
       await db.updateLead(lead.id, { bot_state: { ...bs, lead_push_alerted: { ...bs.lead_push_alerted, [type]: now } } });
     }
   } catch (e) {
@@ -2921,6 +2952,7 @@ module.exports = {
   telegramApi,
   pushLead,
   leadPushDue,
+  leadBranch,
   sendTelegram,
   handleOwnerUpdate,
   firstPriceIn,
