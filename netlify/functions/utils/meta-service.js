@@ -1785,32 +1785,43 @@ async function callAssistant({ model, kb, priceList, history, inboundText, offer
     { role: 'user', parts },
   ];
 
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || 'gemini-3.5-flash-lite')}:generateContent`,
-    {
-      method:  'POST',
-      headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: sysParts },
-        contents,
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema:   ASSISTANT_DECISION_SCHEMA,
-          temperature:      0.2,
-        },
-      }),
-    }
-  );
+  const body = JSON.stringify({
+    systemInstruction: { parts: sysParts },
+    contents,
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema:   ASSISTANT_DECISION_SCHEMA,
+      temperature:      0.2,
+      // A decision is ~110–210 tokens. flash-lite can loop inside a string field
+      // (live 2026-11-04: the service name, over and over, until the 60 s function
+      // limit killed the turn: silence). The cap ends a loop in seconds.
+      maxOutputTokens:  1024,
+    },
+  });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = data?.error?.message || JSON.stringify(data);
-    throw new Error(`Gemini call failed: ${res.status} ${msg}`);
+  // A capped loop is cut-off JSON; the second try is usually clean (4 of 5 replays).
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model || 'gemini-3.5-flash-lite')}:generateContent`,
+      { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body,
+        signal: AbortSignal.timeout(20000) }   // a hang → llm_error's reply, not silence (D13)
+    );
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = data?.error?.message || JSON.stringify(data);
+      throw new Error(`Gemini call failed: ${res.status} ${msg}`);
+    }
+    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    try {
+      const decision = JSON.parse(text);   // malformed/blocked → throws → llm_error path (D13)
+      if (!decision || typeof decision.category !== 'string') throw new Error('Gemini returned an unusable decision');
+      return decision;
+    } catch (e) {
+      if (attempt === 2) throw e;
+      console.warn(`[meta-service] unusable Gemini decision (${data.candidates?.[0]?.finishReason}), retrying once:`, e.message);
+    }
   }
-  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
-  const decision = JSON.parse(text);   // malformed/blocked → throws → llm_error path (D13)
-  if (!decision || typeof decision.category !== 'string') throw new Error('Gemini returned an unusable decision');
-  return decision;
 }
 
 // ── botReply: the turn entry point (final plan §3.2 · checklist Steps 7–12) ──
@@ -1842,7 +1853,7 @@ function cannedCopy(cfg, key) {
 
 // Fold this turn's qualification into the lead's cumulative bot_state. Empty
 // values never clobber what an earlier turn learned (D14); phone is code-checked.
-function mergeBotState(prev, decision) {
+function mergeBotState(prev, decision, items = []) {
   const q    = decision?.qualification || {};
   const next = { ...((prev || {}).qualification || {}) };
   for (const k of ['service', 'phone', 'location', 'branch', 'preferred_time']) {
@@ -1853,8 +1864,16 @@ function mergeBotState(prev, decision) {
       next[k] = String(q[k]).slice(0, 120);
     }
   }
-  // The model sometimes copies the KB line's label and price too: "SERVICE HYDRA FACIAL 1s: ₹3,000".
-  if (q.service) next.service = next.service.replace(/^(SERVICE|PACKAGE)\s+/, '').replace(/:\s*₹.*$/, '');
+  // The model sometimes copies the KB line's label and price too ("SERVICE HYDRA FACIAL 1s: ₹3,000"),
+  // or pads the name when it loops ("MANUAL LYMPHATIC THERAPY SAI THERAPY - …", live 2026-11-04):
+  // the longest sheet name it starts with, as a whole word, wins.
+  if (q.service) {
+    const s = next.service.replace(/^(SERVICE|PACKAGE)\s+/, '').replace(/:\s*₹.*$/, '');
+    const sheet = items.map(i => i.name)
+      .filter(n => n && s.toLowerCase().startsWith(n.toLowerCase()) && !/[a-z0-9]/i.test(s[n.length] || ''))
+      .sort((a, b) => b.length - a.length)[0];
+    next.service = sheet || s;
+  }
   return { ...(prev || {}), qualification: next };
 }
 
@@ -2904,7 +2923,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // Last thing before any send or write — a yielding turn leaves no trace, so
     // the answering turn's counters and bot_state can't race it.
     if (await yieldsToBurst(db, lead.id, inboundRow, decision)) return { skipped: 'burst' };
-    const botState = mergeBotState(lead.bot_state, decision);
+    const botState = mergeBotState(lead.bot_state, decision, cfg.price_list?.items);
     // The model can drop a branch or number the customer just gave ("Janakpuri"
     // kept in 1 run of 3, live 2026-11-04); their own words fill the gap.
     const q = botState.qualification, phone = said.map(normalizePhone).find(Boolean);

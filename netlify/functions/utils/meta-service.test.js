@@ -622,9 +622,20 @@ assert.equal(extractComments({}).length, 0);
       global.fetch = async () => ({ ok: false, status: 429, json: async () => ({ error: { message: 'quota' } }) });
       await assert.rejects(() => callAssistant({ inboundText: 'x' }), /Gemini call failed: 429/);
 
-      // malformed output (prose instead of JSON) → throws, never parsed loosely
-      global.fetch = async () => ({ ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: 'Sure! The price is…' }] } }] }) });
+      // malformed output (prose instead of JSON) twice → throws, never parsed loosely
+      let tries = 0;
+      global.fetch = async () => { tries++; return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: 'Sure! The price is…' }] } }] }) }; };
       await assert.rejects(() => callAssistant({ inboundText: 'x' }));
+      assert.equal(tries, 2, 'one retry, then llm_error');
+
+      // a looping field cut off at the token cap (live 2026-11-04) → one retry gets the decision
+      const outs = ['{"category":"lead","qualification":{"service":"LYMPH LYMPH LYMPH', '{"category":"lead","reply":"Which branch?"}'];
+      const sent = [];
+      global.fetch = async (url, opts) => { sent.push(JSON.parse(opts.body)); const t = outs[sent.length - 1];
+        return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: t }] } }] }) }; };
+      assert.deepEqual(await callAssistant({ inboundText: 'x' }), { category: 'lead', reply: 'Which branch?' });
+      assert.equal(sent.length, 2);
+      assert.equal(sent[0].generationConfig.maxOutputTokens, 1024);
 
       // blocked / empty candidates → throws
       global.fetch = async () => ({ ok: true, json: async () => ({ candidates: [] }) });
@@ -1239,6 +1250,16 @@ assert.equal(extractComments({}).length, 0);
       });
       await botReply(LEAD, { ...EV, messageText: 'ok' }, 'instagram');
       assert.deepEqual(kept.patches[0].body.bot_state.qualification, { phone: '9876543210' });
+      // A looping model pads the name (live 2026-11-04): the sheet name it starts with
+      // wins, as a whole word only ("HAIR" never swallows "HAIRLINE CARE").
+      const ITEMS = [{ kind: 'service', name: 'MANUAL LYMPHATIC THERAPY', price: 3750 }, { kind: 'service', name: 'HAIR', price: 500 }];
+      for (const [said, stored] of [['MANUAL LYMPHATIC THERAPY SAI THERAPY - MANUAL LYMPHATIC THERAPY 1s: ₹3,750', 'MANUAL LYMPHATIC THERAPY'],
+                                    ['Manual lymphatic therapy', 'MANUAL LYMPHATIC THERAPY'], ['HAIRLINE CARE', 'HAIRLINE CARE']]) {
+        const c = botMock({ config: CFG('live', { price_list: { items: ITEMS } }),
+                            decision: { ...REPLY_DECISION, qualification: { service: said } } });
+        await botReply(LEAD, { ...EV, messageText: 'ok' }, 'instagram');
+        assert.equal(c.patches[0].body.bot_state.qualification.service, stored, said);
+      }
     }
 
     // 9) kb_miss → canned hold copy + handoff; the missed question rides in the
