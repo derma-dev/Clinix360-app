@@ -793,6 +793,62 @@ assert.equal(extractComments({}).length, 0);
     delete process.env.META_BRANCH_ID;
   }
 
+  // ── S2b L3: a message to the WhatsApp leads number → one auto-reply a day per
+  //    sender; never a lead, a message row, a Gemini call or the toggle read ──
+  {
+    process.env.SUPABASE_URL = 'http://supabase.test';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
+    process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'PNID';
+    const { handleWebhook } = require('./meta-service');
+    const today = new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
+    const REPLY = "This number only sends new leads and doesn't read replies. Please call or message the customer directly.";
+    let row = null;                                   // the wa_autoreplied settings value
+    const wa = (value) => ({ object: 'whatsapp_business_account', entry: [{ changes: [{ field: 'messages', value }] }] });
+    const run = async (payload, { sendFails = false } = {}) => {
+      const calls = { sends: [], saves: [], other: [] };
+      global.fetch = async (url, opts = {}) => {
+        if (url.includes('settings?key=eq.wa_autoreplied')) return { ok: true, json: async () => row ? [{ value: row }] : [] };
+        if (url.endsWith('/rest/v1/settings') && opts.method === 'POST') {
+          const b = JSON.parse(opts.body); calls.saves.push(b); row = b.value; return { ok: true, status: 201 };
+        }
+        if (url.includes('graph.facebook.com/v21.0/PNID/messages')) {
+          calls.sends.push(JSON.parse(opts.body));
+          return sendFails ? { ok: false, status: 400, json: async () => ({ error: { message: 'window closed' } }) }
+                           : { ok: true, json: async () => ({ messages: [{ id: 'w' }] }) };
+        }
+        calls.other.push(url);                        // a lead lookup, message insert, Gemini, integrations…
+        throw new Error('unexpected fetch: ' + url);
+      };
+      assert.deepEqual(await handleWebhook(payload), { received: true });
+      return calls;
+    };
+    const ok = (from) => wa({ contacts: [{ wa_id: from, profile: { name: 'Branch' } }],
+                              messages: [{ from, id: 'wamid.' + from + Math.random(), type: 'text', text: { body: 'ok' } }] });
+
+    let calls = await run(ok('91A'));
+    assert.deepEqual(calls.sends, [{ messaging_product: 'whatsapp', recipient_type: 'individual', to: '91A',
+                                     type: 'text', text: { body: REPLY } }]);
+    assert.deepEqual(calls.saves, [{ key: 'wa_autoreplied', value: JSON.stringify({ date: today, ids: ['91A'] }) }]);
+    assert.deepEqual(calls.other, [], 'no lead, no message row, no bot turn');
+    calls = await run(ok('91A'));
+    assert.equal(calls.sends.length + calls.saves.length, 0, 'same sender, same day → nothing');
+    calls = await run(ok('91B'));
+    assert.equal(calls.sends[0].to, '91B', 'a second sender the same day gets it');
+    assert.deepEqual(JSON.parse(row), { date: today, ids: ['91A', '91B'] });
+    row = JSON.stringify({ date: '2026-01-01', ids: ['91A', '91B'] });
+    calls = await run(ok('91A'));
+    assert.equal(calls.sends.length, 1, 'next day → a reply again');
+    assert.deepEqual(JSON.parse(row), { date: today, ids: ['91A'] }, 'a new day starts a fresh list');
+
+    calls = await run(ok('91C'), { sendFails: true });
+    assert.equal(calls.sends.length, 1);
+    assert.equal(calls.saves.length, 0, 'a failed send is not recorded, so the next message tries again');
+
+    calls = await run(wa({ statuses: [{ id: 'wamid.S', status: 'delivered', recipient_id: '91A' }] }));
+    assert.equal(calls.sends.length + calls.saves.length + calls.other.length, 0, 'delivery receipts ignored');
+    delete process.env.WHATSAPP_ACCESS_TOKEN; delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+  }
+
   // ── processEcho: a reply typed in the IG app is stored + takes the bot over;
   //    the echo of our own send (same text, just stored) is ignored ──
   {

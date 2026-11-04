@@ -916,6 +916,13 @@ async function handleWebhook(payload) {
     return { received: true };
   }
 
+  // S2b L3: the WhatsApp number only sends lead alerts. A message to it is never
+  // a customer lead or a bot turn, whatever the integrations toggle says.
+  if (platform === 'whatsapp') {
+    for (const ev of events) await replyOnLeadNumber(ev);
+    return { received: true };
+  }
+
   if (!(await isPlatformEnabled(platform))) {
     console.log(`[meta-service] ${platform} ingestion disabled in settings — skipping payload`);
     return { received: true };
@@ -975,6 +982,28 @@ async function handleWebhook(payload) {
   }
 
   return { received: true };
+}
+
+// ── Messages to the WhatsApp leads number · S2b L3 (W16) ──────
+// A branch answering a lead alert ("ok") gets one auto-reply a day, so staff
+// know nobody reads it. Settings row wa_autoreplied = { date: IST day, ids }: a
+// new day starts a fresh list, so the row never grows. The sender just wrote to
+// us, so the 24h window is open and the reply is a free service message.
+// ponytail: read-modify-write; two messages in the same second can both get the reply.
+const WA_AUTOREPLY = "This number only sends new leads and doesn't read replies. Please call or message the customer directly.";
+async function replyOnLeadNumber(ev) {
+  try {
+    if (!ev.senderId) return;
+    const today = isoAt(Date.now() + 5.5 * 3600e3).slice(0, 10);
+    const seen  = await getSettingJson('wa_autoreplied');
+    const ids   = seen?.date === today ? seen.ids || [] : [];
+    if (ids.includes(ev.senderId)) return;
+    await sendWhatsAppMessage(ev.senderId, WA_AUTOREPLY);
+    await createSupabaseClient().upsertSetting('wa_autoreplied', JSON.stringify({ date: today, ids: [...ids, ev.senderId] }));
+  } catch (e) {
+    // Never thrown: the webhook must still answer Meta.
+    console.error('[meta-service] leads-number auto-reply failed:', e.message);
+  }
 }
 
 // ── Staff replies from the Instagram / Messenger app ──────────
