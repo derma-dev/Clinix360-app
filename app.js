@@ -293,6 +293,8 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
     const hr   = lead.bot_state?.handoff_reason;
     const alertTag = hr === 'emergency' ? '<span class="lead-cat-tag cat-emergency">🔴 Emergency</span>'
                    : hr === 'kb_miss'    ? '<span class="lead-cat-tag cat-kb_miss">❓ Bot didn’t know</span>'
+                   // S12b G1: the customer got the hold line; staff answer instead.
+                   : hr === 'guard'      ? '<span class="lead-cat-tag cat-kb_miss">🛡️ Reply held back</span>'
                    : '';
 
     return `
