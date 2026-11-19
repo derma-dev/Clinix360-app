@@ -1266,6 +1266,49 @@ assert.equal(extractComments({}).length, 0);
       }
     }
 
+    // 8b2) The model invented a branch the customer never named, and its time drifted into
+    //      Korean (live 2026-11-19, test 4): the branch is dropped, the time cut where it drifts.
+    {
+      const LISTED = { id: 'b1', direction: 'outgoing', is_bot: true, message: 'Which branch — Janakpuri, Kirti Nagar or Dwarka Sec 12?' };
+      let c = botMock({ config: CFG('live'), history: [{ id: 'm0', direction: 'incoming', message: 'mesotherapy price?' }, LISTED],
+                        decision: { ...REPLY_DECISION, qualification: { branch: 'Janakpuri', preferred_time: 'tomorrow 3pm오후 3시즈음(tomorrow' } } });
+      await botReply(LEAD, { ...EV, messageText: '9998853310' }, 'instagram');
+      assert.deepEqual(c.patches[0].body.bot_state.qualification, { phone: '9998853310', preferred_time: 'tomorrow 3pm' });
+      // A branch the customer typed (here as "kirti", earlier in the chat) stays; an earlier one survives an invented switch.
+      c = botMock({ config: CFG('live'), history: [{ id: 'm0', direction: 'incoming', message: 'kirti' }, LISTED],
+                    decision: { ...REPLY_DECISION, qualification: { branch: 'Kirti Nagar' } } });
+      await botReply(LEAD, { ...EV, messageText: 'ok' }, 'instagram');
+      assert.equal(c.patches[0].body.bot_state.qualification.branch, 'Kirti Nagar');
+      c = botMock({ config: CFG('live'), history: [LISTED], decision: { ...REPLY_DECISION, qualification: { branch: 'Janakpuri' } } });
+      await botReply({ ...LEAD, bot_state: { qualification: { branch: 'Kirti Nagar' } } }, { ...EV, messageText: 'ok' }, 'instagram');
+      assert.equal(c.patches[0].body.bot_state.qualification.branch, 'Kirti Nagar');
+
+      // The model closed the booking without a branch: the bot asks it once more instead of handing off…
+      const CLOSE = { ...REPLY_DECISION, handoff: true, reason: 'wants_booking', reply: 'Our team will reach out!',
+                      qualification: { service: 'MESOTHERAPY 1s', phone: '9998853310' } };
+      const WA = CFG('live', { branch_whatsapp: { Janakpuri: '91111' } });
+      c = botMock({ config: CFG('live'), history: [LISTED], decision: CLOSE });
+      let r = await botReply(LEAD, { ...EV, messageText: '9998853310' }, 'instagram');
+      assert.equal(r.handoff, 'wants_booking', 'the Make path sends a lead without a branch: no question');
+      c = botMock({ config: WA, history: [LISTED], decision: CLOSE });
+      r = await botReply(LEAD, { ...EV, messageText: '9998853310' }, 'instagram');
+      assert.deepEqual(r, { sent: true });
+      assert.equal(c.sends[0].message.text, 'Which of our branches suits you best: Janakpuri or Kirti Nagar?');
+      const asked = c.patches[0].body.bot_state;
+      assert.ok(asked.branch_asked);
+      // …the answer closes it with the fixed closing, no model call…
+      c = botMock({ config: WA, history: [LISTED] });
+      r = await botReply({ ...LEAD, bot_state: asked }, { ...EV, messageText: 'kirti nagar' }, 'instagram');
+      assert.equal(r.handoff, 'qualified');
+      assert.equal(c.gemini.length, 0, 'no model call');
+      assert.equal(c.sends[0].message.text, 'Thank you! Our team will contact you on WhatsApp soon to confirm your appointment. 🙏');
+      assert.equal(c.patches[0].body.bot_state.qualification.branch, 'Kirti Nagar');
+      // …and only once: skipped again, the handoff goes ahead without one.
+      c = botMock({ config: WA, history: [LISTED], decision: CLOSE });
+      r = await botReply({ ...LEAD, bot_state: asked }, { ...EV, messageText: 'ok' }, 'instagram');
+      assert.equal(r.handoff, 'wants_booking');
+    }
+
     // 8c) The number for a known service + branch → the fixed closing goes out at once,
     //     no model call, and the lead is handed off (2026-11-04). A question in the
     //     same message, or a branch not known yet, still goes to the model.

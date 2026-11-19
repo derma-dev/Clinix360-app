@@ -1857,6 +1857,10 @@ function cannedCopy(cfg, key) {
   return String(cfg?.canned?.[key] || '').trim();
 }
 
+// A glitching model drifts into another script mid-field ("tomorrow 3pm오후 3시즈음(…",
+// live 2026-11-19). Customers write English, Hinglish or Hindi: the field ends there.
+const OFF_SCRIPT = /[^\p{Script=Latin}\p{Script=Devanagari}\p{Script=Common}\p{Script=Inherited}]/u;
+
 // Fold this turn's qualification into the lead's cumulative bot_state. Empty
 // values never clobber what an earlier turn learned (D14); phone is code-checked.
 function mergeBotState(prev, decision, items = []) {
@@ -1867,13 +1871,14 @@ function mergeBotState(prev, decision, items = []) {
       const p = normalizePhone(q.phone);
       if (p) next.phone = p;
     } else if (q[k]) {
-      next[k] = String(q[k]).slice(0, 120);
+      const v = String(q[k]).split(OFF_SCRIPT)[0].trim().slice(0, 120);
+      if (v) next[k] = v;
     }
   }
   // The model sometimes copies the KB line's label and price too ("SERVICE HYDRA FACIAL 1s: ₹3,000"),
   // or pads the name when it loops ("MANUAL LYMPHATIC THERAPY SAI THERAPY - …", live 2026-11-04):
   // the longest sheet name it starts with, as a whole word, wins.
-  if (q.service) {
+  if (q.service && next.service) {
     const s = next.service.replace(/^(SERVICE|PACKAGE)\s+/, '').replace(/:\s*₹.*$/, '');
     const sheet = items.map(i => i.name)
       .filter(n => n && s.toLowerCase().startsWith(n.toLowerCase()) && !/[a-z0-9]/i.test(s[n.length] || ''))
@@ -2847,12 +2852,17 @@ function settleDecision(decision, leadCategory, cfg) {
 // arrives for a known service and branch, a fixed closing goes out at once and the
 // lead is handed off: no wait on the model (asked 2026-11-04). A question in the
 // same message ('?') still goes to the model, so it gets answered.
+// The same goes for the branch, once botReply had to ask it again after the number.
 const QUALIFIED_COPY = 'Thank you! Our team will contact you on WhatsApp soon to confirm your appointment. 🙏';
-function closingTurn(bs, text, cfg) {
+function closingTurn(bs, text, cfg, branches = []) {
   const q = bs?.qualification || {};
-  if (q.phone || !q.service || !q.branch || String(text).includes('?') || !normalizePhone(text)) return null;
+  if (!q.service || String(text).includes('?')) return null;
+  const phone  = !q.phone && q.branch && normalizePhone(text);
+  const branch = bs?.branch_asked && q.phone && !q.branch && matchBranch(text, branches);
+  if (!phone && !branch) return null;
   return { category: 'lead', is_medical: false, kb_covers: true, asks_price: false, handoff: true, reason: 'qualified',
-           reply: cannedCopy(cfg, 'qualified') || QUALIFIED_COPY, qualification: { phone: text } };
+           reply: cannedCopy(cfg, 'qualified') || QUALIFIED_COPY,
+           qualification: phone ? { phone: text } : { branch: branch.name } };
 }
 
 async function botReply(lead, ev, platform, inboundRow = null) {
@@ -2868,7 +2878,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
 
     // D7 layer 1 — the keyword net fires BEFORE Gemini ever runs (both modes).
     // D7 layer 2 — is_medical on the model's own decision overrides its reply.
-    let decision, llmError = null, firstBotTurn = true, offer = null, image = null, said = [ev.messageText];
+    let decision, llmError = null, firstBotTurn = true, offer = null, image = null, said = [ev.messageText], typed = '', branches = [];
     const tier = classifyInbound(ev.messageText);
     // Open #17 caps — checked after the safety net (a medical/urgent inbound on a
     // capped thread still hands off as medical, which outranks the cap) and before
@@ -2896,6 +2906,8 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       // What the customer has said since our last reply, this message included.
       said = [...rows.slice(rows.findLastIndex(m => !isIncomingRow(m)) + 1)
                 .filter(m => m.id !== inboundRow?.id).map(m => m.message), ev.messageText];
+      // Everything the customer typed in the last 10 messages: a branch must come from here.
+      typed = rows.filter(isIncomingRow).map(m => m.message).concat(said).join('\n');
       const fromComment = rows.findLastIndex(m => isIncomingRow(m) && String(m.message).startsWith('[comment] '));
       const history = rows.slice(Math.max(0, fromComment))
         .filter(m => !inboundRow?.id || m.id !== inboundRow.id)
@@ -2915,8 +2927,9 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       try {
         if (ev.attachment?.type === 'image') image = await fetchImageBase64(ev.attachment.url);
       } catch (e) { console.warn('[meta-service] image fetch failed (continuing without vision):', e.message); }
+      branches = await db.listBranches().catch(() => []);
       try {
-        decision = closingTurn(lead.bot_state, ev.messageText, cfg)
+        decision = closingTurn(lead.bot_state, ev.messageText, cfg, branches)
                 || await callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history,
                                          inboundText: ev.messageText, offer, image });
       } catch (err) {
@@ -2950,7 +2963,11 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // kept in 1 run of 3, live 2026-11-04); their own words fill the gap.
     const q = botState.qualification, phone = said.map(normalizePhone).find(Boolean);
     if (!q.phone && phone) q.phone = phone;
-    const branch = !q.branch && matchBranch(said.join('\n'), await db.listBranches().catch(() => []));
+    // It can also invent one: "Janakpuri", the first branch the bot had listed, for a customer
+    // who never named any (live 2026-11-19). A branch the customer didn't type doesn't count.
+    const picked = matchBranch(q.branch, branches);
+    if (picked && !matchBranch(typed, [picked])) q.branch = lead.bot_state?.qualification?.branch;
+    const branch = !q.branch && matchBranch(said.join('\n'), branches);
     if (branch) q.branch = branch.name;
     if (offer) {
       // The thread remembers its latest offer for follow-up "price?" turns;
@@ -2976,6 +2993,16 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       await db.updateLead(lead.id, { category: decision.category, bot_active: false, bot_state: botState });
       console.log(`[meta-service] botReply: non-lead (${decision.category}) on lead ${lead.id} — canned reply, filed, bot off`);
       return { non_lead: decision.category };
+    }
+
+    // When the customer skips the branch question, the model skips it too and closes the
+    // booking without one (live 2026-11-19, test 4). On the WhatsApp path such a lead can't
+    // be sent, so the branch is asked once more; closingTurn closes on the answer.
+    if (cfg.branch_whatsapp && decision.handoff && ['qualified', 'wants_booking'].includes(decision.reason)
+        && !q.branch && !botState.branch_asked && branches.length) {
+      botState.branch_asked = new Date().toISOString();
+      const names = new Intl.ListFormat('en-IN', { type: 'disjunction' }).format(branches.map(b => b.name));
+      decision = { ...decision, handoff: false, reply: `Which of our branches suits you best: ${names}?` };
     }
 
     if (decision.handoff) {
