@@ -204,7 +204,8 @@ async function replayThread(thread, cfg, append) {
             callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history, inboundText, offer }));
           row.latency_ms = Date.now() - t0;
           // Same post-model rules as botReply (is_medical, misc ack, Q30 price-only kb_miss).
-          decision = settleDecision(decision, leadCategory, cfg);
+          decision = settleDecision(decision, leadCategory, cfg,   // + the G1 output gate
+            { offer, said: msgs.slice(0, i + 1).filter(h => h.dir === 'in').map(h => h.text).join('\n') });
           if (decision.category === 'lead') leadCategory = 'lead';
           row.decision = offer ? { ...decision, offer } : decision;
           // Counter ticks only on a drafted normal lead reply (live ticks on sends;

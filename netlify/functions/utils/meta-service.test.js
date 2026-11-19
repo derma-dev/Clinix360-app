@@ -11,6 +11,8 @@ const {
   idColumnFor,
   verifyMetaSignature,
   classifyInbound,
+  checkReply,
+  settleDecision,
   callAssistant,
   botReply,
   sendByPlatform,
@@ -503,6 +505,52 @@ assert.equal(extractComments({}).length, 0);
     entry: [{ messaging: [{ sender: { id: 'IGS' }, postback: { mid: 'pb_1', title: 'Dwarka', payload: 'BRANCH:x' } }] }],
   });
   assert.equal(pb.events[0].messageId, 'pb_1', 'a postback must carry its mid for dedup');
+}
+
+// ── checkReply / settleDecision: the output gate (S12b G1) ──
+{
+  const KB = 'KNOWLEDGE BASE (the ONLY source for answers):\n- SERVICE HYDRA FACIAL 1s: ₹3,000\n' +
+             '- FAQ [contact]: You can reach us on WhatsApp at 731-731-09-09.\n- FAQ [laser]: Reduction is 98–99% with maintenance.';
+  const ok = (reply, said = '') => assert.equal(checkReply(reply, KB, said), null, reply);
+  const no = (check, reply, said = '') => assert.equal(checkReply(reply, KB, said), check, reply);
+  // money: an amount or % the bot wasn't shown
+  ok('Hydra facial is ₹3,000 per session 😊');
+  ok('Hydra facial ki cost Rs. 3000 hai'); ok('Sirf 3k mein!'); ok('3,000/- per session'); ok('98–99% reduction');
+  no('money', 'For you Hydra facial is ₹500'); no('money', 'Flat 50% off today'); no('money', 'just 2500 rupees');
+  no('money', 'Rs 1.5 lakh for the package'); no('money', '₹2,000 to ₹3,000');
+  ok('Come on 20 Nov at 11:30 am to our Sec 12 branch: 3 sessions, 2 hrs each');
+  // link (GQ4): none at all
+  no('link', 'See www.x.com'); no('link', 'Chat on wa.me/919876543210'); no('link', 'Follow us @dskin');
+  no('link', 'https://bit.ly/x'); no('link', 'visit dskin.in');
+  ok('Glad to help after 2 sessions.In Janakpuri we are open till 8');   // a missing space isn't a link
+  // phone (GQ4): the KB's number or the customer's own
+  ok('WhatsApp us at 731-731-09-09'); ok('Noted, we will call you on 98765 43210', 'my number is 9876543210');
+  no('phone', 'Call our doctor on 99999 88888'); no('phone', 'Call +91 98765 43210');
+  // prompt text, promises, essays, a glitch into another script
+  no('leak', 'As per my KNOWLEDGE BASE, laser is safe'); no('leak', 'that was a kb_miss');
+  no('promise', 'This is a legally binding offer'); no('promise', 'Results guaranteed!'); no('promise', 'We guarantee results');
+  ok('Results vary, so we cannot guarantee specific outcomes'); ok('We can’t guarantee complete removal');
+  ok('Results ki guarantee nahi de sakte'); ok('There is no guarantee, results vary');
+  no('length', 'a'.repeat(801)); ok('a'.repeat(800));
+  no('script', 'tomorrow 3pm오후 3시');
+  ok('Thank you! Our team will contact you on WhatsApp soon to confirm your appointment. 🙏');   // closingTurn's copy
+
+  const cfg = { kb: { entries: [{ type: 'service', key: 'HYDRA FACIAL 1s', price: 3000 }] } };
+  const turn = (reply, over = {}) => ({ category: 'lead', is_medical: false, handoff: false, reason: 'wants_booking', reply, ...over });
+  // a fail → the guard handoff: no reply, the check named, the held-back text kept for staff
+  assert.deepEqual(settleDecision(turn('Yes, 50% off!'), null, cfg),
+    { category: 'lead', is_medical: false, handoff: true, reason: 'guard', reply: '', guard: 'money', blocked: 'Yes, 50% off!' });
+  // …unless the live offer says 50%
+  const offer = { service: 'HYDRA FACIAL 1s', offer_price: 1500, fresh: true, source_caption: 'Hydra facial 50% off, now ₹1,500' };
+  assert.equal(settleDecision(turn('Yes, 50% off!'), null, cfg, { offer }).reason, 'wants_booking');
+  assert.equal(settleDecision(turn('Yes, ₹1,500 as in the post!'), null, cfg, { offer: { ...offer, fresh: false } }).guard, 'money',
+    'a stale offer price is not quotable (D10), so the gate holds it back');
+  // only words that go out are checked: a non-lead gets its canned line, a price kb_miss the hold line
+  assert.equal(settleDecision(turn('see www.x.com', { category: 'collaboration' }), null, cfg).reason, 'wants_booking');
+  assert.equal(settleDecision(turn('It is ₹500', { handoff: true, reason: 'kb_miss', asks_price: true }), null, cfg).reason, 'kb_miss');
+  // the KB line's label is cut, not held back (G0)
+  assert.equal(settleDecision(turn('Hydra facial (SERVICE HYDRA FACIAL 1s) costs ₹3,000'), null, cfg).reply,
+    'Hydra facial (HYDRA FACIAL 1s) costs ₹3,000');
 }
 
 // ── classifyInbound: the D7 layer-1 safety net (chatbot Step 5) ──
@@ -1029,7 +1077,8 @@ assert.equal(extractComments({}).length, 0);
     const CFG = (mode, over = {}) => ({
       mode,
       model: 'gemini-3.5-flash-lite',
-      kb: { entries: [] },
+      // REPLY_DECISION's price, so the output gate (G1) lets it through.
+      kb: { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 }] },
       canned: {
         collaboration: 'Thanks for reaching out about collaborations!',
         sales_pitch:   'Thank you for the information.',
@@ -1173,6 +1222,30 @@ assert.equal(extractComments({}).length, 0);
       });
       assert.equal((await botReply({ ...LEAD, category: 'lead' }, { ...EV, messageText: 'Thanks, you too' }, 'instagram')).handoff, 'declined_booking');
       assert.equal(c2.patches[0].body.category, 'lead');
+    }
+
+    // 7b2) S12b G1: a reply with a price the KB doesn't have is held back: the
+    //      hold line, a hard staff handoff, no owner alert; shadow logs it
+    {
+      const decision = { ...REPLY_DECISION, reply: 'For you, full body laser is just ₹5,000!' };
+      const calls = botMock({ config: CFG('live'), decision });
+      const r = await botReply(LEAD, EV, 'instagram');
+      assert.equal(r.handoff, 'guard');
+      assert.equal(calls.sends.length, 1);
+      assert.ok(calls.sends[0].message.text.endsWith('Let me check with our team.'), 'the hold line goes out');
+      assert.ok(!calls.sends[0].message.text.includes('5,000'), 'never the held-back reply');
+      assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'no owner alert');
+      const b = calls.patches[0].body;
+      assert.equal(b.bot_active, false, 'a hard handoff');
+      assert.deepEqual(b.bot_state.guard, { check: 'money', blocked: decision.reply });
+      assert.match(b.bot_state.handoff_summary, /held back a reply \(money\)\. Customer said: "price of laser"/);
+      // the customer's own number may be repeated back
+      botMock({ config: CFG('live'), decision: { ...REPLY_DECISION, reply: 'Noted 98765 43210, our team will call you.' } });
+      assert.deepEqual(await botReply(LEAD, { ...EV, messageText: 'my number 9876543210' }, 'instagram'), { sent: true });
+      const c3 = botMock({ config: CFG('shadow'), decision });
+      assert.deepEqual(await botReply(LEAD, EV, 'instagram'), { shadow: true });
+      assert.equal(c3.shadowLogs[0].decision.guard, 'money');
+      assert.equal(c3.sends.length, 0);
     }
 
     // 7c) burst guard: the older turn yields to a newer inbound; a share never

@@ -58,7 +58,8 @@ function outcome(tier, d, cfg) {
   if (tier) return { got: tier, sent: '' };
   if (d.category && d.category !== 'lead')
     return { got: d.category === 'abuse' ? 'abuse' : 'non_lead', sent: canned(d.category) || canned('misc') };
-  if (d.handoff) return { got: d.reason, sent: ['kb_miss', 'llm_error'].includes(d.reason) ? canned(d.reason) : String(d.reply || '') };
+  const hold = { kb_miss: 'kb_miss', guard: 'kb_miss', llm_error: 'llm_error' }[d.reason];
+  if (d.handoff) return { got: d.reason, sent: hold ? canned(hold) : String(d.reply || ''), blocked: d.blocked };
   return { got: 'reply', sent: String(d.reply || '') };
 }
 
@@ -98,7 +99,7 @@ async function throttled(fn) {
                                    data: fs.readFileSync(path.join(ROOT, c.image)).toString('base64') };
         const d = await throttled(() => callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list,
           history: c.lead ? LEAD_HISTORY : [], inboundText: c.text, offer: c.offer, image }));
-        r = outcome(null, settleDecision(d, c.lead ? 'lead' : null, cfg), cfg);
+        r = outcome(null, settleDecision(d, c.lead ? 'lead' : null, cfg, { offer: c.offer, said: c.text }), cfg);
       } catch (e) {
         error = e.message.split('\n')[0].slice(0, 120);
         r = { got: 'llm_error', sent: '' };
@@ -111,6 +112,7 @@ async function throttled(fn) {
     if (c.expect !== 'normal') { attacks++; if (r.got === 'reply' && r.sent !== String(cfg.canned?.kb_miss || '').trim()) modelReplied++; }
     console.log(`${pass ? 'PASS' : 'FAIL'}  ${c.expect.padEnd(8)} got=${r.got.padEnd(14)} ${c.text.replace(/\s+/g, ' ').slice(0, 70)}`);
     if (r.sent) console.log(`      → ${r.sent.replace(/\s+/g, ' ').slice(0, 120)}`);
+    if (r.blocked) console.log(`      ⛔ held back: ${r.blocked.replace(/\s+/g, ' ').slice(0, 120)}`);
     if (hit) console.log(`      ✗ matched /${hit}/`);
     if (error) console.log(`      ✗ ${error}`);
   }

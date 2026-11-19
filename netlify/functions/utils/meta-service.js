@@ -1907,8 +1907,11 @@ function qualificationBits(q = {}) {
   return bits.length ? ' — ' + bits.join(', ') : '';
 }
 
-function buildHandoffSummary(reason, botState, ev) {
+function buildHandoffSummary(reason, botState, ev, guard) {
   const head = `Bot handed off (${reason})${qualificationBits(botState?.qualification)}`;
+  if (reason === 'guard') {
+    return `${head}\nBot held back a reply (${guard}). Customer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
+  }
   if (reason === 'medical' || reason === 'emergency') {
     return `${head}\nCustomer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
   }
@@ -1930,6 +1933,8 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   let text = null;
   if (!decision.safety_net) {
     if (decision.reason === 'kb_miss')   text = cannedCopy(cfg, 'kb_miss');
+    // S12b G1: a held-back reply gets the hold line; staff answer instead.
+    if (decision.reason === 'guard')     text = cannedCopy(cfg, 'kb_miss') || cannedCopy(cfg, 'llm_error');
     if (decision.reason === 'llm_error') text = cannedCopy(cfg, 'llm_error');
     // A capped thread gets the same hold copy — going silent after 10 bot turns
     // would be a dead end (D13 spirit). A dedicated canned.turn_cap wins if set.
@@ -1950,10 +1955,11 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
       console.error(`[meta-service] handoff courtesy reply failed on lead ${lead.id} (handoff continues):`, e.message);
     }
   }
-  const summary  = buildHandoffSummary(decision.reason, botState, ev);
+  const summary  = buildHandoffSummary(decision.reason, botState, ev, decision.guard);
   const category = decision.category || lead.category || 'lead';
   const nextState = { ...botState, handoff_summary: summary,
                       handoff_reason: decision.reason, handoff_at: new Date().toISOString(),
+                      ...(decision.guard ? { guard: { check: decision.guard, blocked: decision.blocked } } : {}),
                       // D17 — the question rides in bot_state so meta-send can capture
                       // the staff answer to it without re-deriving anything. A new
                       // question also resets the S6 timer stamps of the last one.
@@ -2852,9 +2858,48 @@ async function yieldsToBurst(db, leadId, inboundRow, decision) {
   return false;
 }
 
+// S12b G1 — the output gate. Whatever the input (any language, any trick, text in
+// an image), a model reply goes out only if every amount, % and phone number in it
+// is one the bot was shown or the customer typed, with no link and no prompt text.
+// The rules read the reply, not the attack, so they hold though the repo is public.
+// Only amounts count, not every number: dates, times, "Sec 12", "3 sessions" pass.
+const AMOUNT_RES = [
+  /(?:₹|\brs\.?|\binr)\s*(\d[\d,]*(?:\.\d+)?)\s*(k|lakh|lac)?\b/gi,                  // ₹3,000 · Rs. 3000 · ₹3k
+  /(\d[\d,]*(?:\.\d+)?)\s*(k|lakh|lac)?\s*(?:\/-|(?:rupees?|rupaye|rs|inr)\b)/gi,     // 3000/- · 3000 rupees
+  /\b(\d+(?:\.\d+)?)(k)\b/gi,                                                         // 3k
+  /(\d+(?:\.\d+)?)\s*(?:%|percent\b)/gi,                                              // 50% · 50 percent
+];
+const AMOUNT_UNIT = { k: 1e3, lakh: 1e5, lac: 1e5 };
+// A lowercase TLD only: "2 sessions.In Janakpuri" (a missing space) isn't a link.
+const LINK_RES = [/https?:\/\/|\bwww\./i, /@[A-Za-z_][\w.]{2,}|\b[\w-]+\.(?:com|in|co|net|org|me|ly|link)\b/];
+const LEAK_RES = [/HARD RULES|KNOWLEDGE BASE|LIVE OFFER|STALE OFFER|SECURITY —/, /kb_miss|kb_covers|is_medical|asks_price|handoff|customer_message/i];
+// "We cannot guarantee results" is the honest answer (3 of 292 replayed replies): only an un-negated guarantee fails.
+const PROMISE_RE = /legally binding|binding offer|(?<!\b(?:not|no|never|cannot|\w+n['’]t)\b[^.!?]{0,20})\b(?:guarantee|gaurantee)(?![^.!?]{0,30}\bnahi\b)/i;
+// 10 digits, spaces/hyphens allowed, an optional +91: "731-731-09-09", "98765 43210".
+const phonesIn = (t) => (String(t || '').match(/(?<!\d)(?:\+?91[\s-]?)?(?:\d[\s-]?){9}\d(?!\d)/g) || [])
+  .map(p => p.replace(/\D/g, '').slice(-10));
+
+// → null (OK) or the first failed check. `allowed` = the text the model was shown
+// (KB + offer), `said` = what the customer typed.
+function checkReply(reply, allowed, said) {
+  const shown = new Set((String(allowed).match(/\d[\d,]*(?:\.\d+)?/g) || []).map(n => Number(n.replace(/,/g, ''))));
+  for (const re of AMOUNT_RES)
+    for (const [, n, unit] of reply.matchAll(re))
+      if (!shown.has(Number(n.replace(/,/g, '')) * (AMOUNT_UNIT[unit?.toLowerCase()] || 1))) return 'money';
+  if (LINK_RES.some(re => re.test(reply))) return 'link';
+  const known = new Set([...phonesIn(allowed), ...phonesIn(said)]);
+  if (phonesIn(reply).some(p => !known.has(p))) return 'phone';
+  if (LEAK_RES.some(re => re.test(reply))) return 'leak';
+  if (PROMISE_RE.test(reply)) return 'promise';
+  if (reply.length > 800) return 'length';
+  if (OFF_SCRIPT.test(reply)) return 'script';
+  return null;
+}
+
 // The rules applied to the model's decision before acting on it. Shared with
 // scripts/replay-shadow.js so replay measures what live would do.
-function settleDecision(decision, leadCategory, cfg) {
+// ctx = { offer, said } feeds the output gate (G1).
+function settleDecision(decision, leadCategory, cfg, ctx = {}) {
   if (decision.is_medical) return { safety_net: 'medical', reason: 'medical', reply: '', handoff: true };
   // A lead's "Ok" / "Thanx" / 👍🏻 comes back misc. On a thread already filed
   // as a lead that's an acknowledgement, not a non-lead: keep it a lead and
@@ -2870,7 +2915,17 @@ function settleDecision(decision, leadCategory, cfg) {
     decision = { ...decision, handoff: false,
                  reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss') };
   }
-  return decision;
+  // G1 — only model words that go out are checked: a non-lead gets its canned line
+  // instead, a price kb_miss the hold line. The KB line's label the model sometimes
+  // copies ("Hydra facial (SERVICE HYDRA FACIAL 1s)", G0) is cut, not held back.
+  const reply = String(decision.reply || '').replace(/\b(?:SERVICE|PACKAGE) (?=[A-Z0-9])/g, '').trim();
+  if (!reply || decision.category !== 'lead' || (decision.handoff && decision.reason === 'kb_miss')) return decision;
+  // A stale offer's price is in the prompt only so the model won't quote it (D10).
+  const allowed = renderKbForPrompt(cfg?.kb, cfg?.price_list) + (ctx.offer?.fresh ? '\n' + renderOfferForPrompt(ctx.offer) : '');
+  const check = checkReply(reply, allowed, ctx.said);
+  // A fail → the hold line + a hard staff handoff, no owner alert (handoffToStaff).
+  return check ? { ...decision, reason: 'guard', handoff: true, reply: '', guard: check, blocked: reply.slice(0, 300) }
+               : { ...decision, reply };
 }
 
 // The number is the last question (service → branch → date/time → number). When it
@@ -2964,7 +3019,9 @@ async function botReply(lead, ev, platform, inboundRow = null) {
         llmError = err.message;
         decision = { reason: 'llm_error', reply: '', kb_covers: false, handoff: true, category: 'lead' };
       }
-      decision = settleDecision(decision, lead.category, cfg);
+      // The gate allows a number the customer typed in the last 10 messages, or the one on file.
+      decision = settleDecision(decision, lead.category, cfg,
+                                { offer, said: [typed, lead.bot_state?.qualification?.phone].join('\n') });
     }
 
     // D19/D24 — shadow: log exactly one row, send nothing, mutate nothing.
@@ -3082,6 +3139,7 @@ module.exports = {
   classifyInbound,
   callAssistant,
   settleDecision,
+  checkReply,
   botReply,
   sendByPlatform,
   normalizePhone,
