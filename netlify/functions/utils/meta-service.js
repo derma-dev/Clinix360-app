@@ -1524,15 +1524,63 @@ const REQUESTED_NET = [
   'staff se baat', 'baat karao', 'baat kara do',
 ];
 
-// 'emergency' | 'medical' | 'requested' (→ handoffToStaff, Gemini never runs)
-// or null (→ continue to the LLM turn). Emergency outranks medical outranks
-// requested — evaluation order IS the priority (final plan §8.1).
+// S12b G2 — the guardrail nets match at a word start, on a lowercased copy whose
+// punctuation is turned into spaces: "spend my life" isn't "end my life", "class"
+// isn't "ass". Phrases only where a single word has an innocent use ("you are now
+// in Dwarka?", "ignore my last message", "rules bhool gayi"). The repo is public,
+// so these only catch the lazy cases; the output gate (G1) is the wall.
+// Distress (GQ1). Never a bare "mar"/"marna": "price sun ke mar gaye" is a joke.
+const CRISIS_NET = [
+  ' suicid', ' kill myself', ' end my life', ' ending my life', ' want to die', ' wanna die',
+  ' khudkushi', ' khud khushi', ' aatmahatya', ' atmahatya',
+  ' marna chaht', ' jeena nahi chaht', ' jina nahi chaht', ' jeena nhi chaht', ' zinda nahi rehna',
+  ' आत्महत्या', ' खुदकुशी', ' मरना चाहत', ' जीना नहीं चाहत',
+];
+// Abuse (GQ2): slurs and sexual terms that can't be part of a skin question. Not
+// "saale" (a brother-in-law), "kutte" (a dog bite), "boobs" or "sexy" on their own.
+const ABUSE_NET = [
+  ' fuck', ' motherf', ' bitch', ' bastard', ' asshole', ' slut', ' whore', ' cunt', ' dickhead',
+  ' nudes', ' send nude', ' nude pic', ' horny', ' sex chat', ' sexting', ' blowjob', ' saath date pe', ' go on a date with',
+  ' chutiy', ' madarchod', ' maderchod', ' behenchod', ' bhenchod', ' benchod', ' bhosd', ' gandu', ' randi', ' harami',
+  ' lund ', ' lauda', ' lavda', ' saale kutt', ' kutte ki aulad',
+  ' चूतिय', ' चुतिय', ' मादरचोद', ' बहनचोद', ' भेनचोद', ' भोसड', ' गांडू', ' रंडी', ' हरामी', ' साले कुत्त',
+];
+// Copy-pasted injections (research §6). A false hit costs one line; the bot stays on.
+const REDIRECT_NET = [
+  ' ignore all previous instruction', ' ignore previous instruction', ' ignore all prior instruction',
+  ' ignore all instruction', ' ignore your instruction', ' ignore your rules', ' ignore the above instruction',
+  ' disregard all previous instruction', ' disregard previous instruction', ' disregard your instruction', ' disregard your rules',
+  ' forget your rules', ' forget all your rules', ' forget your instruction', ' forget all previous instruction', ' forget previous instruction',
+  ' system prompt', ' hidden instruction', ' developer mode', ' jailbreak', ' dan mode',
+  ' you are now a ', ' you are now an ', ' you re now a ', ' you re now an ', ' from now on you are', ' from now on you re',
+  ' repeat everything above', ' everything above this line',
+  ' instructions bhool ja', ' rules bhool ja', ' naye instructions follow',
+  ' निर्देश भूल जा', ' नियम भूल जा', ' सिस्टम प्रॉम्प्ट',
+];
+const MAX_INBOUND = 1000;   // a longer message is a flood → redirect
+
+// 'crisis' | 'emergency' | 'medical' | 'requested' (→ handoffToStaff, Gemini never
+// runs) | 'abuse' (→ one line, filed as misc) | 'redirect' (→ one line, bot on) or
+// null (→ the LLM turn). Evaluation order IS the priority (final plan §8.1):
+// distress outranks a symptom, and a symptom outranks an injection phrase.
 function classifyInbound(text) {
   const t = ' ' + String(text || '').toLowerCase() + ' ';
+  const w = ' ' + String(text || '').toLowerCase().replace(/[^\p{L}\p{N}\p{M}]+/gu, ' ') + ' ';
+  if (CRISIS_NET.some(k => w.includes(k)))    return 'crisis';
   if (EMERGENCY_NET.some(k => t.includes(k))) return 'emergency';
   if (MEDICAL_NET.some(k => t.includes(k)))   return 'medical';
   if (REQUESTED_NET.some(k => t.includes(k))) return 'requested';
+  if (ABUSE_NET.some(k => w.includes(k)))     return 'abuse';
+  if (REDIRECT_NET.some(k => w.includes(k)) || String(text || '').length > MAX_INBOUND) return 'redirect';
   return null;
+}
+
+// The decision a pre-check tier makes in place of the model's. Shared with
+// scripts/replay-shadow.js. abuse takes the non-lead path; redirect is a normal turn.
+function tierDecision(tier, cfg) {
+  if (tier === 'redirect') return { category: 'lead', reason: 'redirect', reply: cannedCopy(cfg, 'redirect') };
+  if (tier === 'abuse')    return { category: 'abuse', reason: 'abuse', reply: '' };
+  return { safety_net: tier, reason: tier, reply: '', handoff: true };
 }
 
 // ── Gemini client (final plan §3.5 · checklist Step 6) ──
@@ -1857,9 +1905,17 @@ function normalizePhone(raw) {
   return /^[6-9]\d{9}$/.test(d) ? d : null;
 }
 
+// S12b G2 (GQ3) — a config saved before G2 has no such keys, and a blank one
+// would leave the turn silent: these lines then go out.
+const GUARD_COPY = {
+  redirect: 'Sorry, I can’t help with that. I can help with our treatments, prices and appointments 😊 What would you like to know?',
+  abuse:    'Sorry, I can’t help with that. If you’d like help with a treatment or an appointment, our team is happy to help.',
+  crisis:   'I’m sorry you’re going through this. I can’t help with that here, but I’ve let our team know.',
+};
+
 // One canned-copy lookup that tolerates a missing/truncated config row.
 function cannedCopy(cfg, key) {
-  return String(cfg?.canned?.[key] || '').trim();
+  return String(cfg?.canned?.[key] || '').trim() || GUARD_COPY[key] || '';
 }
 
 // A glitching model drifts into another script mid-field ("tomorrow 3pm오후 3시즈음(…",
@@ -1912,7 +1968,7 @@ function buildHandoffSummary(reason, botState, ev, guard) {
   if (reason === 'guard') {
     return `${head}\nBot held back a reply (${guard}). Customer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
   }
-  if (reason === 'medical' || reason === 'emergency') {
+  if (reason === 'medical' || reason === 'emergency' || reason === 'crisis') {
     return `${head}\nCustomer said: "${String(ev?.messageText || '').slice(0, 300)}"`;
   }
   if (reason === 'kb_miss' || reason === 'owner_no_reply') {
@@ -1923,7 +1979,8 @@ function buildHandoffSummary(reason, botState, ev, guard) {
 
 // Final plan §3.3 — every handoff trigger lands here: safety net, is_medical,
 // model-decided, kb_miss, llm_error. Safety-net tiers send NOTHING (D7 — the
-// bot never answers a symptom/urgent message, not even a courtesy line);
+// bot never answers a symptom/urgent message, not even a courtesy line), except
+// crisis's one line (GQ1);
 // kb_miss/llm_error send their canned hold copy (D13); model-decided handoffs
 // send the model's own closing reply when it wrote one. A failed send never
 // aborts the handoff — staff still get the summary and the lead.
@@ -1943,6 +2000,8 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     if (decision.reason === 'owner_no_reply') text = cannedCopy(cfg, 'owner_no_reply') || cannedCopy(cfg, 'llm_error');
     if (!text) text = String(decision.reply || '').trim() || null;
   }
+  // S12b G2 (GQ1): distress is the one safety tier that sends a line, and only that line.
+  if (decision.reason === 'crisis') text = cannedCopy(cfg, 'crisis');
   if (firstBotTurn && text) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
   if (text) {
     try {
@@ -2018,7 +2077,7 @@ async function telegramApi(method, body) {
 // Plain text, so customer words need no escaping. Returns the Message.
 const sendTelegram = (chatId, text, extra = {}) => telegramApi('sendMessage', { chat_id: chatId, text, ...extra });
 
-// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies). kb_miss is a
+// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies, S12b GQ1 distress). kb_miss is a
 // price question by now (Q30, see botReply); the rest are FYIs. Medical,
 // turn_cap and soft handoffs alert nobody. One alert per thread per incident
 // comes free: each of these switches the bot off for the thread, so the next
@@ -2026,6 +2085,7 @@ const sendTelegram = (chatId, text, extra = {}) => telegramApi('sendMessage', { 
 const OWNER_ALERTS = {
   kb_miss:   { head: '❓ Price question',      ask: 'Reply to this message with the price and I’ll pass it on.' },
   emergency: { head: '🔴 Emergency',           ask: 'The bot didn’t reply. Please answer them yourself.' },
+  crisis:    { head: '🆘 Distress message',    ask: 'The bot sent one short line and stepped back. Please reach out to them yourself.' },
   requested: { head: '🙋 Asked for a person',  ask: 'The bot has stepped back. Please answer them yourself.' },
   llm_error: { head: '⚠️ Bot error',           ask: 'They were told the team will help. Please answer them yourself.' },
 };
@@ -2605,9 +2665,9 @@ const clip = (s, n) => {
   return t.length > n ? t.slice(0, n - 1) + '…' : t;
 };
 
-// What live would have sent as a normal reply. Handoffs, the safety net and
-// non-leads (canned copy) aren't drafts.
-const draftOf = (d) => d && !d.handoff && !d.safety_net && (!d.category || d.category === 'lead')
+// What live would have sent as a normal reply. Handoffs, the safety net,
+// non-leads and redirects (canned copy) aren't drafts.
+const draftOf = (d) => d && !d.handoff && !d.safety_net && (!d.category || d.category === 'lead') && d.reason !== 'redirect'
   ? String(d.reply || '').trim() : '';
 
 // The customer message a turn answered: by Meta id, else the last one before it.
@@ -2836,9 +2896,11 @@ async function logShadowTurn(db, lead, ev, platform, decision, model, latencyMs,
 // check and the send still double-replies; a per-lead lock closes that.
 const BURST_MS = 60000;
 const isIncomingRow = (m) => ['in', 'incoming'].includes(m.direction);
+// abuse and redirect aren't sticky: a normal message in the same burst takes over (S12b G2).
+const STICKY_TIERS = ['crisis', 'emergency', 'medical', 'requested'];
 const isStickyInbound = (text) => {
   const t = String(text || '');
-  return t.startsWith('🔗 shared post:') || t === '📷 image' || !!classifyInbound(t);
+  return t.startsWith('🔗 shared post:') || t === '📷 image' || STICKY_TIERS.includes(classifyInbound(t));
 };
 
 async function yieldsToBurst(db, leadId, inboundRow, decision) {
@@ -2970,8 +3032,13 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     const created = Date.parse(lead.created_at || '');
     const overCap = turns >= turnCap
                  || (ageCap > 0 && Number.isFinite(created) && Date.now() - created > ageCap);
-    if (tier) {
-      decision = { safety_net: tier, reason: tier, reply: '', handoff: true };
+    // S12b G2 — redirect is checked after the caps: a capped thread gets the cap
+    // handoff, not endless redirects.
+    if (tier && tier !== 'redirect') {
+      decision = tierDecision(tier, cfg);
+      // The abuse line gets the D15 disclosure on a first bot message, like any
+      // non-lead reply. The crisis line goes alone (GQ1); the rest send nothing.
+      firstBotTurn = tier === 'abuse' && !(await db.listRecentMessages(lead.id, 10)).some(m => m.is_bot);
     } else if (overCap) {
       // History isn't fetched on this path; a turn-capped thread has prior bot
       // replies (the counter only ticks on sends), so disclosure was already
@@ -3009,7 +3076,9 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       } catch (e) { console.warn('[meta-service] image fetch failed (continuing without vision):', e.message); }
       branches = await db.listBranches().catch(() => []);
       try {
-        decision = closingTurn(lead.bot_state, ev.messageText, cfg, branches)
+        // An injection phrase or a flood gets a fixed line: no Gemini call, the bot stays on.
+        decision = (tier === 'redirect' && tierDecision(tier, cfg))
+                || closingTurn(lead.bot_state, ev.messageText, cfg, branches)
                 || await callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history,
                                          inboundText: ev.messageText, offer, image });
       } catch (err) {
@@ -3064,6 +3133,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
 
     // Non-lead (D2/D14): one canned reply, then filed under leads.category. No
     // status change — these are not qualified leads, staff see them filtered.
+    // S12b G2 (GQ2): abuse gets its own line and is filed as misc: no alert, nothing new on the dashboard.
     if (decision.category && decision.category !== 'lead') {
       let text = cannedCopy(cfg, decision.category) || cannedCopy(cfg, 'misc');
       if (firstBotTurn) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
@@ -3072,7 +3142,9 @@ async function botReply(lead, ev, platform, inboundRow = null) {
         lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
         message: text, is_seen: true, is_bot: true,
       });
-      await db.updateLead(lead.id, { category: decision.category, bot_active: false, bot_state: botState });
+      const abuse = decision.category === 'abuse';
+      if (abuse) botState.abuse_at = new Date().toISOString();
+      await db.updateLead(lead.id, { category: abuse ? 'misc' : decision.category, bot_active: false, bot_state: botState });
       console.log(`[meta-service] botReply: non-lead (${decision.category}) on lead ${lead.id} — canned reply, filed, bot off`);
       return { non_lead: decision.category };
     }
@@ -3104,6 +3176,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // Open #17 — the cap counter ticks only on a delivered normal turn (a failed
     // send throws above and never persists; handoff/non-lead replies are terminal).
     botState.turn_count = turns + 1;
+    if (decision.reason === 'redirect') botState.redirected_at = new Date().toISOString();   // G6 counts these
     if (decision.reason === 'kb_miss' && !decision.kb_covers) {
       botState.team_questions = [...(botState.team_questions || []), String(ev.messageText || '').slice(0, 200)].slice(-5);
     }
@@ -3137,6 +3210,8 @@ module.exports = {
   idColumnFor,
   // chatbot (final plan §3.2/§3.5)
   classifyInbound,
+  tierDecision,
+  cannedCopy,
   callAssistant,
   settleDecision,
   checkReply,

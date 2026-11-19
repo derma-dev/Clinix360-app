@@ -1297,6 +1297,10 @@ const DEFAULT_CHATBOT_CONFIG = {
     refusal_ok:    'No problem at all — our team will continue here. 🙏',
     owner_no_reply:'Thanks for waiting! Our team will get in touch with you here about this soon. 🙏',
     qualified:     'Thank you! Our team will contact you on WhatsApp soon to confirm your appointment. 🙏',
+    // S12b G2 guardrails (GQ3); the server has the same lines as fallbacks.
+    redirect:      'Sorry, I can’t help with that. I can help with our treatments, prices and appointments 😊 What would you like to know?',
+    abuse:         'Sorry, I can’t help with that. If you’d like help with a treatment or an appointment, our team is happy to help.',
+    crisis:        'I’m sorry you’re going through this. I can’t help with that here, but I’ve let our team know.',
   },
   offer_stale_days: 30,              // D10
   turn_cap: 10,                      // pending open #17

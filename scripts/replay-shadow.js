@@ -26,7 +26,7 @@ for (const line of fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split(/\r?\n
   if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
 }
 
-const { classifyInbound, callAssistant, settleDecision, parseOfferCaption, getSettingJson, priceNames } = require('../netlify/functions/utils/meta-service');
+const { classifyInbound, tierDecision, callAssistant, settleDecision, parseOfferCaption, getSettingJson, priceNames } = require('../netlify/functions/utils/meta-service');
 
 const CORPUS = path.join(ROOT, 'artifacts', 'data', 'ig_export_history.jsonl');
 const args = process.argv.slice(2);
@@ -54,9 +54,12 @@ async function loadConfig() {
 const PRICE_KW = ['price', 'cost', 'rate', 'charge', 'fees', 'kitna', 'kitne', 'kitni', 'how much', 'paisa', '₹'];
 const COLLAB_KW = ['collab', 'collaborat', 'hiring', 'influencer', 'partnership', 'promotion', 'sponsor', 'follow me'];
 
+// redirect isn't one: long offer captions would leave 'offers' and change the sample (S12b G2).
+const SAFETY_TIERS = ['crisis', 'emergency', 'medical', 'requested', 'abuse'];
+
 function bucketOf(thread) {
   const ins = thread.messages.filter(m => m.dir === 'in' && !m.canned);
-  if (ins.some(m => classifyInbound(m.text))) return 'safety';
+  if (ins.some(m => SAFETY_TIERS.includes(classifyInbound(m.text)))) return 'safety';
   if (ins.some(m => m.text.startsWith('[shared post:'))) return 'offers';
   const low = ins.map(m => m.text.toLowerCase()).join(' ');
   if (COLLAB_KW.some(k => low.includes(k))) return 'collab';
@@ -159,19 +162,28 @@ async function replayThread(thread, cfg, append) {
                   bucket: bucketOf(thread), turn_index: i, at: m.at, synthetic_turn_count: turns,
                   inbound: m.text.slice(0, 300) };
 
+    // Live shape: a share turn's text is the attachmentLabel form, the caption cut
+    // at 100 (a full offer caption can pass G2's 1,000-character cap).
+    const inboundText = m.text.startsWith('[shared post:')
+      ? `🔗 shared post: ${m.text.slice('[shared post: '.length).replace(/\s+$/, '').slice(0, -1).slice(0, 100)}`
+      : m.text;
     // D7 layer 1 — safety net first, Gemini never runs (same order as botReply).
-    const tier = classifyInbound(m.text);
+    const tier = classifyInbound(inboundText);
     // Open #17 caps with the synthetic counter (shadow replay can't tick the live
     // one). After logging a cap we reset the window and keep drafting — a faithful
     // stop would end the thread (bot off), and one row per cap is all review needs.
     const overCap = turns >= cap || (ageCapMs > 0 && clock - Math.max(firstAt, ageResetAt) > ageCapMs);
 
     try {
-      if (tier) {
-        row.decision = { safety_net: tier, reason: tier, reply: '', handoff: true };
+      if (tier && tier !== 'redirect') {
+        row.decision = tierDecision(tier, cfg);
       } else if (overCap) {
         row.decision = { reason: 'turn_cap', reply: '', kb_covers: false, handoff: true, category: 'lead' };
         turns = 0; ageResetAt = clock;
+      } else if (tier === 'redirect') {
+        // S12b G2: after the caps, as in botReply — a fixed line, no Gemini call, a counted turn.
+        row.decision = tierDecision(tier, cfg);
+        leadCategory = 'lead'; turns++;
       } else {
         // Offer ladder (D9/D10): a shared post parses once per caption (in-memory
         // cache); otherwise the thread's last offer rides along, stale or fresh.
@@ -192,10 +204,6 @@ async function replayThread(thread, cfg, append) {
         } else if (lastOffer) {
           offer = { ...lastOffer, fresh: isFreshOn(clock, lastOffer.last_seen, cfg.offer_stale_days) };
         }
-        // Live shape: the share turn's prompt text is the attachmentLabel form.
-        const inboundText = m.text.startsWith('[shared post:')
-          ? `🔗 shared post: ${m.text.slice('[shared post: '.length).replace(/\s+$/, '').slice(0, -1).slice(0, 100)}`
-          : m.text;
         const history = msgs.slice(Math.max(0, i - 10), i)
           .map(h => ({ role: h.dir === 'in' ? 'user' : 'model', text: h.text }));
         const t0 = Date.now();

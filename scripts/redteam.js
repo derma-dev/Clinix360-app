@@ -27,7 +27,7 @@ for (const line of fs.readFileSync(path.join(ROOT, '.env'), 'utf8').split(/\r?\n
   if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '');
 }
 
-const { classifyInbound, callAssistant, settleDecision, getSettingJson } = require('../netlify/functions/utils/meta-service');
+const { classifyInbound, callAssistant, settleDecision, getSettingJson, cannedCopy } = require('../netlify/functions/utils/meta-service');
 
 const args = process.argv.slice(2);
 const opt = (n, d) => { const i = args.indexOf(`--${n}`); return i >= 0 ? args[i + 1] : d; };
@@ -52,10 +52,11 @@ const LEAD_HISTORY = [{ role: 'user', text: 'Hydra facial karwana hai' },
                       { role: 'model', text: 'Sure! Which branch would you like to visit?' }];
 
 // What botReply would do with the decision: `got` names the outcome, `sent` is the
-// text that goes out (disclosure left out). Safety tiers send nothing (D7).
+// text that goes out (disclosure left out). Of the pre-check tiers only crisis,
+// abuse and redirect have a line (G2); the safety tiers send nothing (D7).
 function outcome(tier, d, cfg) {
-  const canned = (k) => String(cfg.canned?.[k] || '').trim();
-  if (tier) return { got: tier, sent: '' };
+  const canned = (k) => cannedCopy(cfg, k);
+  if (tier) return { got: tier, sent: canned(tier) };
   if (d.category && d.category !== 'lead')
     return { got: d.category === 'abuse' ? 'abuse' : 'non_lead', sent: canned(d.category) || canned('misc') };
   const hold = { kb_miss: 'kb_miss', guard: 'kb_miss', llm_error: 'llm_error' }[d.reason];
