@@ -578,6 +578,8 @@ assert.equal(extractComments({}).length, 0);
       assert.ok(body.systemInstruction.parts.some(p => p.text.includes('LHR FULL BODY P/S')),
         'whole KB injected into the prompt (D20)');
       assert.ok(body.contents.at(-1).parts[0].text.includes('price of laser'));
+      assert.match(body.contents.at(-1).parts[0].text, /^Now: \w{3}, \d{1,2} \w{3},? \d{4}, \d{1,2}:\d{2} [ap]m \(IST\)\n/,
+        "today's date and time, so 'tomorrow' becomes a date");
       assert.equal(body.contents.length, 3, 'history + current message');
 
       // no price_list: the KB renders as before, with the "starts from" rule
@@ -2363,10 +2365,26 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.wa.length, 1);
       assert.equal(calls.wa[0].to, '91111', "the customer's branch's number");
       assert.equal(calls.wa[0].template.name, 'lead_alert');
-      // The summary is the customer's own words, not the bot's handoff reason (2026-11-04)
+      // No summary from the model → the customer's own words, not the bot's handoff reason (2026-11-04)
       assert.deepEqual(params(calls), ['lead', 'Janakpuri', 'Riya Sharma', '9876543210', 'LHR FULL BODY P/S',
         'Saturday evening', 'from ₹35000', 'laser price? / 9876543210', 'https://ig.me/m/riya.s']);
       assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'send OK → stamped');
+      // The model's short summary goes instead (2026-11-19); it's told the time, price and the chat
+      const SUM = 'Customer asked about full body laser and was quoted from ₹35000. They want a visit on Sat, 21 Nov 2026, evening.';
+      process.env.GEMINI_API_KEY = 'test_key';
+      for (const [said, sent] of [[SUM, SUM], [`${SUM}오후 3시`, SUM]]) {
+        calls = pushMock({ history: HISTORY, botTurn: { summary: said } });
+        await pushLead(db, LEAD, WA_CFG);
+        assert.equal(params(calls)[7], sent);
+      }
+
+      const sumReq = [];
+      calls = pushMock({ history: HISTORY, botTurn: { summary: SUM } });
+      const pf = global.fetch;
+      global.fetch = (url, opts) => { if (url.includes('generativelanguage')) sumReq.push(JSON.parse(opts.body)); return pf(url, opts); };
+      await pushLead(db, LEAD, WA_CFG);
+      assert.match(sumReq[0].contents[0].parts[0].text,
+        /Preferred time: Saturday evening\nPrice shared: from ₹35000[\s\S]*Customer: laser price\?\nAssistant: Starts from ₹35000/);
 
       calls = pushMock({ history: HISTORY });
       assert.equal(await pushLead(db, withQ({ service: 'LHR FULL BODY P/S', branch: 'dwarka' }), WA_CFG, true), 'potential_lead');

@@ -1588,7 +1588,7 @@ HARD RULES — breaking any is a failure:
 - NEVER guarantee results.
 - Do not announce that you are a bot or an assistant — the system handles disclosure.
 - Reply in the language and script of the customer's LATEST message, even if earlier messages were in another language: Hinglish in Roman letters ("kya aapki koi aur branch hai?") → reply in Roman Hinglish; Hindi in Devanagari → Hindi in Devanagari; English → English. Keep replies warm, 2–4 sentences.
-- When qualifying a lead, ask ONE question at a time, in order: service → branch/location → preferred date and time for the visit → WhatsApp number (always the last question). Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one). Never re-ask something the conversation already answered — if they named a branch or area (even two), note it and move on to the next question. Ask any one question at most twice in the whole chat — the WhatsApp number included; if it is still unanswered, move on.
+- When qualifying a lead, ask ONE question at a time, in order: service → branch/location → preferred date and time for the visit → WhatsApp number (always the last question). Extract anything they reveal into qualification (phone verbatim; service = the exact KB service name when they name one; preferred_time = the exact date worked out from the "Now" line, e.g. "tomorrow 2pm" → "Fri, 20 Nov 2026, 2:00 pm", with a vague part kept in words: "Sat, 21 Nov 2026, evening"). Never re-ask something the conversation already answered — if they named a branch or area (even two), note it and move on to the next question. Ask any one question at most twice in the whole chat — the WhatsApp number included; if it is still unanswered, move on.
 - Soft booking: once a lead is engaged, work toward their preferred day/time for a visit. When they want to book, confirm what you have (service, branch, preferred time). Without their WhatsApp number yet, ask for it and do NOT hand off on that turn; with it, thank them and hand off with reason 'wants_booking' — the human team locks the appointment in the clinic system. NEVER confirm a slot or appointment yourself.
 - A deflected or partial answer always ends with a soft cue to the human team — never a dead end.
 - Keep the conversation going yourself: do NOT hand off merely because the basics are answered. "Fully qualified" means you have asked for their WhatsApp number and they gave it or clearly refused it — never hand off with the number still unasked. If they wind down ("okay", "I'll think", "thanks") and you have not yet asked for their WhatsApp number, ask for it now so the team can share details there — never let the chat end with the number unasked. Staff take over only at a real closing point.
@@ -1629,7 +1629,8 @@ const OFFER_PARSE_SCHEMA = {
 };
 
 // One structured Gemini call: a system text + one user message → the parsed JSON.
-// Throws on any HTTP or parse failure.
+// Throws on any HTTP or parse failure. Capped and timed out like callAssistant, so a
+// looping reply fails fast instead of eating the function's 60 s.
 async function geminiJson({ model, system, user, schema }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('Missing GEMINI_API_KEY env var');
@@ -1642,8 +1643,9 @@ async function geminiJson({ model, system, user, schema }) {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: user }] }],
-        generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0 },
+        generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0, maxOutputTokens: 1024 },
       }),
+      signal: AbortSignal.timeout(20000),
     }
   );
 
@@ -1783,7 +1785,10 @@ async function callAssistant({ model, kb, priceList, history, inboundText, offer
   const lang = 'reply in ITS language — plain English → only English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi';
   const head = waiting.length ? `Customer's new messages, not answered yet — answer EVERY one in a single reply (${lang}):`
                               : `Customer's new message (${lang}):`;
-  const parts = [{ text: `${head}\n${[...waiting, inboundText].join('\n')}${image ? IMAGE_TURN_ADDENDUM : ''}` }];
+  // "Tomorrow 2pm" goes to the branch as a date (asked 2026-11-19), so the model needs today.
+  const now = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'short', day: 'numeric',
+    month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  const parts = [{ text: `Now: ${now} (IST)\n${head}\n${[...waiting, inboundText].join('\n')}${image ? IMAGE_TURN_ADDENDUM : ''}` }];
   if (image) parts.push({ inline_data: { mime_type: image.mime, data: image.data } });
 
   const contents = [
@@ -2141,6 +2146,24 @@ function leadBranch(lead, branches) {
       || null;
 }
 
+// The WhatsApp lead's summary (template field 8): a short account the branch can read at
+// a glance (asked 2026-11-19), not the customer's lines one by one. A failed call, or an
+// empty one, falls back to those lines, oldest first.
+const SUMMARY_SCHEMA = { type: 'OBJECT', required: ['summary'], properties: { summary: { type: 'STRING' } } };
+async function leadSummary(model, rows, q, price) {
+  const words = rows.filter(isIncomingRow).map(m => m.message).join(' / ');
+  try {
+    const d = await geminiJson({ model, schema: SUMMARY_SCHEMA,
+      system: 'You summarise an Instagram DM chat between a customer and the automated assistant of DSkin, a dermatology clinic, for the branch team who will contact the customer. Write 1–2 plain English sentences, under 250 characters, in the past tense: what the customer asked about, any price the assistant gave, and what they want next. For the visit, use the preferred time exactly as given below; never write "today" or "tomorrow". Add nothing that is not in the chat.',
+      user: `Service: ${q.service || '–'}\nPreferred time: ${q.preferred_time || '–'}\nPrice shared: ${price || '–'}\nPhone: ${q.phone || '–'}\n\n` +
+            `Chat, oldest first:\n${rows.map(m => `${isIncomingRow(m) ? 'Customer' : 'Assistant'}: ${String(m.message).slice(0, 300)}`).join('\n')}` });
+    return String(d?.summary || '').split(OFF_SCRIPT)[0].trim() || words;
+  } catch (e) {
+    console.warn('[meta-service] lead summary failed (sending the customer’s words):', e.message);
+    return words;
+  }
+}
+
 // Never throws: a failed push must not break the handoff or the hourly run.
 // Unstamped failures are retried by the next hourly run; we're emailed once per
 // lead + type so a dead webhook can't flood the inbox.
@@ -2174,14 +2197,16 @@ async function pushLead(db, lead, cfg, quiet = false) {
     if (wa) {
       where = `the ${branch} WhatsApp`;
       hint  = `401 = the token; 132001 = the template isn't approved; no number = branch_whatsapp has no entry for ${branch}.`;
-      // The chat itself isn't sent (W9). Its summary is the customer's own words, oldest
-      // first: chat details, not the bot's handoff reason (asked 2026-11-04). The other
+      // The chat itself isn't sent (W9), only leadSummary's two sentences. The other
       // fields carry service, phone, time and price; the alert email keeps `summary`.
-      const words = (await db.listRecentMessages(lead.id, 50)).filter(isIncomingRow).map(m => m.message).join(' / ');
-      r = !wa[branch] ? { ok: false, error: `no number for ${branch} in branch_whatsapp` }
-        : await sendWhatsAppTemplate(wa[branch], 'lead_alert', [type.replace('_', ' '), branch, lead.customer_name,
-            q.phone, q.service, q.preferred_time, priceQuoted(bs, cfg), words, conversationUrl])
-            .then(() => ({ ok: true }), e => ({ ok: false, error: e.message }));
+      if (!wa[branch]) r = { ok: false, error: `no number for ${branch} in branch_whatsapp` };
+      else {
+        const price = priceQuoted(bs, cfg);
+        const about = await leadSummary(cfg.model, await db.listRecentMessages(lead.id, 50), q, price);
+        r = await sendWhatsAppTemplate(wa[branch], 'lead_alert', [type.replace('_', ' '), branch, lead.customer_name,
+              q.phone, q.service, q.preferred_time, price, about, conversationUrl])
+              .then(() => ({ ok: true }), e => ({ ok: false, error: e.message }));
+      }
     } else {
       // ponytail: 500 newest messages; a longer thread loses its oldest lines.
       const rows = await db.listRecentMessages(lead.id, 500);
