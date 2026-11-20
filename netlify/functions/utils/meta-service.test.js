@@ -739,9 +739,32 @@ assert.equal(extractComments({}).length, 0);
       assert.match(sent[0].systemInstruction.parts[0].text,
         /service → branch\/location → preferred date and time for the visit → WhatsApp number \(always the last question\)/);
 
-      // blocked / empty candidates → throws
+      // empty candidates → throws
       global.fetch = async () => ({ ok: true, json: async () => ({ candidates: [] }) });
       await assert.rejects(() => callAssistant({ inboundText: 'x' }));
+
+      // S12b G4 — the safety filters are on; sexual content only at HIGH (bikini, intimate-area laser)
+      assert.deepEqual(sent[0].safetySettings.map(s => `${s.category.replace('HARM_CATEGORY_', '')}:${s.threshold}`),
+        ['HARASSMENT:BLOCK_MEDIUM_AND_ABOVE', 'HATE_SPEECH:BLOCK_MEDIUM_AND_ABOVE',
+         'DANGEROUS_CONTENT:BLOCK_MEDIUM_AND_ABOVE', 'SEXUALLY_EXPLICIT:BLOCK_ONLY_HIGH']);
+      // a blocked reply or a blocked prompt → a guard handoff after ONE fetch (no retry)
+      for (const resp of [
+        { candidates: [{ finishReason: 'SAFETY', safetyRatings: [{ category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', probability: 'LOW' },
+                                                                 { category: 'HARM_CATEGORY_HARASSMENT', probability: 'HIGH', blocked: true }] }] },
+        { promptFeedback: { blockReason: 'SAFETY', safetyRatings: [{ category: 'HARM_CATEGORY_HARASSMENT', probability: 'HIGH', blocked: true }] } },
+      ]) {
+        tries = 0;
+        global.fetch = async () => { tries++; return { ok: true, json: async () => resp }; };
+        const d = await callAssistant({ inboundText: 'x' });
+        assert.equal(tries, 1);
+        assert.deepEqual({ reason: d.reason, handoff: d.handoff, reply: d.reply, guard: d.guard, blocked: d.blocked },
+          { reason: 'guard', handoff: true, reply: '', guard: 'gemini_block', blocked: 'SAFETY HARM_CATEGORY_HARASSMENT' });
+        assert.deepEqual(settleDecision(d, 'lead', {}), d, 'settleDecision passes it through to the guard handoff');
+      }
+      tries = 0;
+      global.fetch = async () => { tries++; return { ok: true, json: async () => ({ candidates: [{ finishReason: 'PROHIBITED_CONTENT' }] }) }; };
+      assert.equal((await callAssistant({ inboundText: 'x' })).blocked, 'PROHIBITED_CONTENT');
+      assert.equal(tries, 1);
 
       // missing key → throws
       delete process.env.GEMINI_API_KEY;

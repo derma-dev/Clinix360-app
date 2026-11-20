@@ -1817,6 +1817,13 @@ async function fetchImageBase64(url) {
   return { mime, data: Buffer.from(await res.arrayBuffer()).toString('base64') };
 }
 
+// S12b G4 — Gemini's own filters are off by default on current models (research §3).
+// Sexual only at HIGH: bikini, underarm and intimate-area laser are everyday questions here.
+const SAFETY_SETTINGS = [['HARASSMENT', 'BLOCK_MEDIUM_AND_ABOVE'], ['HATE_SPEECH', 'BLOCK_MEDIUM_AND_ABOVE'],
+  ['DANGEROUS_CONTENT', 'BLOCK_MEDIUM_AND_ABOVE'], ['SEXUALLY_EXPLICIT', 'BLOCK_ONLY_HIGH']]
+  .map(([c, threshold]) => ({ category: `HARM_CATEGORY_${c}`, threshold }));
+const BLOCK_FINISH = ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'];
+
 const IMAGE_TURN_ADDENDUM = `\n(They sent the attached image. Match it to one SERVICE in the KNOWLEDGE BASE if recognizable — e.g. a price-list or treatment screenshot — then reply normally per the rules. If you cannot tell what it shows, ask which treatment they mean.)`;
 
 // One structured decision per inbound. `history` = [{role:'user'|'model', text}]
@@ -1866,6 +1873,7 @@ async function callAssistant({ model, kb, priceList, history, inboundText, offer
       // limit killed the turn: silence). The cap ends a loop in seconds.
       maxOutputTokens:  1024,
     },
+    safetySettings: SAFETY_SETTINGS,
   });
 
   // A capped loop is cut-off JSON; the second try is usually clean (4 of 5 replays).
@@ -1881,14 +1889,24 @@ async function callAssistant({ model, kb, priceList, history, inboundText, offer
       const msg = data?.error?.message || JSON.stringify(data);
       throw new Error(`Gemini call failed: ${res.status} ${msg}`);
     }
-    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    // A safety block (G4) → the hold line + staff, not the abuse line: a false block on a
+    // real skin question reaches a person. No retry: the same input gets the same block.
+    // `blocked` names the reason and category, so a false block shows what to relax.
+    const c = data.candidates?.[0], fb = data.promptFeedback;
+    const why = fb?.blockReason || (BLOCK_FINISH.includes(c?.finishReason) && c.finishReason);
+    if (why) {
+      const cat = [...(fb?.safetyRatings || []), ...(c?.safetyRatings || [])].find(r => r.blocked)?.category;
+      return { category: 'lead', is_medical: false, kb_covers: false, asks_price: false, handoff: true,
+               reason: 'guard', reply: '', guard: 'gemini_block', blocked: [why, cat].filter(Boolean).join(' ') };
+    }
+    const text = c?.content?.parts?.map(p => p.text || '').join('') || '';
     try {
-      const decision = JSON.parse(text);   // malformed/blocked → throws → llm_error path (D13)
+      const decision = JSON.parse(text);   // malformed → throws → llm_error path (D13)
       if (!decision || typeof decision.category !== 'string') throw new Error('Gemini returned an unusable decision');
       return decision;
     } catch (e) {
       if (attempt === 2) throw e;
-      console.warn(`[meta-service] unusable Gemini decision (${data.candidates?.[0]?.finishReason}), retrying once:`, e.message);
+      console.warn(`[meta-service] unusable Gemini decision (${c?.finishReason}), retrying once:`, e.message);
     }
   }
 }
