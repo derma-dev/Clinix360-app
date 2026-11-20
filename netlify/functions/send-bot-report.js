@@ -59,6 +59,11 @@ function computeBotMetrics({ chats, stamped, commentIds, botMessages }, since) {
     safety: count('medical') + count('emergency'),
     kb_miss: count('kb_miss'),
     turn_cap: count('turn_cap'),
+    // S12b G6: redirect and abuse aren't handoffs, so they're leads stamped in the window
+    redirected: stamped.filter(l => inWindow(l.bot_state?.redirected_at)).length,
+    abuse: stamped.filter(l => inWindow(l.bot_state?.abuse_at)).length,
+    guard: count('guard'),
+    crisis: count('crisis'),
     bot_messages: botMessages,
   };
 }
@@ -89,6 +94,7 @@ function reportText(m, days) {
     row('Medical / emergency', m.safety),
     row('Bot didn’t know (kb_miss)', m.kb_miss),
     row('Turn cap reached', m.turn_cap),
+    row('Guardrails', `${m.redirected} redirected · ${m.abuse} abuse · ${m.guard} replies held back · ${m.crisis} distress`),
     row('Bot messages sent', m.bot_messages),
     '',
     'Change or stop this report in Settings → Chatbot → Report.',
@@ -115,7 +121,8 @@ const handler = async () => {
   if (!owner?.chat_id) { console.error('[send-bot-report] no Telegram owner linked'); return { statusCode: 500 }; }
 
   const since = new Date(Date.now() - days * 86400e3).toISOString();
-  const stamps = ['handoff_at', 'owner_asked_at', 'owner_answered_at', 'lead_pushed->>lead', 'lead_pushed->>potential_lead',
+  const stamps = ['handoff_at', 'owner_asked_at', 'owner_answered_at', 'redirected_at', 'abuse_at',
+                  'lead_pushed->>lead', 'lead_pushed->>potential_lead',
                   'lead_push_alerted->>lead', 'lead_push_alerted->>potential_lead']
     .map(p => `bot_state${p.includes('->>') ? '->' : '->>'}${p}.gt."${since}"`).join(',');
   const stamped = await get(`leads?or=(${stamps})&select=bot_state`);

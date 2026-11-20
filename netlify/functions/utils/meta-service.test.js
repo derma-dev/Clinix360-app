@@ -2342,6 +2342,13 @@ assert.equal(extractComments({}).length, 0);
       { bot_state: { handoff_at: OLD, handoff_reason: 'turn_cap', lead_pushed: { potential_lead: OLD, lead: IN } } }, // old handoff not counted; 1 push
       { bot_state: { lead_pushed: { potential_lead: IN }, lead_push_alerted: { lead: IN } } },            // 1 push + 1 failed
       { bot_state: { lead_pushed: { lead: IN }, lead_push_alerted: { lead: IN } } },                      // failed, then retried OK
+      // S12b G6: guardrail trips
+      { bot_state: { redirected_at: IN, turn_count: 2 } },                                                // redirected, bot on
+      { bot_state: { redirected_at: OLD, abuse_at: IN } },                                                // old redirect not counted; abuse
+      { bot_state: { handoff_at: IN, handoff_reason: 'guard', guard: { check: 'money', blocked: '₹500' } } },
+      { bot_state: { handoff_at: IN, handoff_reason: 'guard', guard: { check: 'gemini_block', blocked: 'SAFETY' } } },
+      { bot_state: { handoff_at: IN, handoff_reason: 'crisis' } },
+      { bot_state: { handoff_at: OLD, handoff_reason: 'crisis' } },                                       // old, not counted
     ];
     const chats = [
       { id: 'a', category: 'lead', bot_state: q({ phone: '9876543210', service: 'laser', branch: 'Dwarka' }) },  // complete
@@ -2356,7 +2363,7 @@ assert.equal(extractComments({}).length, 0);
     assert.deepEqual(m, { chats: 7, complete: 2, potential: 2, general: 2, comment_dms: 2, comment_leads: 1,
                           top_services: 'laser 3 · PRP 1', branches: 'Dwarka 2 · Adajan 1 · no branch yet 1',
                           pushed: 3, push_failed: 1, price_asked: 2, price_answered: 1, price_no_reply: 1,
-                          safety: 2, kb_miss: 1, turn_cap: 1, bot_messages: 12 });
+                          safety: 2, kb_miss: 1, turn_cap: 1, redirected: 1, abuse: 1, guard: 2, crisis: 1, bot_messages: 12 });
     const empty = computeBotMetrics({ chats: [], stamped: [], commentIds: [], botMessages: 0 }, SINCE);
     assert.equal(empty.top_services, 'none');
     assert.equal(empty.branches, 'none');
@@ -2384,6 +2391,7 @@ assert.equal(extractComments({}).length, 0);
       'Medical / emergency: 2',
       'Bot didn’t know (kb_miss): 1',
       'Turn cap reached: 1',
+      'Guardrails: 1 redirected · 1 abuse · 2 replies held back · 1 distress',
       'Bot messages sent: 12',
       '',
       'Change or stop this report in Settings → Chatbot → Report.',
