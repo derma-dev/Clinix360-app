@@ -1303,8 +1303,8 @@ const DEFAULT_CHATBOT_CONFIG = {
     crisis:        'I’m sorry you’re going through this. I can’t help with that here, but I’ve let our team know.',
   },
   offer_stale_days: 30,              // D10
-  turn_cap: 10,                      // pending open #17
-  conversation_age_cap_days: 7,
+  daily_reply_cap: 30,               // S12c: bot replies per chat per IST day (loop guard); reaching it alerts the owner
+  conversation_age_cap_days: 7,      // days of silence that start a new conversation (caps nothing)
   lead_quiet_hours: 2,               // S2: a chat this long without a message settles → lead push (bot-hourly)
   owner_remind_hours: 2,             // S6: unanswered owner price question → one Telegram reminder
   owner_fallback_hours: 20,          // S6: still unanswered → customer gets canned.owner_no_reply, lead pushed
@@ -1349,7 +1349,7 @@ function renderChatbotConfig() {
   Object.keys(DEFAULT_CHATBOT_CONFIG.canned).forEach(k =>
     set('chatbot-canned-' + k, cfg.canned?.[k] ?? ''));
   set('chatbot-offer-stale-days', cfg.offer_stale_days);
-  set('chatbot-turn-cap', cfg.turn_cap);
+  set('chatbot-daily-reply-cap', cfg.daily_reply_cap);
   set('chatbot-age-cap-days', cfg.conversation_age_cap_days);
   set('chatbot-lead-quiet-hours', cfg.lead_quiet_hours);
   set('chatbot-owner-remind-hours', cfg.owner_remind_hours);
@@ -1396,7 +1396,7 @@ function collectChatbotConfigFromForm() {
     model: (val('chatbot-model') || '').trim() || DEFAULT_CHATBOT_CONFIG.model,
     canned,
     offer_stale_days: int('chatbot-offer-stale-days', 0, DEFAULT_CHATBOT_CONFIG.offer_stale_days),
-    turn_cap:         int('chatbot-turn-cap', 1, DEFAULT_CHATBOT_CONFIG.turn_cap),
+    daily_reply_cap:  int('chatbot-daily-reply-cap', 1, DEFAULT_CHATBOT_CONFIG.daily_reply_cap),
     conversation_age_cap_days: int('chatbot-age-cap-days', 1, DEFAULT_CHATBOT_CONFIG.conversation_age_cap_days),
     // decimals allowed so a live test can use minutes (0.05 h = 3 min)
     lead_quiet_hours: Math.max(0.05, parseFloat(val('chatbot-lead-quiet-hours')) || DEFAULT_CHATBOT_CONFIG.lead_quiet_hours),

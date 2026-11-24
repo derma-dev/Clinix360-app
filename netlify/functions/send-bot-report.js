@@ -93,7 +93,7 @@ function reportText(m, days) {
     row('Price questions to you', m.price_asked, `${m.price_answered} answered · ${m.price_no_reply} no reply in time`),
     row('Medical / emergency', m.safety),
     row('Bot didn’t know (kb_miss)', m.kb_miss),
-    row('Turn cap reached', m.turn_cap),
+    row('Daily reply limit reached', m.turn_cap),
     row('Guardrails', `${m.redirected} redirected · ${m.abuse} abuse · ${m.guard} replies held back · ${m.crisis} distress`),
     row('Bot messages sent', m.bot_messages),
     '',

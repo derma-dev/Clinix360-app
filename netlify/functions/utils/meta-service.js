@@ -2021,7 +2021,7 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     // S12b G1: a held-back reply gets the hold line; staff answer instead.
     if (decision.reason === 'guard')     text = cannedCopy(cfg, 'kb_miss') || cannedCopy(cfg, 'llm_error');
     if (decision.reason === 'llm_error') text = cannedCopy(cfg, 'llm_error');
-    // A capped thread gets the same hold copy — going silent after 10 bot turns
+    // A capped chat gets the same hold copy — going silent at the daily limit
     // would be a dead end (D13 spirit). A dedicated canned.turn_cap wins if set.
     if (decision.reason === 'turn_cap')  text = cannedCopy(cfg, 'turn_cap') || cannedCopy(cfg, 'llm_error');
     // S6: the owner never answered the price; a config saved before S6 lacks this copy.
@@ -2105,9 +2105,9 @@ async function telegramApi(method, body) {
 // Plain text, so customer words need no escaping. Returns the Message.
 const sendTelegram = (chatId, text, extra = {}) => telegramApi('sendMessage', { chat_id: chatId, text, ...extra });
 
-// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies, S12b GQ1 distress). kb_miss is a
-// price question by now (Q30, see botReply); the rest are FYIs. Medical,
-// turn_cap and soft handoffs alert nobody. One alert per thread per incident
+// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies, S12b GQ1 distress, S12c the
+// daily reply limit). kb_miss is a price question by now (Q30, see botReply); the rest are
+// FYIs. Medical and soft handoffs alert nobody. One alert per thread per incident
 // comes free: each of these switches the bot off for the thread, so the next
 // message can't alert again (an LLM outage pings once per chat, not per message).
 const OWNER_ALERTS = {
@@ -2116,6 +2116,7 @@ const OWNER_ALERTS = {
   crisis:    { head: '🆘 Distress message',    ask: 'The bot sent one short line and stepped back. Please reach out to them yourself.' },
   requested: { head: '🙋 Asked for a person',  ask: 'The bot has stepped back. Please answer them yourself.' },
   llm_error: { head: '⚠️ Bot error',           ask: 'They were told the team will help. Please answer them yourself.' },
+  turn_cap:  { head: '🔁 Reply limit reached', ask: 'The bot has answered this chat its daily limit and stepped back. It may be another business’s auto-reply. Please check it yourself.' },
 };
 
 // Telegram to the bound owner (settings.telegram_owner, set by telegram-webhook).
@@ -3080,15 +3081,10 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // D7 layer 2 — is_medical on the model's own decision overrides its reply.
     let decision, llmError = null, firstBotTurn = true, offer = null, image = null, said = [ev.messageText], typed = '', branches = [];
     const tier = classifyInbound(ev.messageText);
-    // Open #17 caps — checked after the safety net (a medical/urgent inbound on a
-    // capped thread still hands off as medical, which outranks the cap) and before
-    // Gemini, so a capped thread spends no call. turn_count ticks on each normal
-    // live bot turn. Both caps count per conversation: a customer who writes again
-    // after more than the age cap of silence starts a new one, with a fresh
-    // bot_state (counter, qualification, lead push) and only its own messages as
-    // context (live 2026-11-23: a returning customer got the cap's hold line, and
-    // no one was alerted). Conversation age = from its first message, else the lead row's age.
-    const turnCap = Number(cfg.turn_cap ?? 10);
+    // A customer who writes again after more than conversation_age_cap_days of
+    // silence starts a new conversation: a fresh bot_state (counter, qualification,
+    // lead push) and only its own messages as context (live 2026-11-23). Despite
+    // the key's name it caps nothing: the bot is on 24/7 (S12c R1).
     const ageCap  = Number(cfg.conversation_age_cap_days ?? 7) * 86400000;
     const rows    = await db.listRecentMessages(lead.id, 10);
     const gapAt   = conversationStart(rows, ageCap);
@@ -3097,10 +3093,14 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     const convStart = Math.max(gapAt || 0, known || 0);
     // Undated rows stay: only a known earlier conversation is dropped.
     const convRows  = convStart ? rows.filter(m => !(Date.parse(m.created_at) < convStart)) : rows;
-    const turns   = Number(lead.bot_state?.turn_count || 0);
-    const ageFrom = convStart || Date.parse(lead.created_at || '');
-    const overCap = turns >= turnCap
-                 || (ageCap > 0 && Number.isFinite(ageFrom) && Date.now() - ageFrom > ageCap);
+    // S12c H1 — the runaway guard (another business's auto-reply can talk to ours
+    // forever): daily_reply_cap bot replies per chat per IST day. Checked after the
+    // safety net (a medical inbound on a capped chat still hands off as medical)
+    // and before Gemini, so a capped chat spends no call. turn_count ticks on each
+    // delivered normal live turn and starts again each day.
+    const today   = isoAt(Date.now() + 5.5 * 3600e3).slice(0, 10);
+    const turns   = lead.bot_state?.turn_day === today ? Number(lead.bot_state.turn_count || 0) : 0;
+    const overCap = turns >= Number(cfg.daily_reply_cap ?? 30);
     // S12b G2 — redirect is checked after the caps: a capped thread gets the cap
     // handoff, not endless redirects.
     if (tier && tier !== 'redirect') {
@@ -3109,10 +3109,8 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       // non-lead reply. The crisis line goes alone (GQ1); the rest send nothing.
       firstBotTurn = tier === 'abuse' && !convRows.some(m => m.is_bot);
     } else if (overCap) {
-      // A turn-capped thread has prior bot replies (the counter only ticks on
-      // sends), so disclosure was already sent. An age-cap-only thread may
-      // genuinely still need it.
-      firstBotTurn = turns < turnCap;
+      // The counter only ticks on sends, so a capped chat had bot replies today: disclosed.
+      firstBotTurn = false;
       decision = { reason: 'turn_cap', reply: '', kb_covers: false, handoff: true, category: 'lead' };
     } else {
       // Context: last ~10 turns of this conversation, minus the inbound this call is answering.
@@ -3242,9 +3240,10 @@ async function botReply(lead, ev, platform, inboundRow = null) {
       lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
       message: text, is_seen: true, is_bot: true,
     });
-    // Open #17 — the cap counter ticks only on a delivered normal turn (a failed
+    // S12c H1 — the daily counter ticks only on a delivered normal turn (a failed
     // send throws above and never persists; handoff/non-lead replies are terminal).
     botState.turn_count = turns + 1;
+    botState.turn_day   = today;
     if (decision.reason === 'redirect') botState.redirected_at = new Date().toISOString();   // G6 counts these
     if (decision.reason === 'kb_miss' && !decision.kb_covers) {
       botState.team_questions = [...(botState.team_questions || []), String(ev.messageText || '').slice(0, 200)].slice(-5);

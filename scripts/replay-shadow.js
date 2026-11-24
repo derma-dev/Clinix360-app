@@ -147,16 +147,16 @@ function staffReplyAfter(messages, i) {
 
 // ── replay one thread ──
 async function replayThread(thread, cfg, append) {
-  const cap = Number(cfg.turn_cap ?? 10);
-  const ageCapMs = Number(cfg.conversation_age_cap_days ?? 7) * 86400000;
-  let turns = 0, firstAt = null, ageResetAt = null, lastOffer = null, leadCategory = null;
+  const cap = Number(cfg.daily_reply_cap ?? 30);
+  let turns = 0, turnDay = null, lastOffer = null, leadCategory = null;
 
   const msgs = thread.messages;
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m.dir !== 'in' || m.canned || !m.text) continue;
     const clock = Date.parse(m.at);
-    firstAt ??= clock; ageResetAt ??= clock;
+    const day = new Date(clock + 5.5 * 3600e3).toISOString().slice(0, 10);   // IST, as botReply
+    if (day !== turnDay) { turns = 0; turnDay = day; }
 
     const row = { run: RUN, thread_id: thread.thread_id, username: thread.username,
                   bucket: bucketOf(thread), turn_index: i, at: m.at, synthetic_turn_count: turns,
@@ -169,17 +169,17 @@ async function replayThread(thread, cfg, append) {
       : m.text;
     // D7 layer 1 — safety net first, Gemini never runs (same order as botReply).
     const tier = classifyInbound(inboundText);
-    // Open #17 caps with the synthetic counter (shadow replay can't tick the live
-    // one). After logging a cap we reset the window and keep drafting — a faithful
+    // S12c daily reply limit with the synthetic counter (shadow replay can't tick the
+    // live one). After logging a cap we reset the counter and keep drafting — a faithful
     // stop would end the thread (bot off), and one row per cap is all review needs.
-    const overCap = turns >= cap || (ageCapMs > 0 && clock - Math.max(firstAt, ageResetAt) > ageCapMs);
+    const overCap = turns >= cap;
 
     try {
       if (tier && tier !== 'redirect') {
         row.decision = tierDecision(tier, cfg);
       } else if (overCap) {
         row.decision = { reason: 'turn_cap', reply: '', kb_covers: false, handoff: true, category: 'lead' };
-        turns = 0; ageResetAt = clock;
+        turns = 0;
       } else if (tier === 'redirect') {
         // S12b G2: after the caps, as in botReply — a fixed line, no Gemini call, a counted turn.
         row.decision = tierDecision(tier, cfg);
@@ -257,7 +257,7 @@ const RUN = new Date().toISOString();
   const cfg = await loadConfig();
   const pl = await getSettingJson('price_list');   // S11c: same rule as getBotConfig, a list only with items
   if (pl?.items) cfg.price_list = pl;
-  console.log(`[replay] config: model=${cfg.model} mode=${cfg.mode} turn_cap=${cfg.turn_cap} age_cap=${cfg.conversation_age_cap_days}d kb=${cfg.kb?.entries?.length} entries` +
+  console.log(`[replay] config: model=${cfg.model} mode=${cfg.mode} daily_reply_cap=${cfg.daily_reply_cap ?? 30} kb=${cfg.kb?.entries?.length} entries` +
               ` prices=${pl?.items ? `${pl.items.length} from the sheet (synced ${pl.synced_at})` : 'none, KB prices'}`);
 
   // Resume: skip threads whose last row is marked done. A stopped run leaves one
