@@ -1306,6 +1306,7 @@ const DEFAULT_CHATBOT_CONFIG = {
   daily_reply_cap: 30,               // S12c: bot replies per chat per IST day (loop guard); reaching it alerts the owner
   conversation_age_cap_days: 7,      // days of silence that start a new conversation (caps nothing)
   resume_after_hours: 48,            // S12c: a chat staff took over is the bot's again after this many quiet hours (0 = never)
+  handback_phrase: '',               // S12c: a staff message containing this gives the chat back to the bot ('' = off, under 8 chars ignored)
   lead_quiet_hours: 2,               // S2: a chat this long without a message settles → lead push (bot-hourly)
   owner_remind_hours: 2,             // S6: unanswered owner price question → one Telegram reminder
   owner_fallback_hours: 20,          // S6: still unanswered → customer gets canned.owner_no_reply, lead pushed
@@ -1353,6 +1354,7 @@ function renderChatbotConfig() {
   set('chatbot-daily-reply-cap', cfg.daily_reply_cap);
   set('chatbot-age-cap-days', cfg.conversation_age_cap_days);
   set('chatbot-resume-after-hours', cfg.resume_after_hours);
+  set('chatbot-handback-phrase', cfg.handback_phrase || '');
   set('chatbot-lead-quiet-hours', cfg.lead_quiet_hours);
   set('chatbot-owner-remind-hours', cfg.owner_remind_hours);
   set('chatbot-owner-fallback-hours', cfg.owner_fallback_hours);
@@ -1403,6 +1405,7 @@ function collectChatbotConfigFromForm() {
     conversation_age_cap_days: int('chatbot-age-cap-days', 1, DEFAULT_CHATBOT_CONFIG.conversation_age_cap_days),
     // 0 is a real value (never), so no `|| default`; decimals for the live test (0.05 h)
     resume_after_hours: num('chatbot-resume-after-hours', 0, DEFAULT_CHATBOT_CONFIG.resume_after_hours),
+    handback_phrase:  (val('chatbot-handback-phrase') || '').trim(),
     // decimals allowed so a live test can use minutes (0.05 h = 3 min)
     lead_quiet_hours: Math.max(0.05, parseFloat(val('chatbot-lead-quiet-hours')) || DEFAULT_CHATBOT_CONFIG.lead_quiet_hours),
     owner_remind_hours: Math.max(0.01, parseFloat(val('chatbot-owner-remind-hours')) || DEFAULT_CHATBOT_CONFIG.owner_remind_hours),

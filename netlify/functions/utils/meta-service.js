@@ -1012,13 +1012,42 @@ async function replyOnLeadNumber(ev) {
 }
 
 // ── Staff replies from the Instagram / Messenger app ──────────
-// The dashboard's meta-send flips D12 takeover itself; a reply typed in the IG
+// The dashboard's meta-send calls staffReplied itself; a reply typed in the IG
 // app reaches us only as an echo — the same is_echo copy Meta sends for each of
 // our own API sends. IG echoes carry no app_id, so "ours" = an outgoing row for
 // this lead with the same text in the last 2 min (each of our send paths stores
 // its row right after the API returns — the wait covers that race). Anything
 // else is a human in the app: store it so the dashboard shows it, then take over.
 const ECHO_MATCH_MS = 120000;
+
+// S12c R5 — the agreed sign-off (chatbot_config.handback_phrase) anywhere in a
+// staff message, case and spacing ignored. Under 8 characters it's ignored, so
+// "ok" or "thanks" can never hand a chat back. Empty = off.
+const squash = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+function isHandback(text, phrase) {
+  const p = squash(phrase);
+  return p.length >= 8 && squash(text).includes(p);
+}
+
+// Both staff paths (an IG-app echo, a dashboard send) end here. A human message
+// is a takeover (D12), unless it carries the sign-off: then the bot takes the
+// chat back at once. Returns true for a hand-back.
+async function staffReplied(db, lead, text) {
+  const back = isHandback(text, (await getBotConfig())?.handback_phrase);
+  if (!back && lead.bot_active !== false) await db.updateLead(lead.id, { bot_active: false });
+  try {
+    await maybeCaptureKbCandidate(db, lead, text);
+  } catch (e) {
+    console.error(`[meta-service] kb_candidates capture failed on lead ${lead.id}:`, e.message);
+  }
+  if (!back) return false;
+  // Re-read after the capture (it writes the bot_state it was handed) and any
+  // customer turn meanwhile, so this write keeps both (Risk 4).
+  const fresh = (await db.getLeadById(lead.id)) || lead;
+  await db.updateLead(lead.id, { bot_active: true, bot_state: { ...fresh.bot_state,
+    resumed_at: new Date().toISOString(), resumed_by: 'signoff' } });
+  return true;
+}
 
 async function processEcho(ev, platform, settleMs = 5000) {
   // No customer id (Meta's test button) / nothing to show / our comment-DM
@@ -1038,9 +1067,8 @@ async function processEcho(ev, platform, settleMs = 5000) {
     external_message_id: ev.messageId || null,     // a redelivered echo stores nothing
   });
   if (!inserted.length) return;
-  if (lead.bot_active) await db.updateLead(lead.id, { bot_active: false });
-  await maybeCaptureKbCandidate(db, lead, ev.messageText);
-  console.log(`[meta-service] App reply on lead ${lead.id} — stored, bot ${lead.bot_active ? 'taken over' : 'already off'}`);
+  const back = await staffReplied(db, lead, ev.messageText);
+  console.log(`[meta-service] App reply on lead ${lead.id} — stored, bot ${back ? 'given back (sign-off)' : lead.bot_active ? 'taken over' : 'already off'}`);
 }
 
 // ── Send message via Instagram (Send API) ────────────────────
@@ -3291,6 +3319,8 @@ module.exports = {
   extractEvents,
   extractComments,
   processEcho,
+  isHandback,
+  staffReplied,
   matchCommentRule,
   matchBranch,
   idColumnFor,

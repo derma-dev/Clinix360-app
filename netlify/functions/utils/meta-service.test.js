@@ -997,12 +997,21 @@ assert.equal(extractComments({}).length, 0);
     process.env.SUPABASE_URL = 'http://supabase.test';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     const { processEcho } = require('./meta-service');
-    const echoMock = ({ history = [], dup = false } = {}) => {
-      const calls = { fetches: 0, inserts: [], patches: [] };
+    // phrase = chatbot_config.handback_phrase (S12c H3); the lead re-read returns
+    // the latest written bot_state, else `fresh` (a customer turn's write meanwhile)
+    const echoMock = ({ history = [], dup = false, phrase = '', fresh = {},
+                        lead = { id: 'L1', branch_id: 'B1', bot_active: true, bot_state: {} } } = {}) => {
+      const calls = { fetches: 0, inserts: [], patches: [], kb: [] };
       global.fetch = async (url, opts = {}) => {
         calls.fetches++;
+        if (url.includes('/settings?key=eq.chatbot_config'))
+          return { ok: true, json: async () => [{ value: JSON.stringify({ handback_phrase: phrase }) }] };
+        if (url.includes('/settings?key=eq.')) return { ok: true, json: async () => [] };
+        if (url.includes('/kb_candidates')) { calls.kb.push(JSON.parse(opts.body)); return { ok: true, json: async () => [] }; }
+        if (url.includes('/leads?id=eq.L1&select='))
+          return { ok: true, json: async () => [{ id: 'L1', bot_state: calls.patches.findLast(p => p.bot_state)?.bot_state || fresh }] };
         if (url.includes('/leads?instagram_user_id=eq.IGSID_9'))
-          return { ok: true, json: async () => [{ id: 'L1', branch_id: 'B1', bot_active: true, bot_state: {} }] };
+          return { ok: true, json: async () => [lead] };
         if (url.includes('lead_messages?lead_id=eq.')) return { ok: true, json: async () => [...history].reverse() };
         if (url.includes('/lead_messages') && opts.method === 'POST') {
           calls.inserts.push(JSON.parse(opts.body));
@@ -1049,6 +1058,62 @@ assert.equal(extractComments({}).length, 0);
     await processEcho(echo('📎 template', { attachment: { type: 'template' } }), 'instagram', 0);
     await processEcho(echo('hi', { recipientId: undefined }), 'instagram', 0);
     assert.equal(calls.fetches, 0);
+
+    // S12c H3 (R5) — a staff message carrying the sign-off gives the chat back at once
+    const { isHandback } = require('./meta-service');
+    const SIGNOFF = 'Thanks for chatting with DSkin';
+    calls = echoMock({ phrase: SIGNOFF, fresh: { turn_count: 4, qualification: { service: 'HYDRA FACIAL 1s' } } });
+    await processEcho(echo('Done!  thanks for CHATTING\nwith dskin 🙏'), 'instagram', 0);
+    assert.equal(calls.inserts.length, 1, 'stored like any app reply');
+    assert.equal(calls.patches.length, 1, 'no takeover flip on the way');
+    assert.equal(calls.patches[0].bot_active, true);
+    assert.equal(calls.patches[0].bot_state.resumed_by, 'signoff');
+    assert.ok(Date.now() - Date.parse(calls.patches[0].bot_state.resumed_at) < 60000);
+    assert.equal(calls.patches[0].bot_state.turn_count, 4, 'the re-read lead’s bot_state is kept');
+    // without it → the takeover, as before
+    calls = echoMock({ phrase: SIGNOFF });
+    await processEcho(echo('Hi, Dr. Mehta here'), 'instagram', 0);
+    assert.deepEqual(calls.patches, [{ bot_active: false }]);
+    // a phrase under 8 characters, or none → ignored
+    for (const phrase of ['thanks', '']) {
+      calls = echoMock({ phrase });
+      await processEcho(echo('thanks'), 'instagram', 0);
+      assert.deepEqual(calls.patches, [{ bot_active: false }], `phrase "${phrase}" is off`);
+    }
+    assert.equal(isHandback('ok thanks', 'thanks'), false);
+    assert.equal(isHandback('ok thanks for chatting', 'Thanks for chatting'), true);
+    // our own bot send containing the phrase → ours: nothing stored, nothing flips
+    calls = echoMock({ phrase: SIGNOFF, history: [{ id: 'o1', direction: 'outgoing', message: `${SIGNOFF}!`, is_bot: true, created_at: now }] });
+    await processEcho(echo(`${SIGNOFF}!`), 'instagram', 0);
+    assert.equal(calls.inserts.length + calls.patches.length, 0);
+    // a sign-off that is also the first staff reply on a price question: the KB capture
+    // still happens, and the hand-back's write keeps its flag (it re-reads after it)
+    calls = echoMock({ phrase: SIGNOFF, lead: { id: 'L1', branch_id: 'B1', bot_active: false,
+      bot_state: { handoff_reason: 'kb_miss', kb_miss_question: 'laser price?' } } });
+    await processEcho(echo(`It's ₹5,000. ${SIGNOFF}`), 'instagram', 0);
+    assert.equal(calls.kb.length, 1);
+    assert.equal(calls.patches.at(-1).bot_active, true);
+    assert.equal(calls.patches.at(-1).bot_state.kb_candidate_captured, true);
+    assert.equal(calls.patches.at(-1).bot_state.resumed_by, 'signoff');
+
+    // the dashboard path (meta-send) goes through the same helper
+    process.env.INTERNAL_FUNCTION_SECRET = 'int_secret';
+    process.env.META_ACCESS_TOKEN = 'ig_token';
+    const { handler: metaSend } = require('../meta-send');
+    for (const [text, active] of [[`See you soon! ${SIGNOFF}`, true], ['Your slot is 11am', false]]) {
+      calls = echoMock({ phrase: SIGNOFF });
+      const igFetch = global.fetch;
+      global.fetch = async (url, opts) => url.includes('graph.instagram.com')
+        ? { ok: true, json: async () => ({ message_id: 'm_staff' }) }
+        : url.includes('/leads?id=eq.L1&select=') && !calls.patches.length
+          ? { ok: true, json: async () => [{ id: 'L1', branch_id: 'B1', source: 'instagram', instagram_user_id: 'IGSID_9', bot_state: {} }] }
+          : igFetch(url, opts);
+      const res = await metaSend({ httpMethod: 'POST', headers: { 'x-internal-secret': 'int_secret' },
+                                   body: JSON.stringify({ leadId: 'L1', message: text }) });
+      assert.equal(res.statusCode, 200, res.body);
+      assert.equal(calls.patches.at(-1).bot_active, active, text);
+    }
+    delete process.env.INTERNAL_FUNCTION_SECRET;
   }
 
   // ── botReply: the full turn pipeline (§8.1 — Steps 8–12) ──
