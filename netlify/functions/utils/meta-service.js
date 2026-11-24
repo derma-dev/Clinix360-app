@@ -2304,7 +2304,10 @@ async function pushLead(db, lead, cfg, quiet = false) {
       if (!wa[branch]) r = { ok: false, error: `no number for ${branch} in branch_whatsapp` };
       else {
         const price = priceQuoted(bs, cfg);
-        const about = await leadSummary(cfg.model, await db.listRecentMessages(lead.id, 50), q, price);
+        // Only this conversation (botReply's conv_started_at): a returning customer's old chat isn't this lead.
+        const since = Date.parse(bs.conv_started_at || '');
+        const about = await leadSummary(cfg.model, (await db.listRecentMessages(lead.id, 50))
+          .filter(m => !(Date.parse(m.created_at) < since)), q, price);
         r = await sendWhatsAppTemplate(wa[branch], 'lead_alert', [type.replace('_', ' '), branch, lead.customer_name,
               q.phone, q.service, q.preferred_time, price, about, conversationUrl])
               .then(() => ({ ok: true }), e => ({ ok: false, error: e.message }));
@@ -3048,6 +3051,20 @@ function closingTurn(bs, text, cfg, branches = []) {
            qualification: phone ? { phone: text } : { branch: branch.name } };
 }
 
+// The latest silence longer than ageCap in rows (oldest first, the inbound included)
+// → the time (ms) of the message after it: where the current conversation began.
+// No such gap in the last 10 rows, or the cap is off → null. Searching the rows,
+// not just the turn's own message, finds the gap for a burst after it and for a
+// comment's private reply (an outgoing row) followed by the customer's answer.
+function conversationStart(rows, ageCap) {
+  if (!(ageCap > 0)) return null;
+  for (let i = rows.length - 1; i > 0; i--) {
+    const t = Date.parse(rows[i].created_at);
+    if (t - Date.parse(rows[i - 1].created_at) > ageCap) return t;
+  }
+  return null;
+}
+
 async function botReply(lead, ev, platform, inboundRow = null) {
   const t0 = Date.now();
   try {
@@ -3066,31 +3083,42 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // Open #17 caps — checked after the safety net (a medical/urgent inbound on a
     // capped thread still hands off as medical, which outranks the cap) and before
     // Gemini, so a capped thread spends no call. turn_count ticks on each normal
-    // live bot turn; conversation age = the lead row's age.
-    const turns   = Number(lead.bot_state?.turn_count || 0);
+    // live bot turn. Both caps count per conversation: a customer who writes again
+    // after more than the age cap of silence starts a new one, with a fresh
+    // bot_state (counter, qualification, lead push) and only its own messages as
+    // context (live 2026-11-23: a returning customer got the cap's hold line, and
+    // no one was alerted). Conversation age = from its first message, else the lead row's age.
     const turnCap = Number(cfg.turn_cap ?? 10);
     const ageCap  = Number(cfg.conversation_age_cap_days ?? 7) * 86400000;
-    const created = Date.parse(lead.created_at || '');
+    const rows    = await db.listRecentMessages(lead.id, 10);
+    const gapAt   = conversationStart(rows, ageCap);
+    const known   = Date.parse(lead.bot_state?.conv_started_at || '');
+    if (gapAt && !(gapAt <= known)) lead = { ...lead, bot_state: { conv_started_at: new Date(gapAt).toISOString() } };
+    const convStart = Math.max(gapAt || 0, known || 0);
+    // Undated rows stay: only a known earlier conversation is dropped.
+    const convRows  = convStart ? rows.filter(m => !(Date.parse(m.created_at) < convStart)) : rows;
+    const turns   = Number(lead.bot_state?.turn_count || 0);
+    const ageFrom = convStart || Date.parse(lead.created_at || '');
     const overCap = turns >= turnCap
-                 || (ageCap > 0 && Number.isFinite(created) && Date.now() - created > ageCap);
+                 || (ageCap > 0 && Number.isFinite(ageFrom) && Date.now() - ageFrom > ageCap);
     // S12b G2 — redirect is checked after the caps: a capped thread gets the cap
     // handoff, not endless redirects.
     if (tier && tier !== 'redirect') {
       decision = tierDecision(tier, cfg);
       // The abuse line gets the D15 disclosure on a first bot message, like any
       // non-lead reply. The crisis line goes alone (GQ1); the rest send nothing.
-      firstBotTurn = tier === 'abuse' && !(await db.listRecentMessages(lead.id, 10)).some(m => m.is_bot);
+      firstBotTurn = tier === 'abuse' && !convRows.some(m => m.is_bot);
     } else if (overCap) {
-      // History isn't fetched on this path; a turn-capped thread has prior bot
-      // replies (the counter only ticks on sends), so disclosure was already
-      // sent. An age-cap-only thread may genuinely still need it.
+      // A turn-capped thread has prior bot replies (the counter only ticks on
+      // sends), so disclosure was already sent. An age-cap-only thread may
+      // genuinely still need it.
       firstBotTurn = turns < turnCap;
       decision = { reason: 'turn_cap', reply: '', kb_covers: false, handoff: true, category: 'lead' };
     } else {
-      // Context: last ~10 turns, minus the inbound this call is answering.
+      // Context: last ~10 turns of this conversation, minus the inbound this call is answering.
       // A comment starts a new conversation: an older chat about another service
       // made "the price" after a Hydra comment mean that service (live 2026-10-20).
-      const rows = await db.listRecentMessages(lead.id, 10);
+      const rows = convRows;
       // What the customer has said since our last reply, this message included.
       said = [...rows.slice(rows.findLastIndex(m => !isIncomingRow(m)) + 1)
                 .filter(m => m.id !== inboundRow?.id).map(m => m.message), ev.messageText];

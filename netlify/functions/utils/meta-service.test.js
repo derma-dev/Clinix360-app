@@ -1927,6 +1927,45 @@ assert.equal(extractComments({}).length, 0);
       assert.deepEqual(await botReply({ ...LEAD, bot_state: { turn_count: 10 } }, EV, 'instagram'), { shadow: true });
       assert.equal(calls.shadowLogs[0].decision.reason, 'turn_cap');
       assert.equal(calls.sends.length + calls.patches.length, 0);
+
+      // a customer back after more than the age cap of silence starts a NEW conversation
+      // (live 2026-11-23: a 7-day-old thread got the cap's hold line and no alert): fresh
+      // counter, qualification and lead push, the disclosure again, and only its own messages as context
+      const ago = (d) => new Date(Date.now() - d * 864e5).toISOString();
+      const back = [
+        { id: 'o1', direction: 'incoming', message: 'hydra facial price?', is_bot: false, created_at: ago(15) },
+        { id: 'o2', direction: 'outgoing', message: 'Hydra is ₹3,000',     is_bot: true,  created_at: ago(15) },
+        { id: 'n1', direction: 'incoming', message: 'price of laser',      is_bot: false, created_at: ago(0) },
+      ];
+      const returning = { ...LEAD, created_at: ago(20), bot_state: { turn_count: 10,
+        qualification: { service: 'HYDRA FACIAL 1s', phone: '9876543210' }, lead_pushed: { lead: ago(15) } } };
+      calls = botMock({ config: CFG('live'), history: back, decision: { ...REPLY_DECISION, qualification: {} } });
+      assert.deepEqual(await botReply(returning, EV, 'instagram', { id: 'n1' }), { sent: true });
+      assert.ok(calls.sends[0].message.text.startsWith('Hi! I am the clinic’s assistant'), 'a new conversation discloses again');
+      assert.equal(JSON.parse(calls.gemini[0].opts.body).contents.length, 1, 'the earlier conversation is not context');
+      b = calls.patches[0].body.bot_state;
+      assert.equal(b.turn_count, 1);
+      assert.equal(b.conv_started_at, back[2].created_at);
+      assert.equal(b.lead_pushed, undefined, 'the new conversation can push its own lead');
+      assert.equal(b.qualification.phone, undefined, 'the old number is not carried over');
+
+      // …its next turn stays in that conversation: no second reset, aged from its start, not the lead row
+      const cont = [...back,
+        { id: 'n2', direction: 'outgoing', message: 'Full body laser is ₹35,000', is_bot: true,  created_at: ago(0) },
+        { id: 'n3', direction: 'incoming', message: 'janakpuri',                  is_bot: false, created_at: ago(0) }];
+      calls = botMock({ config: CFG('live'), history: cont, decision: REPLY_DECISION });
+      assert.deepEqual(await botReply({ ...returning, bot_state: { conv_started_at: back[2].created_at, turn_count: 1 } },
+        EV, 'instagram', { id: 'n3' }), { sent: true });
+      b = calls.patches[0].body.bot_state;
+      assert.equal(b.turn_count, 2);
+      assert.equal(b.conv_started_at, back[2].created_at);
+      assert.equal(JSON.parse(calls.gemini[0].opts.body).contents.length, 3, 'this conversation (n1, n2) + the current message');
+
+      // shadow drafts the returning customer's turn too, and persists nothing (D19)
+      calls = botMock({ config: CFG('shadow'), history: back, decision: REPLY_DECISION });
+      assert.deepEqual(await botReply(returning, EV, 'instagram', { id: 'n1' }), { shadow: true });
+      assert.notEqual(calls.shadowLogs[0].decision.reason, 'turn_cap');
+      assert.equal(calls.sends.length + calls.patches.length, 0);
     }
 
     // 19) S3 owner alerts (Q12 Q30 Q32): Telegram to the bound owner, email as
@@ -2624,6 +2663,11 @@ assert.equal(extractComments({}).length, 0);
       calls = pushMock({ history: [{ id: 'm1', direction: 'incoming', message: 'y'.repeat(400), is_bot: false, created_at: '2026-10-02T04:45:00Z' }] });
       await pushLead(db, LEAD, WA_CFG);
       assert.equal(params(calls)[7], 'y'.repeat(249) + '…');
+      // A returning customer's earlier conversation stays out of the new lead's summary
+      calls = pushMock({ history: [{ id: 'm0', direction: 'incoming', message: 'hydra price?', is_bot: false,
+                                     created_at: '2026-09-10T04:45:00Z' }, ...HISTORY] });
+      await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, conv_started_at: HISTORY[0].created_at } }, WA_CFG);
+      assert.equal(params(calls)[7], 'laser price? / 9876543210');
 
       const sumReq = [];
       calls = pushMock({ history: HISTORY, botTurn: { summary: SUM } });
