@@ -36,6 +36,8 @@ function computeBotMetrics({ chats, stamped, commentIds, botMessages }, since) {
   const complete  = leads.filter(l => { const q = qOf(l); return has(q.phone) && (has(q.branch) || has(q.location)); }).length;
   const handoffs  = stamped.filter(l => inWindow(l.bot_state?.handoff_at));
   const count     = (r) => handoffs.filter(h => h.bot_state?.handoff_reason === r).length;
+  // S12c: one resume stamp per lead (the latest), so a chat resumed twice in the window counts once
+  const resumed   = (by) => stamped.filter(l => inWindow(l.bot_state?.resumed_at) && l.bot_state.resumed_by === by).length;
   let pushed = 0, pushFailed = 0;
   for (const { bot_state: bs } of stamped) {
     const sent = bs?.lead_pushed || {}, alerted = bs?.lead_push_alerted || {};
@@ -64,6 +66,8 @@ function computeBotMetrics({ chats, stamped, commentIds, botMessages }, since) {
     abuse: stamped.filter(l => inWindow(l.bot_state?.abuse_at)).length,
     guard: count('guard'),
     crisis: count('crisis'),
+    resumed_signoff: resumed('signoff'),
+    resumed_quiet: resumed('quiet'),
     bot_messages: botMessages,
   };
 }
@@ -94,6 +98,7 @@ function reportText(m, days) {
     row('Medical / emergency', m.safety),
     row('Bot didn’t know (kb_miss)', m.kb_miss),
     row('Daily reply limit reached', m.turn_cap),
+    row('Bot back after staff', `${m.resumed_signoff} by sign-off`, `${m.resumed_quiet} after a quiet spell`),
     row('Guardrails', `${m.redirected} redirected · ${m.abuse} abuse · ${m.guard} replies held back · ${m.crisis} distress`),
     row('Bot messages sent', m.bot_messages),
     '',
@@ -121,7 +126,7 @@ const handler = async () => {
   if (!owner?.chat_id) { console.error('[send-bot-report] no Telegram owner linked'); return { statusCode: 500 }; }
 
   const since = new Date(Date.now() - days * 86400e3).toISOString();
-  const stamps = ['handoff_at', 'owner_asked_at', 'owner_answered_at', 'redirected_at', 'abuse_at',
+  const stamps = ['handoff_at', 'owner_asked_at', 'owner_answered_at', 'redirected_at', 'abuse_at', 'resumed_at',
                   'lead_pushed->>lead', 'lead_pushed->>potential_lead',
                   'lead_push_alerted->>lead', 'lead_push_alerted->>potential_lead']
     .map(p => `bot_state${p.includes('->>') ? '->' : '->>'}${p}.gt."${since}"`).join(',');

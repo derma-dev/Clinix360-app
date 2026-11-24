@@ -2544,6 +2544,10 @@ assert.equal(extractComments({}).length, 0);
       { bot_state: { handoff_at: IN, handoff_reason: 'guard', guard: { check: 'gemini_block', blocked: 'SAFETY' } } },
       { bot_state: { handoff_at: IN, handoff_reason: 'crisis' } },
       { bot_state: { handoff_at: OLD, handoff_reason: 'crisis' } },                                       // old, not counted
+      // S12c H4: chats the bot took back from staff
+      { bot_state: { resumed_at: IN, resumed_by: 'quiet' } },
+      { bot_state: { resumed_at: IN, resumed_by: 'signoff' } },
+      { bot_state: { resumed_at: OLD, resumed_by: 'signoff' } },                                          // old, not counted
     ];
     const chats = [
       { id: 'a', category: 'lead', bot_state: q({ phone: '9876543210', service: 'laser', branch: 'Dwarka' }) },  // complete
@@ -2558,7 +2562,8 @@ assert.equal(extractComments({}).length, 0);
     assert.deepEqual(m, { chats: 7, complete: 2, potential: 2, general: 2, comment_dms: 2, comment_leads: 1,
                           top_services: 'laser 3 · PRP 1', branches: 'Dwarka 2 · Adajan 1 · no branch yet 1',
                           pushed: 3, push_failed: 1, price_asked: 2, price_answered: 1, price_no_reply: 1,
-                          safety: 2, kb_miss: 1, turn_cap: 1, redirected: 1, abuse: 1, guard: 2, crisis: 1, bot_messages: 12 });
+                          safety: 2, kb_miss: 1, turn_cap: 1, redirected: 1, abuse: 1, guard: 2, crisis: 1,
+                          resumed_signoff: 1, resumed_quiet: 1, bot_messages: 12 });
     const empty = computeBotMetrics({ chats: [], stamped: [], commentIds: [], botMessages: 0 }, SINCE);
     assert.equal(empty.top_services, 'none');
     assert.equal(empty.branches, 'none');
@@ -2586,6 +2591,7 @@ assert.equal(extractComments({}).length, 0);
       'Medical / emergency: 2',
       'Bot didn’t know (kb_miss): 1',
       'Daily reply limit reached: 1',
+      'Bot back after staff: 1 by sign-off · 1 after a quiet spell',
       'Guardrails: 1 redirected · 1 abuse · 2 replies held back · 1 distress',
       'Bot messages sent: 12',
       '',
