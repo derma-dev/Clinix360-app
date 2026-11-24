@@ -1173,7 +1173,7 @@ assert.equal(extractComments({}).length, 0);
     // A price the KB doesn't have (Q30: the only kb_miss that hands off)
     const PRICE_MISS = { ...REPLY_DECISION, kb_covers: false, asks_price: true, handoff: true, reason: 'kb_miss', reply: '' };
 
-    // 1) bot_active=false → strict no-op, zero network calls
+    // 1) bot_active=false and not quiet (S12c H2: test 18b) → no send, no write, no Gemini
     {
       const calls = botMock({ config: CFG('live') });
       const r = await botReply({ ...LEAD, bot_active: false }, EV, 'instagram');
@@ -1982,6 +1982,82 @@ assert.equal(extractComments({}).length, 0);
       assert.deepEqual(await botReply(returning, EV, 'instagram', { id: 'n1' }), { shadow: true });
       assert.notEqual(calls.shadowLogs[0].decision.reason, 'turn_cap');
       assert.equal(calls.sends.length + calls.patches.length, 0);
+    }
+
+    // 18b) quiet-time resume (S12c H2, R4): a paused chat is the bot's again once it
+    //      has been quiet for resume_after_hours since our side last wrote
+    {
+      const { quietResume } = require('./meta-service');
+      const h   = (n) => new Date(Date.now() - n * 3600e3).toISOString();
+      const row = (id, direction, at, is_bot = false) => ({ id, direction, message: id, is_bot, created_at: at });
+      const q   = (rows, bs = {}, cfg = { resume_after_hours: 48 }) => quietResume({ bot_state: bs }, rows, cfg);
+      const now = row('now', 'incoming', h(0));
+
+      assert.equal(q([row('s', 'outgoing', h(1)), now]), false, 'staff 1 h ago: staff still have it');
+      assert.equal(q([row('s', 'outgoing', h(49)), now]), true, 'staff 49 h ago');
+      assert.equal(q([row('s', 'outgoing', h(96)), row('hello?', 'incoming', h(72)), now]), true,
+        'an unanswered "hello?" 3 d ago: the gap before now counts');
+      const burst = [row('s', 'outgoing', h(72)), row('b1', 'incoming', h(5 / 3600))];
+      assert.equal(q(burst), true, 'a burst after the silence: its first message sees the gap…');
+      assert.equal(q([...burst, now]), true, '…and so does the next');
+      assert.equal(q([row('old', 'incoming', h(240)), row('bot', 'outgoing', h(2), true), row('help', 'incoming', h(2)),
+                      row('s', 'outgoing', h(1)), now]), false, 'a gap before the staff reply never counts');
+      assert.equal(q([row('bot', 'outgoing', h(73), true), row('khujli', 'incoming', h(72)), now]), true,
+        'a medical handoff sends nothing: 3 d of silence after it');
+      assert.equal(q([row('bot', 'outgoing', h(1), true), row('khujli', 'incoming', h(1 / 60)), now]), false,
+        'a second message 1 min after the medical one');
+      assert.equal(q([row('a', 'incoming', h(80)), row('b', 'incoming', h(72)), now]), true,
+        'no outgoing row in view: the gap among the customer’s messages decides');
+      const staff49 = [row('s', 'outgoing', h(49)), now];
+      assert.equal(q(staff49, { abuse_at: h(50) }), false, 'an abusive chat stays off (Q3)');
+      assert.equal(q(staff49, { handoff_reason: 'kb_miss', owner_alert_msg_id: 7 }), false, 'an open owner question waits for the owner');
+      assert.equal(q(staff49, { handoff_reason: 'kb_miss', owner_alert_msg_id: 7, owner_answered_at: h(40) }), true, 'an answered one doesn’t');
+      assert.equal(q(staff49, {}, { resume_after_hours: 0 }), false, '0 = never');
+      assert.equal(q(staff49, {}, {}), true, 'default 48 h…');
+      assert.equal(q([row('s', 'outgoing', h(47)), now], {}, {}), false, '…not 47');
+
+      // botReply: Live → bot on, the reply goes out, the stamp rides in the turn's write
+      const quiet  = [row('Hi, this is the team', 'outgoing', h(49)), row('in1', 'incoming', h(0))];
+      const paused = { ...LEAD, bot_active: false, bot_state: { handoff_reason: 'requested', turn_count: 3, turn_day: TODAY } };
+      let calls = botMock({ config: CFG('live'), history: quiet, decision: REPLY_DECISION });
+      assert.deepEqual(await botReply(paused, EV, 'instagram', { id: 'in1' }), { sent: true });
+      assert.deepEqual(calls.patches[0].body, { bot_active: true });
+      assert.ok(calls.sends[0].message.text.startsWith('Hi! I am the clinic’s assistant'),
+        'no bot message in view → the disclosure: the customer learns it’s the bot again');
+      assert.ok(JSON.stringify(JSON.parse(calls.gemini[0].opts.body).contents).includes('Hi, this is the team'),
+        'the staff message is in the model’s context');
+      let b = calls.patches[1].body.bot_state;
+      assert.equal(b.resumed_by, 'quiet');
+      assert.ok(Date.now() - Date.parse(b.resumed_at) < 60000);
+      assert.equal(b.handoff_reason, 'requested', 'the rest of bot_state is kept');
+      assert.equal(b.turn_count, 4);
+
+      // Shadow → the flip (its one write), one shadow row, nothing sent
+      calls = botMock({ config: CFG('shadow'), history: quiet, decision: REPLY_DECISION });
+      assert.deepEqual(await botReply(paused, EV, 'instagram', { id: 'in1' }), { shadow: true });
+      assert.deepEqual(calls.patches.map(p => p.body), [{ bot_active: true }]);
+      assert.equal(calls.shadowLogs.length, 1);
+      assert.equal(calls.sends.length, 0);
+
+      // not quiet → staff still have it: no write, no Gemini
+      calls = botMock({ config: CFG('live'), history: [row('s', 'outgoing', h(1)), row('in1', 'incoming', h(0))], decision: REPLY_DECISION });
+      assert.deepEqual(await botReply(paused, EV, 'instagram', { id: 'in1' }), { skipped: 'bot_inactive' });
+      assert.equal(calls.patches.length + calls.sends.length + calls.gemini.length, 0);
+
+      // quiet + a medical message → bot on, then the medical handoff pauses it again
+      calls = botMock({ config: CFG('live'), history: quiet });
+      assert.equal((await botReply(paused, { ...EV, messageText: 'khujli ho rahi hai' }, 'instagram', { id: 'in1' })).handoff, 'medical');
+      assert.deepEqual(calls.patches[0].body, { bot_active: true });
+      assert.equal(calls.patches[1].body.bot_active, false);
+      assert.equal(calls.patches[1].body.bot_state.resumed_by, 'quiet');
+
+      // quiet past conversation_age_cap_days → a new conversation too, and the stamp survives the reset
+      calls = botMock({ config: CFG('live'), history: [row('s', 'outgoing', h(24 * 8)), row('in1', 'incoming', h(0))], decision: REPLY_DECISION });
+      assert.deepEqual(await botReply(paused, EV, 'instagram', { id: 'in1' }), { sent: true });
+      b = calls.patches[1].body.bot_state;
+      assert.equal(b.resumed_by, 'quiet');
+      assert.ok(b.conv_started_at, 'a new conversation');
+      assert.equal(b.handoff_reason, undefined, 'the old conversation’s state is gone');
     }
 
     // 19) S3 owner alerts (Q12 Q30 Q32): Telegram to the bound owner, email as

@@ -3066,16 +3066,33 @@ function conversationStart(rows, ageCap) {
   return null;
 }
 
+// S12c R4 — a paused chat is the bot's again once it has gone quiet for
+// resume_after_hours (0 = never) since our side last wrote: a gap before the
+// staff reply never counts. rows: oldest first, the inbound included. An
+// abusive chat stays off (Q3); an open owner price question waits for the owner (R7).
+function quietResume(lead, rows, cfg) {
+  if (lead.bot_state?.abuse_at || ownerQuestionOpen(lead.bot_state)) return false;
+  const ours = Math.max(0, rows.findLastIndex(m => !isIncomingRow(m)));
+  return conversationStart(rows.slice(ours), Number(cfg.resume_after_hours ?? 48) * 3600e3) !== null;
+}
+
 async function botReply(lead, ev, platform, inboundRow = null) {
   const t0 = Date.now();
   try {
-    if (!lead?.bot_active) return { skipped: 'bot_inactive' };
-
     const cfg  = (await getBotConfig()) || {};
     const mode = ['live', 'shadow'].includes(cfg.mode) ? cfg.mode : 'off';
     if (mode === 'off') return { skipped: 'mode_off' };
 
-    const db = createSupabaseClient();
+    const db   = createSupabaseClient();
+    const rows = await db.listRecentMessages(lead.id, 10);
+    // Paused (staff took over, or a hard handoff) → staff have it, unless it went
+    // quiet (R4). The flip happens in shadow too, the one write shadow makes: else
+    // the next message would see no gap, and shadow would skip where live replies.
+    const resumed = !lead.bot_active;
+    if (resumed) {
+      if (!quietResume(lead, rows, cfg)) return { skipped: 'bot_inactive' };
+      await db.updateLead(lead.id, { bot_active: true });
+    }
 
     // D7 layer 1 — the keyword net fires BEFORE Gemini ever runs (both modes).
     // D7 layer 2 — is_medical on the model's own decision overrides its reply.
@@ -3086,10 +3103,11 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // lead push) and only its own messages as context (live 2026-11-23). Despite
     // the key's name it caps nothing: the bot is on 24/7 (S12c R1).
     const ageCap  = Number(cfg.conversation_age_cap_days ?? 7) * 86400000;
-    const rows    = await db.listRecentMessages(lead.id, 10);
     const gapAt   = conversationStart(rows, ageCap);
     const known   = Date.parse(lead.bot_state?.conv_started_at || '');
     if (gapAt && !(gapAt <= known)) lead = { ...lead, bot_state: { conv_started_at: new Date(gapAt).toISOString() } };
+    // After the reset (it would wipe them); the turn's own bot_state write saves them (H4 counts these).
+    if (resumed) lead = { ...lead, bot_state: { ...lead.bot_state, resumed_at: new Date().toISOString(), resumed_by: 'quiet' } };
     const convStart = Math.max(gapAt || 0, known || 0);
     // Undated rows stay: only a known earlier conversation is dropped.
     const convRows  = convStart ? rows.filter(m => !(Date.parse(m.created_at) < convStart)) : rows;
@@ -3298,6 +3316,7 @@ module.exports = {
   handleOwnerUpdate,
   firstPriceIn,
   ownerQuestionOpen,
+  quietResume,
   ownerTimerDue,
   runOwnerTimer,
   draftDigest,
