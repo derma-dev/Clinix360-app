@@ -465,6 +465,16 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(matchBranch('janakpuri', []), null);
   // A blank/missing branch name must not match everything
   assert.equal(matchBranch('janakpuri', [{ id: 'x', name: '' }, { id: 'y' }]), null);
+  // S12d: a typo in the first word still counts (live 2026-11-24: "janakpuii")…
+  for (const [typed, name] of [['hey i want to book a hydrafacial at janakpuii', 'Janakpuri'], ['janakpur', 'Janakpuri'],
+                               ['jankpuri', 'Janakpuri'], ['dwarak', 'Dwarka Sec 12'], ['dwarika', 'Dwarka Sec 12'],
+                               ['kriti nagar', 'Kirti Nagar'], ['Kirthi', 'Kirti Nagar']]) {
+    assert.equal(matchBranch(typed, BRANCHES)?.name, name, typed);
+  }
+  // …but two edits on a short name, a word under 5 letters, or two typo'd branches don't.
+  for (const typed of ['dirty', 'party', 'dwarf', 'kirt', 'janakpuii or dwarak', 'jnkpuuri']) {
+    assert.equal(matchBranch(typed, BRANCHES), null, typed);
+  }
 }
 
 // ── Webhook signature verification (#1) ─────────────────────
@@ -1572,9 +1582,22 @@ assert.equal(extractComments({}).length, 0);
                     decision: { ...REPLY_DECISION, qualification: { branch: 'Kirti Nagar' } } });
       await botReply(LEAD, { ...EV, messageText: 'ok' }, 'instagram');
       assert.equal(c.patches[0].body.bot_state.qualification.branch, 'Kirti Nagar');
+      // S12d: a typo'd branch counts as typed (live 2026-11-24: asked again after "janakpuii").
+      c = botMock({ config: CFG('live'), history: [{ id: 'm0', direction: 'incoming', message: 'hey i want to book a hydrafacial at janakpuii' }, LISTED],
+                    decision: { ...REPLY_DECISION, qualification: { branch: 'Janakpuri' } } });
+      await botReply(LEAD, { ...EV, messageText: 'Saturday 5 pm' }, 'instagram');
+      assert.equal(c.patches[0].body.bot_state.qualification.branch, 'Janakpuri');
+      assert.equal(c.sends[0].message.quick_replies, undefined, 'a known branch: no buttons');
       c = botMock({ config: CFG('live'), history: [LISTED], decision: { ...REPLY_DECISION, qualification: { branch: 'Janakpuri' } } });
       await botReply({ ...LEAD, bot_state: { qualification: { branch: 'Kirti Nagar' } } }, { ...EV, messageText: 'ok' }, 'instagram');
       assert.equal(c.patches[0].body.bot_state.qualification.branch, 'Kirti Nagar');
+      assert.equal(c.sends[0].message.quick_replies, undefined, 'a known branch: no buttons');
+      // S12d: no branch yet → the reply carries every branch as a button; a tap sends its name + BRANCH:<id>.
+      c = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      await botReply(LEAD, EV, 'instagram');
+      assert.deepEqual(c.sends[0].message.quick_replies, [{ content_type: 'text', title: 'Janakpuri', payload: 'BRANCH:JPR' },
+                                                          { content_type: 'text', title: 'Kirti Nagar', payload: 'BRANCH:KN' }]);
+      assert.equal(c.sends[0].message.text, 'Hi! I am the clinic’s assistant 🤖\n\nFull body laser is ₹35,000 per session. Which branch is closest to you?');
 
       // The model closed the booking without a branch: the bot asks it once more instead of handing off…
       const CLOSE = { ...REPLY_DECISION, handoff: true, reason: 'wants_booking', reply: 'Our team will reach out!',
@@ -1587,6 +1610,7 @@ assert.equal(extractComments({}).length, 0);
       r = await botReply(LEAD, { ...EV, messageText: '9998853310' }, 'instagram');
       assert.deepEqual(r, { sent: true });
       assert.equal(c.sends[0].message.text, 'Which of our branches suits you best: Janakpuri or Kirti Nagar?');
+      assert.deepEqual(c.sends[0].message.quick_replies.map(b => b.payload), ['BRANCH:JPR', 'BRANCH:KN'], 'the re-ask has buttons');
       const asked = c.patches[0].body.bot_state;
       assert.ok(asked.branch_asked);
       // …the answer closes it with the fixed closing, no model call…

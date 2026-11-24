@@ -1074,7 +1074,7 @@ async function processEcho(ev, platform, settleMs = 5000) {
 // ── Send message via Instagram (Send API) ────────────────────
 // POST https://graph.instagram.com/v21.0/me/messages
 // Note: 24-hour window — you may only reply within 24h of the user's last message.
-async function sendInstagramMessage(recipientId, text) {
+async function sendInstagramMessage(recipientId, text, quickReplies = []) {
   const { token, igId } = await getIgToken();
   const res  = await fetch(`https://graph.instagram.com/v21.0/${igId}/messages`, {
     method:  'POST',
@@ -1084,7 +1084,7 @@ async function sendInstagramMessage(recipientId, text) {
     },
     body: JSON.stringify({
       recipient: { id: recipientId },
-      message:   { text },
+      message:   quickReplies.length ? { text, quick_replies: quickReplies } : { text },
     }),
   });
 
@@ -1101,7 +1101,7 @@ async function sendInstagramMessage(recipientId, text) {
 // POST https://graph.facebook.com/v21.0/me/messages  (PAGE access token)
 // Note: 24-hour standard messaging window — you may only reply within 24h
 // of the user's last message unless using a message tag.
-async function sendFacebookMessage(recipientId, text) {
+async function sendFacebookMessage(recipientId, text, quickReplies = []) {
   const token = process.env.META_PAGE_ACCESS_TOKEN;
   if (!token) throw new Error('Missing META_PAGE_ACCESS_TOKEN env var');
 
@@ -1113,7 +1113,7 @@ async function sendFacebookMessage(recipientId, text) {
       body: JSON.stringify({
         messaging_type: 'RESPONSE',
         recipient:      { id: recipientId },
-        message:        { text },
+        message:        quickReplies.length ? { text, quick_replies: quickReplies } : { text },
       }),
     }
   );
@@ -1470,12 +1470,43 @@ async function processComment(c) {
 function matchBranch(text, branches) {
   const t = (text || '').toLowerCase();
   if (!t) return null;
-  const hits = branches.filter((b) => {
+  let hits = branches.filter((b) => {
     const name = (b.name || '').toLowerCase();
     return name && (t.includes(name) || t.includes(name.split(' ')[0]));
   });
+  // S12d: no exact hit → a typo in a name's first word counts ("janakpuii", "dwarak",
+  // live 2026-11-24): one edit, two from 8 letters. Words under 5 letters never count.
+  if (!hits.length) {
+    const words = t.match(/\p{L}{5,}/gu) || [];
+    hits = branches.filter((b) => {
+      const w = (b.name || '').toLowerCase().split(' ')[0];
+      return w.length >= 5 && words.some(x => typoDistance(x, w) <= (w.length >= 8 ? 2 : 1));
+    });
+  }
   return hits.length === 1 ? hits[0] : null;
 }
+
+// Edits between two words; a swap of neighbours ("dwarak") is one edit.
+function typoDistance(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+}
+
+// S12d: the branches as quick-reply buttons under the bot's reply. A tap sends the
+// name as text plus BRANCH:<id>, which routeLeadFromReply already routes, so a pick
+// can't be misspelt. Meta: at most 13 buttons, titles stop at 20 characters. A chat
+// the customer started is in their main inbox, where quick replies show (desktop web
+// shows none: the names stay in the text, so typing still works).
+const branchQuickReplies = (branches) => branches.slice(0, 13).map(b => ({
+  content_type: 'text', title: String(b.name || '').slice(0, 20), payload: `BRANCH:${b.id}`,
+}));
 
 // Only ever moves a lead still parked on the META_BRANCH_ID fallback, so it
 // self-disables the moment anyone — customer or staff — assigns the lead. No
@@ -1945,10 +1976,11 @@ async function callAssistant({ model, kb, priceList, history, inboundText, offer
 
 // The bot sends through the SAME per-platform senders staff use — an automated
 // team member typing into the same thread (final plan §3.1), no new send path.
-function sendByPlatform(platform, recipientId, text) {
-  if (platform === 'facebook') return sendFacebookMessage(recipientId, text);
+// quickReplies: Instagram and Messenger only; WhatsApp sends the text alone.
+function sendByPlatform(platform, recipientId, text, quickReplies = []) {
+  if (platform === 'facebook') return sendFacebookMessage(recipientId, text, quickReplies);
   if (platform === 'whatsapp') return sendWhatsAppMessage(recipientId, text);
-  return sendInstagramMessage(recipientId, text);
+  return sendInstagramMessage(recipientId, text, quickReplies);
 }
 
 // D16 — WhatsApp-number capture is digit-normalized in CODE, never by the LLM:
@@ -3281,7 +3313,8 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     let text = String(decision.reply || '').trim();
     if (firstBotTurn && text) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
     if (!text) return { skipped: 'empty_reply' };
-    await sendByPlatform(platform, ev.senderId, text);
+    // S12d: until the chat has a branch, the reply carries the branches as buttons.
+    await sendByPlatform(platform, ev.senderId, text, q.branch ? [] : branchQuickReplies(branches));
     await db.insertMessage({
       lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
       message: text, is_seen: true, is_bot: true,
