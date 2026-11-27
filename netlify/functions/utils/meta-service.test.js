@@ -1362,6 +1362,10 @@ assert.equal(extractComments({}).length, 0);
       assert.deepEqual(await botReply(LEAD, EV, 'instagram'), { shadow: true });
       assert.equal(c3.shadowLogs[0].decision.guard, 'money');
       assert.equal(c3.sends.length, 0);
+      // a blank kb_miss → the hand-off line, never the llm_error try-again line (review §2 F1)
+      const c4 = botMock({ config: CFG('live', { canned: { llm_error: 'Please write again 🙏' } }), decision });
+      await botReply(LEAD, EV, 'instagram');
+      assert.equal(c4.sends[0].message.text, 'Let me connect you with our team right away — they will help you here.');
     }
 
     // 7b3) S12b G2 — the guardrail tiers. None calls Gemini. CFG has no such keys
@@ -1650,27 +1654,50 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.patches[0].body.bot_state.handoff_reason, 'medical');
     }
 
-    // 11) llm_error (D13): Gemini fails → canned "connect you" + handoff; the
-    //     inbound (stored earlier) is untouched and the thread is never silent
+    // 11) llm_error (D13, review §2 F1): Gemini fails → the try-again line once per
+    //     conversation, no buttons, the bot stays on, no handoff, nobody alerted
     {
       const calls = botMock({ config: CFG('live'), geminiError: 'quota exceeded' });
       const r = await botReply(LEAD, EV, 'instagram');
-      assert.equal(r.handoff, 'llm_error');
+      assert.deepEqual(r, { sent: true });
+      assert.equal(calls.sends.length, 1);
       assert.equal(calls.sends[0].message.text,
         'Hi! I am the clinic’s assistant 🤖\n\nLet me connect you with our team.');
-      assert.equal(calls.patches[0].body.bot_active, false);
-      assert.equal(calls.patches[0].body.status, 'qualified');
+      assert.equal(calls.sends[0].message.quick_replies, undefined, 'the error line has no branch buttons');
+      const b = calls.patches[0].body;
+      assert.equal(b.bot_active, undefined, 'the bot stays on');
+      assert.equal(b.status, undefined);
+      assert.equal(b.bot_state.handoff_reason, undefined, 'not a handoff');
+      assert.ok(b.bot_state.llm_error_at, 'stamped: once per conversation');
       // review §2: one error row for us, nothing to the owner
       assert.deepEqual(calls.events.map(e => [e.level, e.kind, e.lead_id]), [['error', 'llm_error', LEAD.id]]);
       assert.match(calls.events[0].message, /quota exceeded/);
       assert.equal(calls.telegrams.length + calls.alerts.length, 0);
+
+      // a second failure in the same conversation → nothing sent, still one row for us
+      const c2 = botMock({ config: CFG('live'), geminiError: 'quota exceeded' });
+      assert.deepEqual(await botReply({ ...LEAD, bot_state: b.bot_state }, EV, 'instagram'), { skipped: 'empty_reply' });
+      assert.equal(c2.sends.length + c2.patches.length + c2.telegrams.length, 0);
+      assert.deepEqual(c2.events.map(e => e.kind), ['llm_error']);
+      // …and the next message tries Gemini again
+      const c3 = botMock({ config: CFG('live'), decision: REPLY_DECISION });
+      assert.deepEqual(await botReply({ ...LEAD, bot_state: b.bot_state }, EV, 'instagram'), { sent: true });
+      assert.equal(c3.gemini.length, 1);
+      // a blank config line → the server's F1 line, not silence
+      const c4 = botMock({ config: CFG('live', { canned: {} }), geminiError: 'boom' });
+      await botReply(LEAD, EV, 'instagram');
+      assert.equal(c4.sends[0].message.text, 'Sorry, I’m having a little trouble right now. Please send your message again in a few minutes 🙏');
+      // a failed send stamps nothing, so the next failure tries the line again
+      const c5 = botMock({ config: CFG('live'), geminiError: 'boom', sendFails: true });
+      assert.ok((await botReply(LEAD, EV, 'instagram')).error);
+      assert.equal(c5.patches.length, 0);
     }
 
     // 12) handoff survives a failed SEND: message delivery is not the handoff
     {
-      const calls = botMock({ config: CFG('live'), geminiError: 'boom', sendFails: true });
+      const calls = botMock({ config: CFG('live'), decision: PRICE_MISS, sendFails: true });
       const r = await botReply(LEAD, EV, 'instagram');
-      assert.equal(r.handoff, 'llm_error', 'handoff completes even when the courtesy reply cannot send');
+      assert.equal(r.handoff, 'kb_miss', 'handoff completes even when the hold reply cannot send');
       assert.equal(calls.patches.length, 1);
       assert.equal(calls.patches[0].body.bot_active, false);
     }
@@ -1958,8 +1985,8 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(r.handoff, 'turn_cap');
       assert.equal(calls.gemini.length, 0, 'a capped chat spends no Gemini call');
       assert.equal(calls.sends.length, 1, 'a capped chat gets the hold copy, not silence');
-      assert.ok(calls.sends[0].message.text.includes('connect you with our team'),
-        'turn_cap reuses the llm_error hold copy (dedicated canned.turn_cap wins if set)');
+      assert.equal(calls.sends[0].message.text, 'Let me connect you with our team right away — they will help you here.',
+        'no canned.turn_cap → its own line, never the llm_error line (review §2 F1)');
       assert.ok(!calls.sends[0].message.text.includes('assistant'),
         'no disclosure prepend — the chat had bot replies today');
       assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'the owner is not told: it’s ours');
@@ -2186,11 +2213,11 @@ assert.equal(extractComments({}).length, 0);
       assert.deepEqual(await botReply({ ...LEAD, ...after }, EV, 'instagram'), { skipped: 'bot_inactive' });
       assert.equal(calls.telegrams.length + calls.alerts.length, 0);
 
-      // a bot error is ours (review §2): no Telegram, no email, one error row; the hold copy still goes
+      // a bot error is ours (review §2): no Telegram, no email, one error row; the try-again line still goes
       calls = botMock({ config: CFG('live'), owner: OWNER, geminiError: 'overloaded' });
-      assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'llm_error');
+      assert.deepEqual(await botReply(LEAD, EV, 'instagram'), { sent: true });
       assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'no owner alert for a bot error');
-      assert.equal(calls.sends.length, 1, 'llm_error still sends its hold copy');
+      assert.equal(calls.sends.length, 1, 'llm_error still sends its line');
       assert.deepEqual(calls.events.map(e => [e.level, e.kind]), [['error', 'llm_error']]);
 
       // medical, soft handoff, normal turn → nobody alerted; only medical leaves a row for us
@@ -3104,10 +3131,11 @@ assert.equal(extractComments({}).length, 0);
     await hourly();
     assert.equal(st.tg.length + st.sends.length + st.hooks.length, 0, 'one reminder, one fallback, one push');
 
-    // A config saved before S6 has no owner_no_reply copy → the llm_error hold copy
-    st = s6({ leads: [mk('G', 21)], msgs: { G: hold(21) }, cfg: { canned: { llm_error: 'Connecting you to our team 🙏' } } });
+    // A config saved before S6 has no owner_no_reply copy → the hand-off line, never the
+    // llm_error line (since F1 it asks the customer to write again; review §2)
+    st = s6({ leads: [mk('G', 21)], msgs: { G: hold(21) }, cfg: { canned: { llm_error: 'Please write again 🙏' } } });
     await hourly();
-    assert.equal(st.sends[0].message.text, 'Connecting you to our team 🙏');
+    assert.equal(st.sends[0].message.text, 'Let me connect you with our team right away — they will help you here.');
 
     // The owner unlinked → the reminder isn't stamped, so the next run tries again
     st = s6({ leads: [mk('U', 3)], msgs: { U: hold(3) }, owner: null });

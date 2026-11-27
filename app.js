@@ -1292,7 +1292,7 @@ const DEFAULT_CHATBOT_CONFIG = {
     sales_pitch:   'Thank you for the information. If you would like to book an appointment, our team is happy to help here!',
     misc:          'Thanks for your message! Our team will get back to you here shortly. 🙏',
     kb_miss:       'Let me check with our team and get back to you here shortly. 🙏',
-    llm_error:     'Let me connect you with our team right away — they will help you here. 🙏',
+    llm_error:     'Sorry, I’m having a little trouble right now. Please send your message again in a few minutes 🙏',
     disclosure:    'Hi! I am the clinic’s assistant 🤖 — I can help with prices, services and bookings, and our team joins in whenever needed.',
     refusal_ok:    'No problem at all — our team will continue here. 🙏',
     owner_no_reply:'Thanks for waiting! Our team will get in touch with you here about this soon. 🙏',

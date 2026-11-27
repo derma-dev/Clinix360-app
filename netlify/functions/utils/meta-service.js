@@ -1636,8 +1636,8 @@ function tierDecision(tier, cfg) {
 
 // ── Gemini client (final plan §3.5 · checklist Step 6) ──
 // Raw fetch generateContent, no SDK. One call per turn, structured output only —
-// we never parse prose. Throws on any failure; the caller maps that to the
-// llm_error canned handoff (D13).
+// we never parse prose. Throws on any failure; botReply maps that to the
+// llm_error line (D13, review §2 F1).
 const ASSISTANT_DECISION_SCHEMA = {
   type: 'OBJECT',
   properties: {
@@ -1992,6 +1992,11 @@ const GUARD_COPY = {
   abuse:    'Sorry, I can’t help with that. If you’d like help with a treatment or an appointment, our team is happy to help.',
   // Review §1: nobody is alerted, so the line promises no one.
   crisis:   'Sorry, I can’t help you with that.',
+  // Review §2 F1: the bot stays on, so the customer just writes again.
+  llm_error: 'Sorry, I’m having a little trouble right now. Please send your message again in a few minutes 🙏',
+  // The line for a chat handed to staff when its own key is blank (llm_error's old
+  // text: since F1 that line tells the customer to write again, wrong once the bot is off).
+  turn_cap: 'Let me connect you with our team right away — they will help you here.',
 };
 
 // One canned-copy lookup that tolerates a missing/truncated config row.
@@ -2059,10 +2064,11 @@ function buildHandoffSummary(reason, botState, ev, guard) {
 }
 
 // Final plan §3.3 — every handoff trigger lands here: safety net, is_medical,
-// model-decided, kb_miss, llm_error. Safety-net tiers send NOTHING (D7 — the
+// model-decided, kb_miss, guard, turn_cap. A Gemini failure isn't a handoff any
+// more (review §2 F1, botReply). Safety-net tiers send NOTHING (D7 — the
 // bot never answers a symptom/urgent message, not even a courtesy line), except
 // crisis's one line (GQ1);
-// kb_miss/llm_error send their canned hold copy (D13); model-decided handoffs
+// kb_miss/guard/turn_cap send their canned hold copy (D13); model-decided handoffs
 // send the model's own closing reply when it wrote one. A failed send never
 // aborts the handoff — staff still get the summary and the lead.
 // SAFETY_HANDOFFS (review §1) turn the bot off and do nothing else: no owner alert,
@@ -2078,13 +2084,12 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   if (!decision.safety_net) {
     if (decision.reason === 'kb_miss')   text = cannedCopy(cfg, 'kb_miss');
     // S12b G1: a held-back reply gets the hold line; staff answer instead.
-    if (decision.reason === 'guard')     text = cannedCopy(cfg, 'kb_miss') || cannedCopy(cfg, 'llm_error');
-    if (decision.reason === 'llm_error') text = cannedCopy(cfg, 'llm_error');
-    // A capped chat gets the same hold copy — going silent at the daily limit
-    // would be a dead end (D13 spirit). A dedicated canned.turn_cap wins if set.
-    if (decision.reason === 'turn_cap')  text = cannedCopy(cfg, 'turn_cap') || cannedCopy(cfg, 'llm_error');
+    if (decision.reason === 'guard')     text = cannedCopy(cfg, 'kb_miss') || GUARD_COPY.turn_cap;
+    // A capped chat gets a line too — going silent at the daily limit would be a
+    // dead end (D13 spirit). Live has no canned.turn_cap, so GUARD_COPY's goes out.
+    if (decision.reason === 'turn_cap')  text = cannedCopy(cfg, 'turn_cap');
     // S6: the owner never answered the price; a config saved before S6 lacks this copy.
-    if (decision.reason === 'owner_no_reply') text = cannedCopy(cfg, 'owner_no_reply') || cannedCopy(cfg, 'llm_error');
+    if (decision.reason === 'owner_no_reply') text = cannedCopy(cfg, 'owner_no_reply') || GUARD_COPY.turn_cap;
     if (!text) text = String(decision.reply || '').trim() || null;
   }
   // S12b G2 (GQ1): distress is the one safety tier that sends a line, and only that line.
@@ -3231,17 +3236,19 @@ async function botReply(lead, ev, platform, inboundRow = null) {
                 || await callAssistant({ model: cfg.model, kb: cfg.kb, priceList: cfg.price_list, history,
                                          inboundText: ev.messageText, offer, image });
       } catch (err) {
-        // D13 — an LLM failure never silences the thread: canned handoff in live,
-        // one error row in shadow.
-        console.error('[meta-service] Gemini failed → llm_error handoff:', err.message);
+        // D13 + review §2 F1 — a Gemini failure keeps the bot on: no handoff, no owner alert.
+        console.error('[meta-service] Gemini failed (llm_error):', err.message);
         llmError = err.message;
         // Ours, not the owner's (review §2): in shadow too, so an outage shows before go-live.
         await logEvent('error', 'llm_error', err.message, { lead_id: lead.id });
-        decision = { reason: 'llm_error', reply: '', kb_covers: false, handoff: true, category: 'lead' };
+        decision = { reason: 'llm_error', reply: '', kb_covers: false, handoff: false, category: 'lead' };
       }
       // The gate allows a number the customer typed in the last 10 messages, or the one on file.
       decision = settleDecision(decision, lead.category, cfg,
                                 { offer, said: [typed, lead.bot_state?.qualification?.phone].join('\n') });
+      // F1: the try-again line once per conversation (bot_state starts fresh with each);
+      // a second failure sends nothing and the next message tries Gemini again.
+      if (llmError) decision = { ...decision, reply: lead.bot_state?.llm_error_at ? '' : cannedCopy(cfg, 'llm_error') };
     }
 
     // D19/D24 — shadow: log exactly one row, send nothing, mutate nothing.
@@ -3319,8 +3326,8 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     let text = String(decision.reply || '').trim();
     if (firstBotTurn && text) text = [cannedCopy(cfg, 'disclosure'), text].filter(Boolean).join('\n\n');
     if (!text) return { skipped: 'empty_reply' };
-    // S12d: until the chat has a branch, the reply carries the branches as buttons.
-    await sendByPlatform(platform, ev.senderId, text, q.branch ? [] : branchQuickReplies(branches));
+    // S12d: until the chat has a branch, the reply carries the branches as buttons (not the error line).
+    await sendByPlatform(platform, ev.senderId, text, q.branch || llmError ? [] : branchQuickReplies(branches));
     await db.insertMessage({
       lead_id: lead.id, branch_id: lead.branch_id, direction: 'outgoing',
       message: text, is_seen: true, is_bot: true,
@@ -3330,6 +3337,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     botState.turn_count = turns + 1;
     botState.turn_day   = today;
     if (decision.reason === 'redirect') botState.redirected_at = new Date().toISOString();   // G6 counts these
+    if (llmError) botState.llm_error_at = new Date().toISOString();                          // F1: once per conversation
     if (decision.reason === 'kb_miss' && !decision.kb_covers) {
       botState.team_questions = [...(botState.team_questions || []), String(ev.messageText || '').slice(0, 200)].slice(-5);
     }
