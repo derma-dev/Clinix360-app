@@ -1311,7 +1311,6 @@ const DEFAULT_CHATBOT_CONFIG = {
   lead_quiet_hours: 2,               // S2: a chat this long without a message settles → lead push (bot-hourly)
   owner_remind_hours: 2,             // S6: unanswered owner price question → one Telegram reminder
   owner_fallback_hours: 20,          // S6: still unanswered → customer gets canned.owner_no_reply, lead pushed
-  draft_digest_hour: 20,             // S11a: shadow mode → the day's drafts to the owner's Telegram at this IST hour
   alert_email: '',                   // '' = default admin address (server side)
   report_frequency: 'off',           // 'off' | 'daily' | 'weekly' — send-bot-report cron
 };
@@ -1359,7 +1358,6 @@ function renderChatbotConfig() {
   set('chatbot-lead-quiet-hours', cfg.lead_quiet_hours);
   set('chatbot-owner-remind-hours', cfg.owner_remind_hours);
   set('chatbot-owner-fallback-hours', cfg.owner_fallback_hours);
-  set('chatbot-draft-digest-hour', cfg.draft_digest_hour);
   set('chatbot-alert-email', cfg.alert_email || '');
   set('chatbot-report-frequency', cfg.report_frequency || 'off');
 
@@ -1412,7 +1410,6 @@ function collectChatbotConfigFromForm() {
     owner_remind_hours: Math.max(0.01, parseFloat(val('chatbot-owner-remind-hours')) || DEFAULT_CHATBOT_CONFIG.owner_remind_hours),
     // under 24 h: the fallback message must land inside Instagram's reply window
     owner_fallback_hours: Math.min(23, Math.max(0.01, parseFloat(val('chatbot-owner-fallback-hours')) || DEFAULT_CHATBOT_CONFIG.owner_fallback_hours)),
-    draft_digest_hour: Math.min(23, int('chatbot-draft-digest-hour', 0, DEFAULT_CHATBOT_CONFIG.draft_digest_hour)),
     alert_email:      (val('chatbot-alert-email') || '').trim(),
     report_frequency: val('chatbot-report-frequency') || 'off',
   };

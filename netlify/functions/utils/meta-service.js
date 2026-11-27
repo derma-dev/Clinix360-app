@@ -200,47 +200,6 @@ function createSupabaseClient() {
       return res.json();
     },
 
-    // S11a draft digest: the turns since `sinceIso` not yet in a digest (comment
-    // rows have no lead, error rows no draft).
-    async listShadowDrafts(sinceIso) {
-      const res = await fetch(`${url}/rest/v1/bot_shadow_log?created_at=gt.${encodeURIComponent(sinceIso)}` +
-        '&digest_at=is.null&lead_id=not.is.null&error=is.null&select=id,lead_id,message_id,decision,created_at&order=created_at.asc',
-        { headers });
-      if (!res.ok) throw new Error(`bot_shadow_log fetch failed: ${res.status} ${await res.text()}`);
-      return res.json();
-    },
-
-    // One row by `id` or by `fix_prompt_msg_id` (the owner's ✏️ reply).
-    async findShadowRow(col, value) {
-      const res = await fetch(`${url}/rest/v1/bot_shadow_log?${col}=eq.${encodeURIComponent(value)}` +
-        '&select=id,lead_id,message_id,decision,created_at,kb_saved&limit=1', { headers });
-      if (!res.ok) throw new Error(`bot_shadow_log lookup failed: ${res.status} ${await res.text()}`);
-      return (await res.json())[0] || null;
-    },
-
-    // filter: a PostgREST condition, e.g. 'id=eq.5' or 'id=in.(1,2)'.
-    async updateShadowLog(filter, data) {
-      const res = await fetch(`${url}/rest/v1/bot_shadow_log?${filter}`, {
-        method: 'PATCH', headers, body: JSON.stringify(data) });
-      if (!res.ok) throw new Error(`bot_shadow_log update failed: ${res.status} ${await res.text()}`);
-    },
-
-    // ponytail: ids ride in the URL and PostgREST caps at 1000 rows; fine for a
-    // day of one clinic's DMs, page it if that grows.
-    async listMessagesSince(leadIds, sinceIso) {
-      const res = await fetch(`${url}/rest/v1/lead_messages?lead_id=in.(${leadIds.join(',')})` +
-        `&created_at=gt.${encodeURIComponent(sinceIso)}` +
-        '&select=lead_id,direction,message,is_bot,created_at,external_message_id&order=created_at.asc', { headers });
-      if (!res.ok) throw new Error(`lead_messages fetch failed: ${res.status} ${await res.text()}`);
-      return res.json();
-    },
-
-    async listLeadsByIds(ids) {
-      const res = await fetch(`${url}/rest/v1/leads?id=in.(${ids.join(',')})&select=id,customer_name,bot_state`, { headers });
-      if (!res.ok) throw new Error(`leads fetch failed: ${res.status} ${await res.text()}`);
-      return res.json();
-    },
-
     // The console's Unanswered questions queue (review R6): a non-price question the bot couldn't answer.
     async insertKbCandidate(row) {
       const res = await fetch(`${url}/rest/v1/kb_candidates`, {
@@ -2573,14 +2532,11 @@ async function clearOwnerPrice({ sheet_id, sheet_range, item }) {
   return true;
 }
 
-// nosave:<lead id> (S4, the record is on the lead) · sdnosave:<shadow row id>
-// (S11a, a ✏️ fix; the record is on the shadow row). A sheet_range record (S11c
-// P5) clears its 'Bot answers' row; an older one undoes the KB save.
+// nosave:<lead id> (S4): the undo record is on the lead. A sheet_range record
+// (S11c P5) clears its 'Bot answers' row; an older one undoes the KB save.
 async function undoOwnerKbSave(cq) {
   const db    = createSupabaseClient();
-  const [, kind, id] = /^(nosave|sdnosave):(.+)$/.exec(cq.data || '') || [];
-  const saved = kind === 'nosave' ? (await db.getLeadById(id))?.bot_state?.kb_saved
-              : kind ? (await db.findShadowRow('id', id))?.kb_saved : null;
+  const saved = (await db.getLeadById(cq.data.slice('nosave:'.length)))?.bot_state?.kb_saved;
   let done;
   if (saved?.sheet_range) done = await clearOwnerPrice(saved);
   else {
@@ -2606,14 +2562,12 @@ async function handleOwnerUpdate(update) {
   try {
     if (cq) {
       const d = cq.data || '';
-      await (/^mode:/.test(d) ? modeTap(cq, owner) : /^sd:/.test(d) ? shadowVerdict(cq) : undoOwnerKbSave(cq));
+      // Anything else is a button from a removed feature (the S11a digest's ✅ / ✏️ / sdnosave, review R7).
+      await (/^mode:/.test(d) ? modeTap(cq, owner) : /^nosave:/.test(d) ? undoOwnerKbSave(cq)
+             : telegramApi('answerCallbackQuery', { callback_query_id: cq.id, text: 'This button no longer works' }));
     } else if (cmd === 'mode') await sendModeMenu(chatId);
     else if (cmd === 'prices') await refreshPrices(chatId);
-    else if (msg.text) {
-      const fixOf = msg.reply_to_message &&
-        await createSupabaseClient().findShadowRow('fix_prompt_msg_id', msg.reply_to_message.message_id);
-      await (fixOf ? saveShadowFix(msg, fixOf) : relayOwnerAnswer(msg));
-    }
+    else if (msg.text) await relayOwnerAnswer(msg);
   } catch (e) {
     console.error('[meta-service] owner update failed:', e.message);
     await sendTelegram(chatId, `⚠️ That didn’t go through (${e.message}).` +
@@ -2692,164 +2646,11 @@ async function runOwnerTimer(db, lead, cfg, now = Date.now()) {
   }
 }
 
-// ── Shadow draft digest · service tracker S11a ──
-// In shadow mode bot-hourly sends the owner ONE Telegram message a day at
-// chatbot_config.draft_digest_hour (IST, default 20): up to 8 of the day's
-// drafts, one per conversation, each beside what staff actually sent. ✅ marks a
-// draft good; ✏️ asks what the bot should have said. S16's "20 drafts signed
-// off" = bot_shadow_log rows with owner_verdict 'good'.
-const DIGEST_MAX   = 8;
-const DIGEST_CHARS = 3900;                  // Telegram caps a message at 4,096
+// Whitespace folded, cut to n characters with an ellipsis.
 const clip = (s, n) => {
   const t = String(s || '').replace(/\s+/g, ' ').trim();
   return t.length > n ? t.slice(0, n - 1) + '…' : t;
 };
-
-// What live would have sent as a normal reply. Handoffs, the safety net,
-// non-leads and redirects (canned copy) aren't drafts.
-const draftOf = (d) => d && !d.handoff && !d.safety_net && (!d.category || d.category === 'lead') && d.reason !== 'redirect'
-  ? String(d.reply || '').trim() : '';
-
-// The customer message a turn answered: by Meta id, else the last one before it.
-function inboundOf(row, msgs) {
-  const mine = msgs.filter(m => m.lead_id === row.lead_id && isIncomingRow(m));
-  return (row.message_id && mine.find(m => m.external_message_id === row.message_id))
-      || mine.filter(m => Date.parse(m.created_at) <= Date.parse(row.created_at)).pop() || null;
-}
-
-// The turn's whole exchange, as live would have it: the customer's burst ending
-// at its message, and every staff message after it up to the customer's next
-// one. null when live would have yielded the turn to a newer message in the burst
-// (yieldsToBurst): only the burst's last turn would have been sent.
-function exchangeOf(row, msgs) {
-  const mine = msgs.filter(m => m.lead_id === row.lead_id);
-  const inbound = inboundOf(row, msgs);
-  const i = mine.indexOf(inbound);
-  if (i < 0) return { customer: [], staff: [], first: false };
-  const at = Date.parse(inbound.created_at);
-  const next = mine[i + 1];
-  if (next && isIncomingRow(next) && !isStickyInbound(inbound.message)
-      && Date.parse(next.created_at) - at < BURST_MS) return null;
-  let s = i;
-  while (s > 0 && isIncomingRow(mine[s - 1]) && at - Date.parse(mine[s - 1].created_at) < BURST_MS) s--;
-  let e = i + 1;
-  while (e < mine.length && !isIncomingRow(mine[e])) e++;
-  return { customer: mine.slice(s, i + 1).map(m => m.message),
-           staff:    mine.slice(i + 1, e).filter(m => !m.is_bot).map(m => m.message),
-           first:    !mine.slice(0, s).some(isIncomingRow) };
-}
-const quoted = (texts, each, total) => clip(texts.map(t => `"${clip(t, each)}"`).join(' / '), total);
-
-// Pure: { text, keyboard, shown } for these shadow rows, or null when none has a
-// draft. Per conversation the best draft to check: bot and staff quote different
-// prices → the bot quoted an offer → the conversation's first message → the rest
-// at random. msgs oldest-first.
-function draftDigest(rows, msgs, leads) {
-  const leadOf = Object.fromEntries(leads.map(l => [l.id, l]));
-  const best = {};
-  for (const r of rows) {
-    const draft = draftOf(r.decision);
-    const x = draft && exchangeOf(r, msgs);
-    if (!x) continue;
-    const bp = firstPriceIn(draft), sp = firstPriceIn(x.staff.join('\n'));
-    const c = { r, draft, x, tie: Math.random(),
-                rank: bp && sp && bp !== sp ? 0 : r.decision.offer ? 1 : x.first ? 2 : 3 };
-    const b = best[r.lead_id];
-    if (!b || c.rank < b.rank || (c.rank === b.rank && c.tie < b.tie)) best[r.lead_id] = c;
-  }
-  const picks = Object.values(best).sort((a, b) => a.rank - b.rank || a.tie - b.tie);
-  if (!picks.length) return null;
-
-  const blocks = [], buttons = [];
-  for (const c of picks) {
-    const n = blocks.length + 1;
-    const l = leadOf[c.r.lead_id] || {};
-    const q = mergeBotState(l.bot_state, c.r.decision).qualification;
-    const block = `${n}) ${[l.customer_name || 'A customer', q.service, q.branch || q.location].filter(Boolean).join(' · ')}\n` +
-      `   Customer: ${quoted(c.x.customer, 200, 500) || '""'}\n   Bot: "${clip(c.draft, 600)}"\n` +
-      `   Staff sent: ${quoted(c.x.staff, 300, 700) || '(no reply yet)'}`;
-    if (n > DIGEST_MAX || blocks.join('\n\n').length + block.length > DIGEST_CHARS) break;
-    blocks.push(block);
-    buttons.push({ text: `${n} ✅`, callback_data: `sd:good:${c.r.id}` }, { text: `${n} ✏️`, callback_data: `sd:fix:${c.r.id}` });
-  }
-  const keyboard = [];
-  for (let i = 0; i < buttons.length; i += 4) keyboard.push(buttons.slice(i, i + 4));
-  return { shown: blocks.length, keyboard,
-    text: `📝 Bot drafts for today — ${blocks.length} of ${picks.length} conversations\n` +
-          `Nothing was sent. Tap ✅ if the draft is fine, ✏️ to correct it.\n\n${blocks.join('\n\n')}` };
-}
-
-// bot-hourly, shadow mode, at the digest hour. Returns the drafts shown; throws
-// on a failure (logged there). Every row looked at is stamped, not only the
-// shown ones, so a second run (by hand) sends nothing new.
-async function sendDraftDigest(db, now = Date.now()) {
-  const rows = await db.listShadowDrafts(isoAt(now - 24 * 3600e3));
-  if (!rows.length) return 0;
-  const ids = [...new Set(rows.map(r => r.lead_id))];
-  const [msgs, leads] = await Promise.all([db.listMessagesSince(ids, isoAt(now - 48 * 3600e3)), db.listLeadsByIds(ids)]);
-  const d = draftDigest(rows, msgs, leads);
-  if (d) {
-    const owner = await getSettingJson('telegram_owner');
-    if (!owner?.chat_id) throw new Error('no owner linked');
-    await sendTelegram(owner.chat_id, d.text, { reply_markup: { inline_keyboard: d.keyboard } });
-  }
-  await db.updateShadowLog(`id=in.(${rows.map(r => r.id).join(',')})`, { digest_at: isoAt(now) });
-  return d ? d.shown : 0;
-}
-
-// ✅ → good. ✏️ → a prompt the owner replies to (saveShadowFix). A later tap
-// on the other button changes the verdict.
-async function shadowVerdict(cq) {
-  const [, verdict, id] = /^sd:(good|fix):(\d+)$/.exec(cq.data) || [];
-  const db  = createSupabaseClient();
-  const row = id && await db.findShadowRow('id', id);
-  const ack = (text) => telegramApi('answerCallbackQuery', { callback_query_id: cq.id, text });
-  if (!row) return ack('That draft is gone');
-  if (verdict === 'good') {
-    await db.updateShadowLog(`id=eq.${id}`, { owner_verdict: 'good', reviewed_at: isoAt(Date.now()) });
-    return ack('👍 Marked good');
-  }
-  const name = (await db.listLeadsByIds([row.lead_id]))[0]?.customer_name || 'the customer';
-  const m = await sendTelegram(cq.message.chat.id,
-    `✏️ What should the bot have said to ${name}?\nBot's draft: "${clip(draftOf(row.decision), 300)}"\n(Reply to this message)`,
-    { reply_markup: { force_reply: true, input_field_placeholder: 'What the bot should say…' } });
-  await db.updateShadowLog(`id=eq.${id}`, { fix_prompt_msg_id: m.message_id });
-  return ack();
-}
-
-// The owner's reply to a ✏️ prompt. A price answering a price question → the
-// KB at once, or the price sheet once there is one (the S4 fold, with [Don't save]);
-// anything else → Teach the bot for review, since a correction is often advice
-// for that one customer.
-async function saveShadowFix(msg, row) {
-  const db  = createSupabaseClient();
-  const fix = msg.text.trim();
-  const [msgs, [lead]] = await Promise.all([
-    db.listMessagesSince([row.lead_id], isoAt(Date.parse(row.created_at) - 48 * 3600e3)),
-    db.listLeadsByIds([row.lead_id])]);
-  const question = inboundOf(row, msgs)?.message || '';
-  const service  = mergeBotState(lead?.bot_state, row.decision).qualification.service;
-  const cfg      = row.decision?.asks_price && firstPriceIn(fix) && await getSettingJson('chatbot_config');
-  let saved = null, note;
-  const name = cfg && learnedService(priceNames(cfg.kb, await getSettingJson('price_list')), question, service);
-  // S11c P5: with a price sheet, the price goes to its 'Bot answers' tab under that name.
-  // ponytail: an owner row named like a Prices row doesn't replace it (priceQuoted takes
-  // the Prices one); a wrong sheet price is fixed in the sheet.
-  if (name && cfg.price_sheet_id) ({ saved, note } = await addOwnerPrice(cfg.price_sheet_id, name, firstPriceIn(fix), question));
-  else if (name) {
-    saved = applyLearnedKbEntry(cfg.kb, question, fix, service);
-    await db.upsertSetting('chatbot_config', JSON.stringify(cfg));
-    note = saved.key ? `💾 Saved: ${saved.key} → ₹${saved.price}. The bot quotes it to everyone from now on.`
-                     : '💾 Saved: the bot gives this answer to everyone who asks.';
-  } else {
-    await db.insertKbCandidate({ lead_id: row.lead_id, question: question.slice(0, 500), answer: fix.slice(0, 2000) });
-    note = '📥 Added to Teach the bot in the dashboard. The bot uses it once it’s approved there.';
-  }
-  await db.updateShadowLog(`id=eq.${row.id}`, { owner_verdict: 'fix', owner_fix: fix,
-                                                 reviewed_at: isoAt(Date.now()), kb_saved: saved });
-  await sendTelegram(msg.chat.id, `✏️ Noted. ${note}`, saved
-    ? { reply_markup: { inline_keyboard: [[{ text: '🚫 Don’t save', callback_data: `sdnosave:${row.id}` }]] } } : {});
-}
 
 // ── The owner switches the bot mode from Telegram · service tracker S11b ──
 // /mode → the current mode + [Off] [Shadow] [Live]. Off / Shadow apply at once
@@ -3318,8 +3119,6 @@ module.exports = {
   quietResume,
   ownerTimerDue,
   runOwnerTimer,
-  draftDigest,
-  sendDraftDigest,
   parseOfferCaption,
   resolveOffer,
   isOfferFresh,

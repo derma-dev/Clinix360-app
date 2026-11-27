@@ -2,8 +2,7 @@
 // Netlify Scheduled Function: bot-hourly
 // Runs every hour, on the hour.
 // Shadow or live (S11c P4): the price sheet → settings.price_list (syncPriceSheet).
-// Shadow mode (S11a): at chatbot_config.draft_digest_hour (IST, default 20) →
-// one Telegram digest of the day's drafts to the owner (sendDraftDigest). Nothing else.
+// Shadow mode: nothing else (drafts are reviewed in the console, review R7).
 // Live mode:
 // S6: open owner price questions → reminder (owner_remind_hours, default 2) or
 // fallback (owner_fallback_hours, default 20) via runOwnerTimer.
@@ -13,7 +12,7 @@
 // ============================================================
 
 const { schedule } = require('@netlify/functions');
-const { createSupabaseClient, getBotConfig, pushLead, ownerQuestionOpen, runOwnerTimer, sendDraftDigest, syncPriceSheet } = require('./utils/meta-service');
+const { createSupabaseClient, getBotConfig, pushLead, ownerQuestionOpen, runOwnerTimer, syncPriceSheet } = require('./utils/meta-service');
 
 // ponytail: only chats active in the 48 h before they went quiet are checked, so a
 // push that keeps failing gives up after 2 days (we were emailed on the first failure).
@@ -37,17 +36,6 @@ const handler = async () => {
   if (cfg.mode === 'shadow' || cfg.mode === 'live') {
     try { console.log('[bot-hourly] price sheet:', (await syncPriceSheet()) || 'not set up'); }
     catch (e) { console.error('[bot-hourly] price sheet sync failed:', e.message); }
-  }
-  if (cfg.mode === 'shadow') {
-    const istHour = new Date(Date.now() + 5.5 * 3600e3).getUTCHours();
-    if (istHour !== Number(cfg.draft_digest_hour ?? 20)) return { statusCode: 200 };
-    try {
-      console.log(`[bot-hourly] draft digest: ${await sendDraftDigest(createSupabaseClient())} drafts shown`);
-    } catch (e) {
-      console.error('[bot-hourly] draft digest failed:', e.message);
-      return { statusCode: 500 };
-    }
-    return { statusCode: 200 };
   }
   if (cfg.mode !== 'live') return { statusCode: 200 };
 
