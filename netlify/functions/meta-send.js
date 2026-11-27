@@ -83,9 +83,9 @@ exports.handler = async (event) => {
     });
 
     // 3) D12 — a human outgoing message is a takeover (bot_active off) unless it
-    // carries the staff sign-off (S12c R5: the bot takes the chat back). Also the
-    // D17 teach-the-bot capture. Best-effort — the message is already delivered,
-    // so a failure here is logged, never a 502.
+    // carries the staff sign-off (S12c R5: the bot takes the chat back).
+    // Best-effort — the message is already delivered, so a failure here is
+    // logged, never a 502.
     try {
       await staffReplied(db, lead, message);
     } catch (e) {

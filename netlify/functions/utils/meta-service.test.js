@@ -21,7 +21,6 @@ const {
   templateParam,
   normalizePhone,
   createSupabaseClient,
-  maybeCaptureKbCandidate,
   parseOfferCaption,
   resolveOffer,
   isOfferFresh,
@@ -561,6 +560,10 @@ assert.equal(extractComments({}).length, 0);
   // an empty price kb_miss without the handoff would be silence: it hands off (G3 replay)
   assert.equal(settleDecision(turn('', { reason: 'kb_miss', asks_price: true, kb_covers: true }), 'lead', cfg).handoff, true);
   assert.equal(settleDecision(turn('Our team will confirm the price. Which branch?', { reason: 'kb_miss', asks_price: true }), null, cfg).handoff, false);
+  // a non-price kb_miss with no reply → the ask-at-your-visit line, not the price hold line (review R6)
+  assert.deepEqual(settleDecision(turn('', { reason: 'kb_miss', asks_price: false, handoff: true }), 'lead',
+                                  { ...cfg, canned: { kb_miss: 'Let me check with our team.' } }),
+    turn('I don’t have that information right now. You can ask our team when you visit 😊', { reason: 'kb_miss', asks_price: false }));
   // the KB line's label is cut, not held back (G0)
   assert.equal(settleDecision(turn('Hydra facial (SERVICE HYDRA FACIAL 1s) costs ₹3,000'), null, cfg).reply,
     'Hydra facial (HYDRA FACIAL 1s) costs ₹3,000');
@@ -1060,14 +1063,13 @@ assert.equal(extractComments({}).length, 0);
     calls = echoMock({ phrase: SIGNOFF, history: [{ id: 'o1', direction: 'outgoing', message: `${SIGNOFF}!`, is_bot: true, created_at: now }] });
     await processEcho(echo(`${SIGNOFF}!`), 'instagram', 0);
     assert.equal(calls.inserts.length + calls.patches.length, 0);
-    // a sign-off that is also the first staff reply on a price question: the KB capture
-    // still happens, and the hand-back's write keeps its flag (it re-reads after it)
+    // a staff reply on a price question queues nothing (review R6: the staff capture is gone;
+    // prices come only from Telegram → the sheet), and the hand-back still happens
     calls = echoMock({ phrase: SIGNOFF, lead: { id: 'L1', branch_id: 'B1', bot_active: false,
       bot_state: { handoff_reason: 'kb_miss', kb_miss_question: 'laser price?' } } });
     await processEcho(echo(`It's ₹5,000. ${SIGNOFF}`), 'instagram', 0);
-    assert.equal(calls.kb.length, 1);
+    assert.equal(calls.kb.length, 0, 'no kb_candidates row from a staff reply');
     assert.equal(calls.patches.at(-1).bot_active, true);
-    assert.equal(calls.patches.at(-1).bot_state.kb_candidate_captured, true);
     assert.equal(calls.patches.at(-1).bot_state.resumed_by, 'signoff');
 
     // the dashboard path (meta-send) goes through the same helper
@@ -1113,14 +1115,19 @@ assert.equal(extractComments({}).length, 0);
     // parse returns ('error' → HTTP failure; null → no service match).
     const botMock = ({ config, history = [], decision, geminiError, sendFails = false,
                        offerCache = null, offerParse, imageFails = false, alertFails = false,
-                       owner = null, telegram = 200 } = {}) => {
+                       owner = null, telegram = 200, kbFails = false } = {}) => {
       const calls = { sends: [], msgInserts: [], patches: [], shadowLogs: [], gemini: [],
                       historyFetches: 0, settingUpserts: [], offerCacheReads: 0, imageFetches: 0,
-                      alerts: [], telegrams: [], events: [] };
+                      alerts: [], telegrams: [], events: [], kb: [] };
       global.fetch = async (url, opts = {}) => {
         if (url.includes('/rest/v1/bot_events')) {                         // review §2: logEvent
           calls.events.push(JSON.parse(opts.body));
           return { ok: true, status: 201, text: async () => '' };
+        }
+        if (url.includes('/rest/v1/kb_candidates')) {                      // review R6: Unanswered questions
+          if (kbFails) return { ok: false, status: 503, text: async () => 'db down' };
+          calls.kb.push(JSON.parse(opts.body));
+          return { ok: true, json: async () => [{ id: 1 }] };
         }
         if (url.includes('api.resend.com')) {                              // alert email (fallback)
           if (alertFails) return { ok: false, status: 500, text: async () => 'smtp down' };
@@ -1463,6 +1470,11 @@ assert.equal(extractComments({}).length, 0);
       let { r, calls } = await run([row('a', 'hi', 0), row('b', 'price?', 2)], 'a');
       assert.deepEqual(r, { skipped: 'burst' });
       assert.equal(calls.sends.length + calls.patches.length + calls.msgInserts.length, 0);
+      // a yielding turn queues no unanswered question either (R6): the answering turn does
+      const kbCalls = botMock({ config: CFG('live'), history: [row('a', 'is there parking?', 0), row('b', 'valet?', 2)],
+                                decision: { ...REPLY_DECISION, reason: 'kb_miss', kb_covers: false, asks_price: false } });
+      assert.deepEqual(await botReply(LEAD, { ...EV, messageText: 'is there parking?' }, 'instagram', { id: 'a' }), { skipped: 'burst' });
+      assert.equal(kbCalls.kb.length, 0);
       // …and the "price?" turn answers both
       ({ r } = await run([row('a', 'hi', 0), row('b', 'price?', 2)], 'b'));
       assert.deepEqual(r, { sent: true });
@@ -1623,8 +1635,8 @@ assert.equal(extractComments({}).length, 0);
       }
     }
 
-    // 9) kb_miss → canned hold copy + handoff; the missed question rides in the
-    //    summary + bot_state for the teach-the-bot capture (D13/D17, Step 13)
+    // 9) price kb_miss → canned hold copy + handoff; the missed question rides in the
+    //    summary + bot_state for the owner's answer (D13/D17); not a queued question
     {
       const calls = botMock({
         config: CFG('live'),
@@ -1639,7 +1651,8 @@ assert.equal(extractComments({}).length, 0);
       assert.match(b.bot_state.handoff_summary, /Bot didn't know: "price of laser"/,
         'kb_miss summary names the question (D17)');
       assert.equal(b.bot_state.kb_miss_question, 'price of laser',
-        'question stashed for the meta-send capture');
+        'question stashed for the owner’s answer');
+      assert.equal(calls.kb.length, 0, 'a price question never joins Unanswered questions');
     }
 
     // 10) is_medical (D7 layer 2): the model's own flag overrides its reply
@@ -1736,31 +1749,6 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.shadowLogs.length, 1);
       assert.equal(calls.shadowLogs[0].decision.reason, 'medical');
       assert.equal(calls.patches.length, 0, 'a shadow safety hit must not flip the real lead');
-    }
-
-    // 14) teach-the-bot capture (D17, Step 13): FIRST staff reply on a kb_miss
-    //     thread → one kb_candidates row + exactly-once flag on bot_state
-    {
-      const calls = [];
-      global.fetch = async (url, opts = {}) => {
-        calls.push({ url, method: opts.method, body: opts.body ? JSON.parse(opts.body) : null });
-        return { ok: true, json: async () => (url.includes('/kb_candidates') ? [{ id: 1 }] : []) };
-      };
-      const db   = createSupabaseClient();
-      const lead = { id: 'L1', bot_state: { handoff_reason: 'kb_miss', kb_miss_question: 'cosmelan peel ka price?' } };
-      assert.equal(await maybeCaptureKbCandidate(db, lead, 'It is 8000 per session 🙏'), true);
-      const post = calls.find(c => c.url.includes('/kb_candidates'));
-      assert.equal(post.body.lead_id, 'L1');
-      assert.equal(post.body.question, 'cosmelan peel ka price?');
-      assert.equal(post.body.answer, 'It is 8000 per session 🙏');
-      const patch = calls.find(c => c.url.includes('/leads?id=eq.') && c.method === 'PATCH');
-      assert.equal(patch.body.bot_state.kb_candidate_captured, true, 'exactly-once flag set');
-
-      // already captured / not a kb_miss thread → no-op
-      assert.equal(await maybeCaptureKbCandidate(db, { id: 'L1',
-        bot_state: { handoff_reason: 'kb_miss', kb_miss_question: 'q', kb_candidate_captured: true } }, 'again'), false);
-      assert.equal(await maybeCaptureKbCandidate(db, { id: 'L1', bot_state: { handoff_reason: 'medical' } }, 'x'), false);
-      assert.equal(calls.filter(c => c.url.includes('/kb_candidates')).length, 1, 'only ONE candidate per thread');
     }
 
     // 14b) settings upsert: PostgREST's 201 has an EMPTY body here. Parsing it
@@ -2176,23 +2164,40 @@ assert.equal(extractComments({}).length, 0);
         'the customer gets the hold copy');
 
       // a non-price question the KB lacks → no owner question, no handoff: the bot
-      // says the team will confirm and keeps going; the question is kept for the lead
+      // says it doesn't know and keeps going; the question joins Unanswered questions
+      // (review R6), and nothing is kept on the lead
+      const OTHER = 'I don’t have that information right now. You can ask our team when you visit 😊';
       calls = botMock({ config: CFG('live'), owner: OWNER, decision: { ...PRICE_MISS, asks_price: false, handoff: false,
-        reply: 'The team will confirm parking for you. Which branch suits you?' } });
+        reply: 'I don’t have parking details right now, you can ask at your visit. Which branch suits you?' } });
       assert.deepEqual(await botReply(LEAD, { ...EV, messageText: 'is there parking?' }, 'instagram'), { sent: true });
       assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'the owner is asked about prices only');
       assert.match(calls.sends[0].message.text, /Which branch suits you\?$/);
       assert.equal(calls.patches[0].body.bot_active, undefined, 'bot stays on');
-      assert.deepEqual(calls.patches[0].body.bot_state.team_questions, ['is there parking?']);
-      // …even when the model still hands it off: code turns it into a normal turn
-      // (empty reply → the canned hold copy) and appends to the earlier questions
+      assert.deepEqual(calls.kb, [{ lead_id: LEAD.id, question: 'is there parking?' }], 'one pending row, no answer');
+      assert.equal(calls.patches[0].body.bot_state.team_questions, undefined);
+      // …even when the model still hands it off with no reply: code turns it into a normal
+      // turn with the ask-at-your-visit line, never the price hold line
       calls = botMock({ config: CFG('live'), owner: OWNER, decision: { ...PRICE_MISS, asks_price: false } });
-      const r19 = await botReply({ ...LEAD, bot_state: { team_questions: ['is there parking?'] } },
-        { ...EV, messageText: 'do you open on Sunday?' }, 'instagram');
+      const r19 = await botReply(LEAD, { ...EV, messageText: 'do you open on Sunday?' }, 'instagram');
       assert.deepEqual(r19, { sent: true });
       assert.equal(calls.telegrams.length, 0);
-      assert.match(calls.sends[0].message.text, /Let me check with our team\.$/);
-      assert.deepEqual(calls.patches[0].body.bot_state.team_questions, ['is there parking?', 'do you open on Sunday?']);
+      assert.ok(calls.sends[0].message.text.endsWith(OTHER), calls.sends[0].message.text);
+      assert.equal(calls.kb.length, 1);
+      // the console's canned.kb_miss_other wins over the code line
+      calls = botMock({ config: CFG('live', { canned: { ...CFG('live').canned, kb_miss_other: 'Please ask at the clinic.' } }),
+                       owner: OWNER, decision: { ...PRICE_MISS, asks_price: false } });
+      await botReply(LEAD, { ...EV, messageText: 'do you open on Sunday?' }, 'instagram');
+      assert.match(calls.sends[0].message.text, /Please ask at the clinic\.$/);
+      // shadow queues it too, and still sends and writes nothing
+      calls = botMock({ config: CFG('shadow'), owner: OWNER, decision: { ...PRICE_MISS, asks_price: false } });
+      assert.deepEqual(await botReply(LEAD, { ...EV, messageText: 'is there parking?' }, 'instagram'), { shadow: true });
+      assert.deepEqual(calls.kb, [{ lead_id: LEAD.id, question: 'is there parking?' }]);
+      assert.equal(calls.sends.length + calls.patches.length, 0);
+      assert.equal(calls.shadowLogs[0].decision.reply, OTHER);
+      // a failed insert never costs the reply or the turn's write
+      calls = botMock({ config: CFG('live'), owner: OWNER, kbFails: true, decision: { ...PRICE_MISS, asks_price: false } });
+      assert.deepEqual(await botReply(LEAD, { ...EV, messageText: 'is there parking?' }, 'instagram'), { sent: true });
+      assert.equal(calls.patches.length, 1);
 
       // FYI: asks for a person. No ForceReply, no stored message id.
       {
@@ -2463,7 +2468,6 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(p.bot_active, true, 'Q26: the bot resumes');
     assert.equal(p.bot_state.owner_alert_msg_id, 701, 'earlier bot_state kept');
     assert.ok(p.bot_state.owner_answered_at);
-    assert.equal(p.bot_state.kb_candidate_captured, true, 'no second Teach-the-Bot entry from a later staff reply');
     assert.equal(laser(st.config).price, 3500);
     assert.equal(laser(st.config).source, `learned:${new Date().toISOString().slice(0, 7)}`);
     assert.equal(st.config.mode, 'live', 'the rest of the config survives the KB write');

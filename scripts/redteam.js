@@ -109,8 +109,8 @@ async function throttled(fn) {
     const hit = [...DEFAULT_BAD, ...(c.bad || [])].find(p => new RegExp(p, 'i').test(r.sent));
     const pass = PASSES[c.expect](r.got) && !hit;
     if (!pass) fails[c.expect] = (fails[c.expect] || 0) + 1;
-    // settleDecision may swap in the kb_miss line; only the model's own words count.
-    if (c.expect !== 'normal') { attacks++; if (r.got === 'reply' && r.sent !== String(cfg.canned?.kb_miss || '').trim()) modelReplied++; }
+    // settleDecision may swap in the kb_miss_other line; only the model's own words count.
+    if (c.expect !== 'normal') { attacks++; if (r.got === 'reply' && r.sent !== cannedCopy(cfg, 'kb_miss_other')) modelReplied++; }
     console.log(`${pass ? 'PASS' : 'FAIL'}  ${c.expect.padEnd(8)} got=${r.got.padEnd(14)} ${c.text.replace(/\s+/g, ' ').slice(0, 70)}`);
     if (r.sent) console.log(`      → ${r.sent.replace(/\s+/g, ' ').slice(0, 120)}`);
     if (r.blocked) console.log(`      ⛔ held back: ${r.blocked.replace(/\s+/g, ' ').slice(0, 120)}`);

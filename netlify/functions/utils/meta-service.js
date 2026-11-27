@@ -241,7 +241,7 @@ function createSupabaseClient() {
       return res.json();
     },
 
-    // Teach-the-bot queue (D17): the first staff reply on a kb_miss thread.
+    // The console's Unanswered questions queue (review R6): a non-price question the bot couldn't answer.
     async insertKbCandidate(row) {
       const res = await fetch(`${url}/rest/v1/kb_candidates`, {
         method: 'POST',
@@ -1026,14 +1026,8 @@ function isHandback(text, phrase) {
 async function staffReplied(db, lead, text) {
   const back = isHandback(text, (await getBotConfig())?.handback_phrase);
   if (!back && lead.bot_active !== false) await db.updateLead(lead.id, { bot_active: false });
-  try {
-    await maybeCaptureKbCandidate(db, lead, text);
-  } catch (e) {
-    console.error(`[meta-service] kb_candidates capture failed on lead ${lead.id}:`, e.message);
-  }
   if (!back) return false;
-  // Re-read after the capture (it writes the bot_state it was handed) and any
-  // customer turn meanwhile, so this write keeps both (Risk 4).
+  // Re-read for any customer turn meanwhile, so this write keeps its bot_state (Risk 4).
   const fresh = (await db.getLeadById(lead.id)) || lead;
   await db.updateLead(lead.id, { bot_active: true, bot_state: { ...fresh.bot_state,
     resumed_at: new Date().toISOString(), resumed_by: 'signoff' } });
@@ -1680,7 +1674,7 @@ const PRICE_RULE = {
 const assistantSystemPrompt = (sheet) => `You are the Instagram DM assistant for Derma Skin and Hair Solutions, a Delhi-NCR dermatology clinic (branches: Janakpuri main, Kirti Nagar, Dwarka Sec 12).
 
 HARD RULES — breaking any is a failure:
-- Answer ONLY from the KNOWLEDGE BASE below. asks_price=true whenever the customer asks what something costs. If the KB does not answer the question, set kb_covers=false and reason='kb_miss'; then for a PRICE you don't have, reply="" and handoff=true (the team checks the price and comes back), and for ANY OTHER question handoff=false: say the team will confirm that point, then carry on with the next qualifying question.
+- Answer ONLY from the KNOWLEDGE BASE below. asks_price=true whenever the customer asks what something costs. If the KB does not answer the question, set kb_covers=false and reason='kb_miss'; then for a PRICE you don't have, reply="" and handoff=true (the team checks the price and comes back), and for ANY OTHER question handoff=false: say you don't have that information right now and suggest asking at the visit, then carry on with the next qualifying question.
 - NEVER diagnose, prescribe medicines, or interpret symptoms. A message describing active symptoms (pain, itching, bleeding, a reaction) is not yours to answer: set is_medical=true, reply="" and handoff=true.
 - "Is it safe / painful for my condition?" questions about a STABLE condition (e.g. "PCOS hai to laser safe?") are NOT medical — answer from the KB's safety entries, is_medical=false.
 - Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise you don't have the price: kb_miss, handoff=true (above). NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. ${sheet ? PRICE_RULE.sheet : PRICE_RULE.corpus} A LIVE OFFER may state only what its post caption states. Never reuse one service's price for a different service.
@@ -1997,6 +1991,9 @@ const GUARD_COPY = {
   // The line for a chat handed to staff when its own key is blank (llm_error's old
   // text: since F1 that line tells the customer to write again, wrong once the bot is off).
   turn_cap: 'Let me connect you with our team right away — they will help you here.',
+  // Review §5 (Q5.2): a non-price question the KB can't answer; the bot stays on. The
+  // price hold line stays canned.kb_miss, which promises the team comes back.
+  kb_miss_other: 'I don’t have that information right now. You can ask our team when you visit 😊',
 };
 
 // One canned-copy lookup that tolerates a missing/truncated config row.
@@ -2111,9 +2108,9 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   const nextState = { ...botState, handoff_summary: summary,
                       handoff_reason: decision.reason, handoff_at: new Date().toISOString(),
                       ...(decision.guard ? { guard: { check: decision.guard, blocked: decision.blocked } } : {}),
-                      // D17 — the question rides in bot_state so meta-send can capture
-                      // the staff answer to it without re-deriving anything. A new
-                      // question also resets the S6 timer stamps of the last one.
+                      // D17 — the question rides in bot_state for the owner's answer (S4)
+                      // and the S6 reminder. A new question also resets the S6 timer
+                      // stamps of the last one.
                       // owner_asked_at outlives a later handoff, for the report's count.
                       ...(decision.reason === 'kb_miss'
                         ? { kb_miss_question: String(ev?.messageText || '').slice(0, 500), owner_asked_at: new Date().toISOString(),
@@ -2412,7 +2409,7 @@ const firstPriceIn = (text) => pricesIn(text)[0] ?? null;
 
 const KB_TAG_STOPWORDS = new Set(['the','and','for','you','your','with','what','how','why','are','is','ka','ki','ke','hai','kya','mein','of','to','in','kitna','kitni','price','cost','charge']);
 
-// Port of applyLearnedKbEntry in app.js (keep in step): a price for a
+// The owner's Telegram answer (S4) → the KB: a price for a
 // recognizable service updates that entry (D22: the newest price wins),
 // anything else joins as a learned FAQ. New here: `service` (the thread's
 // qualified KB service) when the question doesn't name one ("price?" after a
@@ -2529,12 +2526,11 @@ async function relayOwnerAnswer(msg) {
   }
 
   // Q26: the bot picks the chat back up, unless staff have replied since the
-  // handoff (a human reply is a takeover, D12). kb_candidate_captured: the owner
-  // already taught the KB, so a later staff reply doesn't queue it again (D17).
+  // handoff (a human reply is a takeover, D12).
   // ponytail: one undo record per lead; a second answer to the same question
   // replaces it, so the first answer's button then undoes the second.
   await db.updateLead(lead.id, { bot_active: !staffRepliedSince(rows, bs.handoff_at), bot_state: { ...bs,
-    owner_answered_at: new Date().toISOString(), kb_candidate_captured: true, kb_saved: undo } });
+    owner_answered_at: new Date().toISOString(), kb_saved: undo } });
 
   await sendTelegram(msg.chat.id, out.join('\n'), undo
     ? { reply_markup: { inline_keyboard: [[{ text: '🚫 Don’t save', callback_data: `nosave:${lead.id}` }]] } } : {});
@@ -2891,25 +2887,6 @@ async function modeTap(cq, owner) {
     'Changed with /mode in the owner’s Telegram. Switch it back with /mode there, or in Settings → Chatbot.');
 }
 
-// D17 teach-the-bot capture — called by meta-send on EVERY staff send: the
-// FIRST reply on a kb_miss-handoff thread becomes a pending kb_candidates row
-// (question = what the bot missed, answer = what staff said). The flag on
-// bot_state makes it exactly-once. Admin Approve/Edit+Approve/Discard from the
-// dashboard; approval-first because the KB is whole-injected every turn — an
-// unreviewed negotiated price would repeat to every future customer.
-async function maybeCaptureKbCandidate(db, lead, message) {
-  const bs = lead?.bot_state || {};
-  if (bs.handoff_reason !== 'kb_miss' || bs.kb_candidate_captured || !bs.kb_miss_question) return false;
-  await db.insertKbCandidate({
-    lead_id: lead.id,
-    question: String(bs.kb_miss_question).slice(0, 500),
-    answer:   String(message || '').slice(0, 2000),
-  });
-  await db.updateLead(lead.id, { bot_state: { ...bs, kb_candidate_captured: true } });
-  console.log(`[meta-service] kb_candidate captured for lead ${lead.id}`);
-  return true;
-}
-
 // D19 — shadow mode: the full real pipeline ran above, but nothing was sent and
 // no lead row was touched. Exactly ONE bot_shadow_log row per turn, success or
 // error (the error case still logs, with decision=null + error set).
@@ -3015,12 +2992,12 @@ function settleDecision(decision, leadCategory, cfg, ctx = {}) {
     decision = { ...decision, category: 'lead', ...(decision.reason === 'non_lead' && { handoff: false }) };
   }
   // Q30 — the owner is asked about unknown PRICES only. Any other question the
-  // KB can't answer: no handoff, the bot says the team will confirm it and keeps
-  // qualifying, and the question is kept in team_questions (no reader since Make went;
-  // review R6 turns it into the Unanswered questions queue).
+  // KB can't answer: no handoff, the bot says it doesn't have that information and
+  // suggests asking at the visit (review §5), keeps qualifying, and botReply queues
+  // the question in the console's Unanswered questions (queueUnanswered).
   if (decision.reason === 'kb_miss' && !decision.asks_price) {
     decision = { ...decision, handoff: false,
-                 reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss') };
+                 reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss_other') };
   }
   // A price kb_miss with no reply and no handoff would send nothing ("Gfc price", 5 of 6
   // G3 replays; "RF cost plz?" 2 of 3 before G3): it hands off like any price kb_miss.
@@ -3079,6 +3056,17 @@ function quietResume(lead, rows, cfg) {
   if (lead.bot_state?.abuse_at || ownerQuestionOpen(lead.bot_state)) return false;
   const ours = Math.max(0, rows.findLastIndex(m => !isIncomingRow(m)));
   return conversationStart(rows.slice(ours), Number(cfg.resume_after_hours ?? 48) * 3600e3) !== null;
+}
+
+// Review R6 — a non-price question the KB can't answer (settleDecision's rule) becomes
+// a pending kb_candidates row with no answer: the console's Unanswered questions.
+// Shadow queues too: that's when the questions most need answering. A failed insert
+// never costs the reply.
+// ponytail: no de-duplication (five parking questions = five rows); group them when the queue gets long.
+async function queueUnanswered(db, lead, ev, decision) {
+  if (decision.reason !== 'kb_miss' || decision.asks_price) return;
+  await db.insertKbCandidate({ lead_id: lead.id, question: String(ev.messageText || '').slice(0, 500) })
+    .catch(e => console.error(`[meta-service] kb_candidates insert failed on lead ${lead.id}:`, e.message));
 }
 
 async function botReply(lead, ev, platform, inboundRow = null) {
@@ -3191,6 +3179,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // The resolved offer rides in the logged decision (plan §4: "decision +
     // offer fields") so shadow review sees the ladder it would have used.
     if (mode === 'shadow') {
+      await queueUnanswered(db, lead, ev, decision);
       try {
         const logged = offer ? { ...decision, offer } : decision;
         return await logShadowTurn(db, lead, ev, platform, logged, cfg.model, Date.now() - t0, llmError);
@@ -3203,6 +3192,7 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     // Last thing before any send or write — a yielding turn leaves no trace, so
     // the answering turn's counters and bot_state can't race it.
     if (await yieldsToBurst(db, lead.id, inboundRow, decision)) return { skipped: 'burst' };
+    await queueUnanswered(db, lead, ev, decision);   // after the burst check: a yielded turn queues nothing
     const botState = mergeBotState(lead.bot_state, decision, cfg.price_list?.items);
     // The model can drop a branch or number the customer just gave ("Janakpuri"
     // kept in 1 run of 3, live 2026-11-04); their own words fill the gap.
@@ -3274,9 +3264,6 @@ async function botReply(lead, ev, platform, inboundRow = null) {
     botState.turn_day   = today;
     if (decision.reason === 'redirect') botState.redirected_at = new Date().toISOString();   // G6 counts these
     if (llmError) botState.llm_error_at = new Date().toISOString();                          // F1: once per conversation
-    if (decision.reason === 'kb_miss' && !decision.kb_covers) {
-      botState.team_questions = [...(botState.team_questions || []), String(ev.messageText || '').slice(0, 200)].slice(-5);
-    }
     await db.updateLead(lead.id, { category: 'lead', bot_state: botState });
     console.log(`[meta-service] botReply: replied on lead ${lead.id} (${Math.round(Date.now() - t0)}ms)`);
     return { sent: true };
@@ -3318,7 +3305,6 @@ module.exports = {
   sendByPlatform,
   normalizePhone,
   handoffToStaff,
-  maybeCaptureKbCandidate,
   getSettingJson,
   getBotConfig,
   telegramApi,

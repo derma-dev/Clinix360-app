@@ -1292,6 +1292,7 @@ const DEFAULT_CHATBOT_CONFIG = {
     sales_pitch:   'Thank you for the information. If you would like to book an appointment, our team is happy to help here!',
     misc:          'Thanks for your message! Our team will get back to you here shortly. 🙏',
     kb_miss:       'Let me check with our team and get back to you here shortly. 🙏',
+    kb_miss_other: 'I don’t have that information right now. You can ask our team when you visit 😊',
     llm_error:     'Sorry, I’m having a little trouble right now. Please send your message again in a few minutes 🙏',
     disclosure:    'Hi! I am the clinic’s assistant 🤖 — I can help with prices, services and bookings, and our team joins in whenever needed.',
     refusal_ok:    'No problem at all — our team will continue here. 🙏',
@@ -1456,12 +1457,11 @@ async function setChatbotMode(mode) {
 }
 
 // ============================================================
-// TEACH THE BOT (kb_candidates — D17, checklist Step 13)
-// kb_miss handoff → first staff reply (captured server-side in
-// meta-send) → pending queue here → Approve joins the KB tagged
-// learned:<YYYY-MM>. Approval-first, never auto-learn: the KB is
-// whole-injected every turn, so an unreviewed negotiated price
-// would repeat to every future customer.
+// UNANSWERED QUESTIONS (kb_candidates — review R6, was Teach the Bot)
+// A non-price question the bot couldn't answer (queued by the server,
+// shadow too) → we write the answer → Approve joins the KB as an FAQ
+// tagged learned:<YYYY-MM>. No prices here: they come only from
+// Telegram → the price sheet.
 // ============================================================
 let _kbCandidates = [];
 
@@ -1481,13 +1481,16 @@ function renderKbCandidates() {
   const wrap = document.getElementById('kb-candidates-list');
   if (!wrap) return;
   if (!_kbCandidates.length) {
-    wrap.innerHTML = '<div style="font-size:13px;color:#9ca3af">Nothing pending — when the bot can’t answer a question, the staff reply lands here for approval.</div>';
+    wrap.innerHTML = '<div style="font-size:13px;color:#9ca3af">Nothing pending. When the bot can’t answer a question (not a price), it lands here.</div>';
     return;
   }
   wrap.innerHTML = _kbCandidates.map(c => `
     <div class="kb-cand" data-id="${c.id}" style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:10px 12px">
-      <div style="font-size:13px;font-weight:600;margin-bottom:6px">❓ ${esc(c.question || '')}</div>
-      <textarea class="text-input kb-cand-answer" rows="2" style="margin:0;resize:vertical">${esc(c.answer || '')}</textarea>
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:6px">
+        <span style="font-size:13px;font-weight:600">❓ ${esc(c.question || '')}</span>
+        <span style="font-size:12px;color:#9ca3af;white-space:nowrap">${esc(formatConvoTime(c.created_at))}</span>
+      </div>
+      <textarea class="text-input kb-cand-answer" rows="2" placeholder="Write the answer…" style="margin:0;resize:vertical">${esc(c.answer || '')}</textarea>
       <div style="display:flex;gap:8px;margin-top:8px">
         <button class="primary-btn" onclick="approveKbCandidate(${c.id})">✓ Approve</button>
         <button class="ghost-btn" onclick="discardKbCandidate(${c.id})" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border,#e5e7eb);background:transparent;cursor:pointer;font-size:13px">Discard</button>
@@ -1495,10 +1498,9 @@ function renderKbCandidates() {
     </div>`).join('');
 }
 
-// First plausible price in a staff answer (best-effort): digit-group commas
+// First plausible price in an answer (best-effort): digit-group commas
 // joined, phones and 6+ digit runs stripped first so a number's tail can't
-// pose as a price; 8k-style suffixes OK. Wrong detection just degrades the
-// approval to a learned FAQ entry — never a wrong auto-price.
+// pose as a price; 8k-style suffixes OK. A hit blocks the approval.
 function firstPriceIn(text) {
   const t = String(text || '').toLowerCase()
     .replace(/(\d),(\d)/g, '$1$2')
@@ -1511,36 +1513,21 @@ function firstPriceIn(text) {
   return null;
 }
 
-// Fold an approved Q/A into the KB (mutates kb in place). Best-effort: a price
-// answer on a recognizable service updates that service entry — being the
-// newest data point it becomes the source of truth (D22). Everything else
-// joins as a learned FAQ entry; a missed detection still carries the answer.
-// Server port (owner's Telegram answers, S4) in meta-service.js: keep in step.
+// Fold an approved Q/A into the KB as a learned FAQ (mutates kb in place).
+// Prices never land here (approveKbCandidate refuses them): a KB price would
+// be hidden behind the price sheet anyway (review §4 finding 1).
 const KB_TAG_STOPWORDS = new Set(['the','and','for','you','your','with','what','how','why','are','is','ka','ki','ke','hai','kya','mein','of','to','in','kitna','kitni','price','cost','charge']);
 
 function applyLearnedKbEntry(kb, question, answer) {
-  const month = new Date().toISOString().slice(0, 7);
   kb.entries = kb.entries || [];
-  const q = (question || '').toLowerCase();
-  const keyWords = k => k.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
-  const svc = kb.entries.find(e => e.type === 'service'
-    && keyWords(e.key).length > 0 && keyWords(e.key).every(w => q.includes(w)));
-  const price = firstPriceIn(answer);
-  if (svc && price) {
-    svc.price = price;
-    svc.price_last_quoted = month;
-    svc.quotes_seen = (svc.quotes_seen || 0) + 1;
-    svc.source = `learned:${month}`;
-  } else {
-    kb.entries.push({
-      type: 'faq',
-      id: `learned-${Date.now()}`,
-      tags: (question || '').toLowerCase().split(/[^a-z0-9]+/)
-        .filter(w => w.length > 2 && !KB_TAG_STOPWORDS.has(w)).slice(0, 6),
-      a: answer,
-      learned: month,
-    });
-  }
+  kb.entries.push({
+    type: 'faq',
+    id: `learned-${Date.now()}`,
+    tags: (question || '').toLowerCase().split(/[^a-z0-9]+/)
+      .filter(w => w.length > 2 && !KB_TAG_STOPWORDS.has(w)).slice(0, 6),
+    a: answer,
+    learned: new Date().toISOString().slice(0, 7),
+  });
 }
 
 async function approveKbCandidate(id) {
@@ -1548,6 +1535,8 @@ async function approveKbCandidate(id) {
   if (!c) return;
   const answer = (document.querySelector(`.kb-cand[data-id="${id}"] .kb-cand-answer`)?.value || '').trim();
   if (!answer) { showToast('Answer cannot be empty', 'error'); return; }
+  // ponytail: any 3–5 digit number counts ("Plot 1200" too); reword the answer if it trips.
+  if (firstPriceIn(answer)) { showToast('Prices go in the price sheet, not here.', 'error'); return; }
 
   // Read-modify-write on the FRESHEST stored config (another approval may have
   // landed since this page loaded) so entries never clobber each other.

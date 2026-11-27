@@ -740,7 +740,8 @@
               <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Collaboration enquiries<textarea id="chatbot-canned-collaboration" class="text-input" rows="2" placeholder="Reply to collaboration enquiries" style="margin:0;resize:vertical"></textarea></label>
               <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Sales pitches<textarea id="chatbot-canned-sales_pitch" class="text-input" rows="2" placeholder="Reply to sales pitches" style="margin:0;resize:vertical"></textarea></label>
               <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Other non-lead messages<textarea id="chatbot-canned-misc" class="text-input" rows="2" placeholder="Reply to other non-lead messages" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Bot doesn't know the answer<textarea id="chatbot-canned-kb_miss" class="text-input" rows="2" placeholder="Hold reply when the bot doesn't know the answer" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Price check / held reply (team gets back)<textarea id="chatbot-canned-kb_miss" class="text-input" rows="2" placeholder="Sent while the team checks a price the bot doesn't have, or when a reply is held back" style="margin:0;resize:vertical"></textarea></label>
+              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Bot doesn't know (not a price)<textarea id="chatbot-canned-kb_miss_other" class="text-input" rows="2" placeholder="Sent when the bot can't answer a non-price question; the bot carries on" style="margin:0;resize:vertical"></textarea></label>
               <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Bot error (sent once per chat, bot stays on)<textarea id="chatbot-canned-llm_error" class="text-input" rows="2" placeholder="Sent when the bot errors out; the customer's next message tries again" style="margin:0;resize:vertical"></textarea></label>
               <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">First-message disclosure (added before the bot's first reply)<textarea id="chatbot-canned-disclosure" class="text-input" rows="2" placeholder="Prepended to the bot's first message — discloses it's an assistant" style="margin:0;resize:vertical"></textarea></label>
               <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Customer won't share a number<textarea id="chatbot-canned-refusal_ok" class="text-input" rows="2" placeholder="Reply when the customer declines to share their WhatsApp number" style="margin:0;resize:vertical"></textarea></label>
@@ -779,15 +780,15 @@
           </div>
         </div>
 
-        <!-- Teach the bot (kb_candidates — D17) -->
+        <!-- Unanswered questions (kb_candidates — review R6) -->
         <div class="section-card settings-card collapsed">
           <div class="section-header settings-head">
             <span class="section-icon"><svg class="icon"><use href="#i-bolt"/></svg></span>
-            <span class="section-title">Teach the Bot<span id="kb-candidates-count"></span></span>
+            <span class="section-title">Unanswered questions<span id="kb-candidates-count"></span></span>
             <span class="settings-chevron">▾</span>
           </div>
           <div class="settings-body" style="padding:8px 18px 18px">
-            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">When the bot can't answer (kb_miss), the customer's question and the first staff reply land here. <b>Approve</b> adds it to the knowledge base — future customers get the answer instantly. Edit the text before approving if needed; nothing is learned without approval.</p>
+            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">Questions the bot couldn't answer (not prices). Write the answer and approve: it joins the knowledge base as an FAQ.</p>
             <div id="kb-candidates-list" style="display:grid;gap:10px"></div>
           </div>
         </div>
