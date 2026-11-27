@@ -455,6 +455,10 @@
           <span class="sidebar-label">Activity</span>
           <span class="sidebar-badge" id="sidebar-activity-badge" style="display:none">0</span>
         </button>
+        <button class="sidebar-item" data-tab="review">
+          <span class="sidebar-icon"><svg class="icon"><use href="#i-chat"/></svg></span>
+          <span class="sidebar-label">Bot review</span>
+        </button>
         <button class="sidebar-item" data-tab="settings">
           <span class="sidebar-icon"><svg class="icon"><use href="#i-settings"/></svg></span>
           <span class="sidebar-label">Settings</span>
@@ -690,6 +694,30 @@
         </div>
       </div>
 
+      <!-- TAB: Bot review (shadow drafts + live bot replies — review R9) -->
+      <div class="admin-tab" id="admin-tab-review">
+        <div class="admin-tab-header">Bot review</div>
+        <div class="section-card" style="padding:0">
+          <div class="section-header">
+            <span class="section-icon"><svg class="icon"><use href="#i-chat"/></svg></span>
+            <span class="section-title" id="review-counter"></span>
+            <select id="review-days" class="ov-select" style="width:auto" onchange="loadReview()">
+              <option value="7">Last 7 days</option>
+              <option value="30">Last 30 days</option>
+              <option value="0">All</option>
+            </select>
+          </div>
+          <div class="review-layout">
+            <div id="review-list">
+              <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
+            </div>
+            <div class="leads-convo-log" id="review-thread">
+              <div class="leads-convo-empty">Pick a conversation</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- TAB: Settings -->
       <div class="admin-tab" id="admin-tab-settings">
         <div class="admin-tab-header">Settings</div>
@@ -856,6 +884,9 @@
       <button class="bottom-nav-item" data-tab="activity">
         <span><svg class="icon"><use href="#i-pulse"/></svg></span><span>Activity</span>
         <span class="sidebar-badge" id="bottom-activity-badge" style="display:none">0</span>
+      </button>
+      <button class="bottom-nav-item" data-tab="review">
+        <span><svg class="icon"><use href="#i-chat"/></svg></span><span>Review</span>
       </button>
       <button class="bottom-nav-item" data-tab="settings">
         <span><svg class="icon"><use href="#i-settings"/></svg></span><span>Settings</span>

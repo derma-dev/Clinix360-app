@@ -182,6 +182,7 @@ function switchAdminTab(tab) {
   if (tab === 'reports') initReportsTab();
   if (tab === 'notifications') loadAdminAlerts();
   if (tab === 'activity') loadActivity();
+  if (tab === 'review') loadReview();
   if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); loadCommentRules(); loadChatbotConfig(); loadKbCandidates(); }
   setRoute('#/admin/' + tab);
 }
@@ -585,7 +586,8 @@ function renderThreadHtml(data, lead) {
 // top; the realtime appender uses this directly so a live-arriving bubble doesn't
 // render a redundant "Today" divider before itself.
 function _messageBubbleHtml(m, lead) {
-  const src         = (lead?.source || '').toLowerCase();
+  if (m.draft) return _draftBubbleHtml(m.draft);   // Bot review's shadow drafts (threadWithDrafts)
+  const src        = (lead?.source || '').toLowerCase();
   const isIncoming  = ['in', 'incoming'].includes(m.direction);
   const timeStr     = new Date(m.created_at).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit', hour12: true });
   return `
@@ -1486,7 +1488,8 @@ function renderKbCandidates() {
     <div class="kb-cand" data-id="${c.id}" style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:10px 12px">
       <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:6px">
         <span style="font-size:13px;font-weight:600">❓ ${esc(c.question || '')}</span>
-        <span style="font-size:12px;color:#9ca3af;white-space:nowrap">${esc(formatConvoTime(c.created_at))}</span>
+        <span style="font-size:12px;color:#9ca3af;white-space:nowrap">${esc(formatConvoTime(c.created_at))}${c.lead_id
+          ? ` · <button class="link-btn" style="font-size:12px;padding:0" onclick="openReviewThread('${c.lead_id}')">Open chat</button>` : ''}</span>
       </div>
       <textarea class="text-input kb-cand-answer" rows="2" placeholder="Write the answer…" style="margin:0;resize:vertical">${esc(c.answer || '')}</textarea>
       <div style="display:flex;gap:8px;margin-top:8px">
@@ -1596,7 +1599,7 @@ async function loadActivityBadge() {
 async function loadActivity() {
   const list = document.getElementById('activity-list');
   if (!list) return;
-  let q = db.from('bot_events').select('id, created_at, level, kind, message')
+  let q = db.from('bot_events').select('id, created_at, level, kind, message, lead_id')
     .gte('created_at', new Date(Date.now() - 90 * DAY_MS).toISOString())
     .order('created_at', { ascending: false }).limit(200);
   if (document.getElementById('activity-filter')?.value === 'problems') q = q.in('level', ['error', 'warn']);
@@ -1618,7 +1621,8 @@ async function loadActivity() {
       <div class="notif-tag" style="background:#f3f4f6;color:#374151">${ACTIVITY_ICON[e.level] || 'ℹ️'} ${esc(e.kind)}</div>
       <div class="notif-body"><div class="notif-detail" style="font-weight:400;color:#374151">${esc(e.message || '')}</div></div>
       <div class="notif-right"><div class="notif-time">${new Date(e.created_at).toLocaleString('en-IN',
-        { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</div></div>
+        { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</div>
+        ${e.lead_id ? `<button class="link-btn" style="font-size:12px" onclick="openReviewThread('${e.lead_id}')">Open chat</button>` : ''}</div>
     </div>`).join('');
 }
 
@@ -1635,6 +1639,211 @@ function showIgTokenBanner(expiresAt) {
   const date = new Date(expiresAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' });
   el.textContent = `Instagram token expires in ${left} (${date}). The bot stops replying on Instagram then. Reconnect Instagram before that.`;
   el.style.display = 'block';
+}
+
+// ============================================================
+// BOT REVIEW (review R9)
+// Every conversation with bot activity in the period: shadow drafts
+// (bot_shadow_log) and live bot replies (lead_messages.is_bot). Its
+// thread is the real chat, each shadow draft under the customer message
+// it answered. ✅ / ✏️ set owner_verdict, owner_fix, reviewed_at (the
+// old digest's columns: "owner" is us now). The counter is the go-live
+// evidence. No verdict on live replies: nowhere to store one.
+// ============================================================
+const SHADOW_COLS   = 'id, lead_id, message_id, decision, error, created_at, owner_verdict, owner_fix';
+const REVIEW_ALERTS = ['medical', 'emergency', 'crisis', 'guard', 'abuse', 'llm_error'];
+const REVIEW_FLAGS  = [...REVIEW_ALERTS, 'redirect', 'kb_miss', 'requested', 'turn_cap'];
+let _reviewLeadId = null, _reviewDrafts = {}, _reviewMsgs = [];
+
+// A shadow turn's tags: handoff, and its reason when it's worth a look.
+const draftFlags = (r) => [r.decision?.handoff && 'handoff', r.decision?.reason || (r.error && 'llm_error')]
+  .filter(f => f === 'handoff' || REVIEW_FLAGS.includes(f));
+
+// The customer message a draft answered: by Meta id, else the last one before it (the old
+// digest's inboundOf). -1 when the draft is older than every customer message.
+function draftInboundIndex(r, msgs) {
+  const isIn = (m) => ['in', 'incoming'].includes(m.direction);
+  const byId = r.message_id ? msgs.findIndex(m => isIn(m) && m.external_message_id === r.message_id) : -1;
+  return byId >= 0 ? byId : msgs.findLastIndex(m => isIn(m) && Date.parse(m.created_at) <= Date.parse(r.created_at));
+}
+
+// The messages (oldest first) with each draft right after the message it answered.
+function threadWithDrafts(msgs, drafts) {
+  const after = {};
+  for (const r of drafts) (after[draftInboundIndex(r, msgs)] ||= []).push({ created_at: r.created_at, draft: r });
+  return [...(after[-1] || []), ...msgs.flatMap((m, i) => [m, ...(after[i] || [])])];
+}
+
+async function loadReview() {
+  const list = document.getElementById('review-list');
+  if (!list) return;
+  const days  = Number(document.getElementById('review-days')?.value || 0);
+  const since = new Date(days ? Date.now() - days * DAY_MS : 0).toISOString();
+  // ponytail: each read stops at 1000 rows and the lead ids ride in the URL; fine at this
+  // clinic's volume, page them if "All" outgrows it.
+  const [sh, live] = await Promise.all([
+    db.from('bot_shadow_log').select(SHADOW_COLS).gte('created_at', since).order('created_at', { ascending: false }).limit(1000),
+    db.from('lead_messages').select('lead_id, created_at').eq('is_bot', true).gte('created_at', since)
+      .order('created_at', { ascending: false }).limit(1000),
+  ]);
+  const ids = [...new Set([...(sh.data || []), ...(live.data || [])].map(r => r.lead_id).filter(Boolean))];
+  const lq  = ids.length ? await db.from('leads').select('id, customer_name, bot_state').in('id', ids) : { data: [] };
+  const error = sh.error || live.error || lq.error;
+  if (error) {
+    console.error('[bot review]', error.message);
+    list.innerHTML = '<div style="padding:24px;font-size:13px;color:#e53935">Could not load the bot review. Try again.</div>';
+    return;
+  }
+
+  const leads = Object.fromEntries(lq.data.map(l => [l.id, l]));
+  const convs = {};
+  const touch = (id, at, kind) => {
+    const c = convs[id] ||= { id, last: 0, shadow: false, live: false, flags: new Set() };
+    c.last = Math.max(c.last, Date.parse(at));
+    c[kind] = true;
+    return c;
+  };
+  for (const r of sh.data) {
+    if (!r.lead_id) continue;
+    const c = touch(r.lead_id, r.created_at, 'shadow');
+    draftFlags(r).forEach(f => c.flags.add(f));
+  }
+  for (const m of live.data) {
+    const c  = touch(m.lead_id, m.created_at, 'live');
+    const bs = leads[m.lead_id]?.bot_state || {};   // live turns keep no decision: the chat's latest handoff stands in
+    if (bs.handoff_reason) c.flags.add('handoff');
+    if (REVIEW_FLAGS.includes(bs.handoff_reason)) c.flags.add(bs.handoff_reason);
+    if (bs.llm_error_at) c.flags.add('llm_error');
+  }
+
+  const drafts = sh.data.filter(r => r.lead_id);
+  const n = (v) => drafts.filter(r => v ? r.owner_verdict === v : r.owner_verdict).length;
+  document.getElementById('review-counter').textContent =
+    `${drafts.length} drafts · ${n()} reviewed · ${n('good')} good · ${n('fix')} fixed`;
+
+  const tag = (t, cls = '') => `<span class="review-tag ${cls}">${esc(t)}</span>`;
+  const rows = Object.values(convs).sort((a, b) => b.last - a.last).map(c => `
+    <div class="notif-row review-pick${c.id === _reviewLeadId ? ' active' : ''}" data-id="${c.id}" onclick="openReviewThread('${c.id}')">
+      <div class="notif-body">
+        <div class="notif-title">${esc(leadDisplayName(leads[c.id]?.customer_name) || 'A customer')}</div>
+        <div>${c.shadow ? tag('Shadow') : ''}${c.live ? tag('Live', 'live') : ''}${[...c.flags].map(f => tag(f, REVIEW_ALERTS.includes(f) ? 'alert' : '')).join('')}</div>
+      </div>
+      <div class="notif-right"><div class="notif-time">${esc(formatConvoTime(new Date(c.last).toISOString()))}</div></div>
+    </div>`);
+  // Comment drafts have no lead (no DM went out to file one under): a card each.
+  const comments = sh.data.filter(r => !r.lead_id).map(r => `
+    <div class="notif-row">
+      <div class="notif-body">
+        <div class="notif-title">💬 ${esc(r.decision?.comment || '')}</div>
+        <div class="notif-meta">Public reply: ${esc(r.decision?.public || '—')}<br>DM: ${esc(r.decision?.dm || '—')}</div>
+      </div>
+      <div class="notif-right"><div class="notif-time">${esc(formatConvoTime(r.created_at))}</div></div>
+    </div>`);
+  list.innerHTML = rows.join('') + (comments.length
+    ? `<div class="notif-meta" style="padding:12px 18px 0;font-weight:700">Comment drafts</div>${comments.join('')}` : '')
+    || '<div style="padding:24px;font-size:13px;color:#9ca3af;text-align:center">No bot activity in this period.</div>';
+}
+
+// One conversation's thread. Also the "Open chat" of Activity and Unanswered questions.
+async function openReviewThread(leadId) {
+  _reviewLeadId = leadId;
+  if (!document.getElementById('admin-tab-review')?.classList.contains('active')) switchAdminTab('review');
+  document.querySelectorAll('.review-pick').forEach(el => el.classList.toggle('active', el.dataset.id === leadId));
+  const log = document.getElementById('review-thread');
+  if (!log) return;
+  log.innerHTML = '<div class="leads-convo-empty">Loading…</div>';
+  if (window.innerWidth <= 640) log.scrollIntoView({ behavior: 'smooth' });   // stacked under the list
+  const [msgs, sh, lead] = await Promise.all([
+    db.from('lead_messages').select('id, direction, message, created_at, is_bot, external_message_id')
+      .eq('lead_id', leadId).order('created_at', { ascending: true }),
+    db.from('bot_shadow_log').select(SHADOW_COLS).eq('lead_id', leadId).order('created_at', { ascending: true }),
+    db.from('leads').select('source').eq('id', leadId).maybeSingle(),
+  ]);
+  if (_reviewLeadId !== leadId) return;   // another conversation was picked meanwhile
+  const error = msgs.error || sh.error || lead.error;
+  if (error) { log.innerHTML = `<div class="leads-convo-empty">${esc(error.message)}</div>`; return; }
+  _reviewMsgs   = msgs.data;
+  _reviewDrafts = Object.fromEntries(sh.data.map(r => [r.id, r]));
+  const items = threadWithDrafts(msgs.data, sh.data);
+  // Only the source: with bot_state, renderThreadHtml would fold the thread behind the handoff card.
+  log.innerHTML = items.length ? renderThreadHtml(items, { source: lead.data?.source })
+                               : '<div class="leads-convo-empty">No messages yet</div>';
+  log.scrollTop = log.scrollHeight;
+}
+
+// One shadow draft (dashed): what live would have done, and its verdict.
+function _draftBubbleHtml(r) {
+  const d = r.decision || {};
+  const reply = String(d.reply || '').trim();
+  const what = d.handoff ? `Bot would hand off (${d.reason || 'no reason'})`
+             : reply ? 'Bot would say…' : `Bot would send nothing${d.reason ? ` (${d.reason})` : ''}`;
+  const verdict = r.owner_verdict === 'good' ? '✅ Marked good · '
+                : r.owner_verdict === 'fix' ? `✏️ Should say: “${esc(r.owner_fix || '')}” · ` : '';
+  return `
+    <div class="leads-convo-msg outgoing bot-draft" data-draft-id="${r.id}">
+      <div class="convo-msg-body">
+        <div class="leads-convo-msg-meta">🤖 ${esc(what)}${r.error ? ` · error: ${esc(r.error)}` : ''}</div>
+        ${reply ? `<div class="leads-convo-msg-text">${esc(reply)}</div>` : ''}
+        <div class="leads-convo-msg-meta review-verdict">${verdict}<button class="link-btn" onclick="reviewVerdict(${r.id}, 'good')">✅ Good</button>
+          <button class="link-btn" onclick="reviewFixBox(${r.id})">✏️ Fix</button></div>
+      </div>
+    </div>`;
+}
+
+function rerenderDraft(id) {
+  const el = document.querySelector(`#review-thread [data-draft-id="${id}"]`);
+  if (el && _reviewDrafts[id]) el.outerHTML = _draftBubbleHtml(_reviewDrafts[id]);
+}
+
+function reviewFixBox(id) {
+  const box = document.querySelector(`#review-thread [data-draft-id="${id}"] .review-verdict`);
+  if (!box) return;
+  box.innerHTML = `
+    <textarea class="text-input" rows="3" placeholder="What the bot should have said…" style="margin:0;resize:vertical;width:100%;min-width:240px"></textarea>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+      <button class="link-btn" onclick="rerenderDraft(${id})">Cancel</button>
+      <button class="primary-btn" onclick="reviewVerdict(${id}, 'fix')">Save</button>
+    </div>`;
+  const ta = box.querySelector('textarea');
+  ta.value = _reviewDrafts[id]?.owner_fix || '';
+  ta.focus();
+}
+
+async function reviewVerdict(id, verdict) {
+  const r = _reviewDrafts[id];
+  if (!r) return;
+  const fix = verdict === 'fix'
+    ? (document.querySelector(`#review-thread [data-draft-id="${id}"] textarea`)?.value || '').trim() : null;
+  if (verdict === 'fix' && !fix) { showToast('Write what the bot should have said', 'error'); return; }
+  const patch = { owner_verdict: verdict, owner_fix: fix, reviewed_at: new Date().toISOString() };
+  const { error } = await db.from('bot_shadow_log').update(patch).eq('id', id);
+  if (error) { console.error('[bot review]', error.message); showToast('Could not save — try again', 'error'); return; }
+  Object.assign(r, patch);
+  rerenderDraft(id);
+  loadReview();   // the counter
+  // A fix to a question the bot couldn't answer → Unanswered questions, unless it holds a
+  // price (prices come only from Telegram → the price sheet).
+  let note = verdict === 'good' ? 'Marked good' : 'Fix saved', ok = true;
+  if (verdict === 'fix' && r.decision?.reason === 'kb_miss') {
+    if (firstPriceIn(fix)) note += ' (not queued: prices go in the price sheet)';
+    else note += (ok = await queueReviewFix(r, fix)) ? ' and added to Unanswered questions' : ', but not added to Unanswered questions';
+  }
+  showToast(note, ok ? 'success' : 'error');
+}
+
+// The customer message the draft answered is the question. botReply already queued a blank
+// row for a non-price miss (R6): fill that one in, else add one.
+async function queueReviewFix(r, fix) {
+  const question = String(_reviewMsgs[draftInboundIndex(r, _reviewMsgs)]?.message || '').slice(0, 500);
+  if (!question) return false;
+  const answer = fix.slice(0, 2000);
+  const { data: open, error: readErr } = await db.from('kb_candidates').select('id')
+    .eq('lead_id', r.lead_id).eq('question', question).eq('status', 'pending').limit(1);
+  const { error } = readErr ? { error: readErr }
+    : open.length ? await db.from('kb_candidates').update({ answer }).eq('id', open[0].id)
+    : await db.from('kb_candidates').insert({ lead_id: r.lead_id, question, answer });
+  if (error) console.error('[kb_candidates]', error.message);
+  return !error;
 }
 
 // ============================================================

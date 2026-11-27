@@ -3951,6 +3951,25 @@ assert.equal(extractComments({}).length, 0);
     for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
   }
 
+  // ── Review R9: the console's Bot review puts each shadow draft under the customer
+  // message it answered (app.js is a browser script: its two pure functions are lifted out) ──
+  {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../../../app.js'), 'utf8');
+    const fn  = (name) => src.match(new RegExp(`^function ${name}\\([\\s\\S]*?^}`, 'm'))[0];
+    const { threadWithDrafts } = new Function(`${fn('draftInboundIndex')}\n${fn('threadWithDrafts')}\nreturn { threadWithDrafts };`)();
+    const A     = { id: 'A', direction: 'incoming', external_message_id: 'm1', created_at: '2026-11-20T10:00:00Z' };
+    const STAFF = { id: 'S', direction: 'outgoing', created_at: '2026-11-20T10:05:00Z' };
+    const B     = { id: 'B', direction: 'in', created_at: '2026-11-20T10:10:00Z' };   // day-1 direction value, no Meta id
+    const BOT   = { id: 'T', direction: 'outgoing', is_bot: true, created_at: '2026-11-20T10:20:00Z' };
+    const d = (id, message_id, created_at) => ({ id, message_id, created_at });
+    const drafts = [d('early', null, '2026-11-20T09:00:00Z'),          // before any customer message → top
+                    d('byId', 'm1', '2026-11-20T10:15:00Z'),           // Meta id wins over time (it'd be B's by time)
+                    d('byTime', 'unknown', '2026-11-20T10:11:00Z')];   // no id match → last customer message before it
+    assert.deepEqual(threadWithDrafts([A, STAFF, B, BOT], drafts).map(m => m.draft ? m.draft.id : m.id),
+                     ['early', 'A', 'byId', 'S', 'B', 'byTime', 'T']);
+    assert.deepEqual(threadWithDrafts([], [d('x', null, '2026-11-20T09:00:00Z')]).map(m => m.draft.id), ['x']);
+  }
+
   global.fetch = realFetch;
   console.log('meta-service: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });
