@@ -583,6 +583,11 @@ assert.equal(extractComments({}).length, 0);
   assert.equal(classifyInbound('skin jal gaya hai'), 'emergency');
   assert.equal(classifyInbound('khujli ho rahi hai aur khoon bhi beh raha hai'), 'emergency',
     'emergency must outrank medical');
+  assert.equal(classifyInbound('bleeding after laser'), 'emergency');
+  // review §1: hurry words are a booking, not a symptom
+  assert.equal(classifyInbound('urgent appointment chahiye'), null);
+  assert.equal(classifyInbound('turant booking'), null);
+  assert.equal(classifyInbound('abhi abhi dekha offer, hospital ke paas wali branch?'), null);
   // requested → wants a human
   assert.equal(classifyInbound('talk to a human please'), 'requested');
   assert.equal(classifyInbound('insaan se baat karo'), 'requested');
@@ -1241,7 +1246,7 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.patches[0].url.includes('leads?id=eq.L1'), true);
       const b = calls.patches[0].body;
       assert.equal(b.bot_active, false, 'handoff must flip bot_active off');
-      assert.equal(b.status, 'qualified');
+      assert.equal(b.status, undefined, 'a safety handoff is not a qualified lead (review §1)');
       assert.match(b.bot_state.handoff_summary, /medical/);
       assert.match(b.bot_state.handoff_summary, /khujli ho rahi hai/,
         'medical summary carries the customer verbatim (D11)');
@@ -1365,16 +1370,16 @@ assert.equal(extractComments({}).length, 0);
       process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
       const OWNER = { chat_id: 4242, name: 'Owner' };
       const spoke = [{ id: 'h1', direction: 'outgoing', message: 'hello!', is_bot: true, created_at: '2026-08-24T10:00:05Z' }];
-      // crisis → the one line (no disclosure, even on a first turn), a 🆘 alert, bot off
+      // crisis → only the one line (no disclosure, even on a first turn), nobody alerted, bot off (review §1)
       let calls = botMock({ config: CFG('live'), owner: OWNER });
       let r = await botReply(LEAD, { ...EV, messageText: 'Itne pimples hain, jeena nahi chahti' }, 'instagram');
       assert.equal(r.handoff, 'crisis');
       assert.equal(calls.gemini.length, 0);
-      assert.deepEqual(calls.sends.map(s => s.message.text),
-        ['I’m sorry you’re going through this. I can’t help with that here, but I’ve let our team know.']);
-      assert.ok(calls.telegrams[0].body.text.startsWith('🆘 Distress message: Priya Sharma'));
+      assert.deepEqual(calls.sends.map(s => s.message.text), ['Sorry, I can’t help you with that.']);
+      assert.equal(calls.telegrams.length + calls.alerts.length, 0);
       let b = calls.patches[0].body;
       assert.equal(b.bot_active, false);
+      assert.equal(b.status, undefined);
       assert.equal(b.bot_state.handoff_reason, 'crisis');
       assert.match(b.bot_state.handoff_summary, /Customer said: "Itne pimples hain, jeena nahi chahti"/);
 
@@ -2162,12 +2167,9 @@ assert.equal(extractComments({}).length, 0);
       assert.match(calls.sends[0].message.text, /Let me check with our team\.$/);
       assert.deepEqual(calls.patches[0].body.bot_state.team_questions, ['is there parking?', 'do you open on Sunday?']);
 
-      // FYIs: emergency (nothing sent to the customer), asks for a person.
-      // No ForceReply, no stored message id.
-      for (const [ev, head] of [
-        [{ ...EV, messageText: 'emergency! khoon beh raha hai' }, '🔴 Emergency: Priya Sharma'],
-        [{ ...EV, messageText: 'talk to a human please' }, '🙋 Asked for a person: Priya Sharma'],
-      ]) {
+      // FYI: asks for a person. No ForceReply, no stored message id.
+      {
+        const ev = { ...EV, messageText: 'talk to a human please' }, head = '🙋 Asked for a person: Priya Sharma';
         calls = botMock({ config: CFG('live'), owner: OWNER });
         await botReply(LEAD, ev, 'instagram');
         assert.equal(calls.telegrams.length, 1, head);
@@ -2205,10 +2207,30 @@ assert.equal(extractComments({}).length, 0);
         kinds.push(calls.events.map(e => `${e.level} ${e.kind}`));
         rows.push(...calls.events);
       }
-      assert.equal(quiet, 0, 'only price questions + emergency/crisis/requested alert the owner');
+      assert.equal(quiet, 0, 'only price questions + asks for a person alert the owner');
       assert.deepEqual(kinds, [['info medical'], [], []]);
       assert.equal(rows[0].lead_id, LEAD.id);
       assert.ok(!/khujli/.test(JSON.stringify(rows)), 'what the customer said stays in the chat');
+
+      // review §1: emergency, medical (net or model) and distress, on a lead ready to send
+      // (service, phone, branch, a branch WhatsApp) → no Telegram, no email, no lead_alert
+      // (the mock refuses a WhatsApp send, which would email), no status; one info row
+      const READY = { ...LEAD, bot_state: { qualification: { service: 'LHR FULL BODY P/S', phone: '9876543210', branch: 'Janakpuri' } } };
+      for (const [text, kind, over] of [
+        ['emergency! khoon beh raha hai', 'emergency', {}],
+        ['khujli ho rahi hai', 'medical', {}],
+        ['laser ke baad laal ho gaya', 'medical', { decision: { ...REPLY_DECISION, is_medical: true } }],
+        ['jeena nahi chahti', 'crisis', {}],
+      ]) {
+        calls = botMock({ config: CFG('live', { branch_whatsapp: { Janakpuri: '91111' } }), owner: OWNER, ...over });
+        assert.equal((await botReply(READY, { ...EV, messageText: text }, 'instagram')).handoff, kind);
+        assert.equal(calls.telegrams.length + calls.alerts.length, 0, `${kind}: nobody alerted`);
+        assert.equal(calls.patches.length, 1, `${kind}: one write, no lead_pushed stamp`);
+        assert.equal(calls.patches[0].body.status, undefined, `${kind}: never qualified`);
+        assert.equal(calls.patches[0].body.bot_active, false);
+        assert.deepEqual(calls.events.map(e => `${e.level} ${e.kind}`), [`info ${kind}`]);
+        assert.equal(calls.sends.length, kind === 'crisis' ? 1 : 0, `${kind}: only distress sends a line`);
+      }
 
       // email fallback: no owner linked, or Telegram refuses (403 = owner blocked
       // the bot) → the same alert by email to cfg.alert_email, no message id
@@ -2629,6 +2651,10 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(leadPushDue(L({ service: 'LHR', phone: '9876543210' }, { lead_pushed: { potential_lead: 't' } })), 'lead', 'upgrade');
     assert.equal(leadPushDue(L({ service: 'LHR', phone: '9876543210' }, { lead_pushed: { lead: 't' } })), null, 'at most twice');
     assert.equal(leadPushDue(L({ service: 'LHR' }, { lead_pushed: { lead: 't' } })), null);
+    // review §1: a safety handoff is never a lead, at the handoff or in the quiet push
+    for (const handoff_reason of ['emergency', 'medical', 'crisis'])
+      assert.equal(leadPushDue(L({ service: 'LHR', phone: '9876543210' }, { handoff_reason })), null, handoff_reason);
+    assert.equal(leadPushDue(L({ service: 'LHR' }, { handoff_reason: 'requested' })), 'potential_lead');
 
     // `hook` = the webhook's answers in order (a number = status, 'net' = network error)
     // `waError` = Meta's error message for a WhatsApp send (else it's accepted)

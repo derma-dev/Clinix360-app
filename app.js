@@ -1300,7 +1300,7 @@ const DEFAULT_CHATBOT_CONFIG = {
     // S12b G2 guardrails (GQ3); the server has the same lines as fallbacks.
     redirect:      'Sorry, I can’t help with that. I can help with our treatments, prices and appointments 😊 What would you like to know?',
     abuse:         'Sorry, I can’t help with that. If you’d like help with a treatment or an appointment, our team is happy to help.',
-    crisis:        'I’m sorry you’re going through this. I can’t help with that here, but I’ve let our team know.',
+    crisis:        'Sorry, I can’t help you with that.',
   },
   offer_stale_days: 30,              // D10
   daily_reply_cap: 30,               // S12c: bot replies per chat per IST day (loop guard); reaching it alerts the owner

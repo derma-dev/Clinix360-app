@@ -1543,8 +1543,10 @@ async function routeLeadFromReply(lead, text, payload) {
 // to layer 2. Tuned against the corpus by the Step 16 shadow replay.
 // 'right now' dropped (Step 16 replay): 10/10 corpus hits were false positives
 // ("is this offer av right now") — a time phrase, not a symptom.
+// 'urgent', 'turant', 'abhi abhi', 'hospital' dropped (review §1): "urgent appointment"
+// is a booking, and the symptom words below still catch a real one.
 const EMERGENCY_NET = [
-  'emergency', 'urgent', 'turant', 'abhi abhi',
+  'emergency',
   'khoon', 'bleed',
   'jal gaya', 'jala diya', 'jal gayi', 'burned', 'burns', 'blister',
   'saans', 'breathless', 'difficulty breathing', 'shortness of breath',
@@ -1554,7 +1556,6 @@ const EMERGENCY_NET = [
   'phail raha', 'spread ho raha', 'spreading',
   'pus', 'infection', 'infected',
   'unbearable', 'bardasht nahi', 'bahut zyada dard', 'severe pain',
-  'hospital',
 ];
 
 const MEDICAL_NET = [
@@ -1989,7 +1990,8 @@ function normalizePhone(raw) {
 const GUARD_COPY = {
   redirect: 'Sorry, I can’t help with that. I can help with our treatments, prices and appointments 😊 What would you like to know?',
   abuse:    'Sorry, I can’t help with that. If you’d like help with a treatment or an appointment, our team is happy to help.',
-  crisis:   'I’m sorry you’re going through this. I can’t help with that here, but I’ve let our team know.',
+  // Review §1: nobody is alerted, so the line promises no one.
+  crisis:   'Sorry, I can’t help you with that.',
 };
 
 // One canned-copy lookup that tolerates a missing/truncated config row.
@@ -2063,7 +2065,10 @@ function buildHandoffSummary(reason, botState, ev, guard) {
 // kb_miss/llm_error send their canned hold copy (D13); model-decided handoffs
 // send the model's own closing reply when it wrote one. A failed send never
 // aborts the handoff — staff still get the summary and the lead.
+// SAFETY_HANDOFFS (review §1) turn the bot off and do nothing else: no owner alert,
+// no status change, never a lead (leadPushDue). Staff see them in the inbox.
 const SOFT_HANDOFFS = ['qualified', 'wants_booking', 'declined_booking'];
+const SAFETY_HANDOFFS = ['emergency', 'medical', 'crisis'];
 // The handoffs we watch on the console's Activity page (bot_events), with their level.
 // Live only: a shadow turn never reaches handoffToStaff; bot_shadow_log has those.
 const HANDOFF_EVENTS = { turn_cap: 'warn', guard: 'info', emergency: 'info', medical: 'info', crisis: 'info' };
@@ -2121,7 +2126,7 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     // takeover (D12). Live 2026-09-22: after a 'qualified' handoff the customer's
     // "any other branch?" and "Hello?" got silence while no staff had picked up.
     bot_active: SOFT_HANDOFFS.includes(decision.reason),
-    status:     'qualified',
+    ...(SAFETY_HANDOFFS.includes(decision.reason) ? {} : { status: 'qualified' }),
     category,
     bot_state:  nextState,
   });
@@ -2162,16 +2167,14 @@ async function telegramApi(method, body) {
 // Plain text, so customer words need no escaping. Returns the Message.
 const sendTelegram = (chatId, text, extra = {}) => telegramApi('sendMessage', { chat_id: chatId, text, ...extra });
 
-// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies, S12b GQ1 distress, asks
-// for a person). kb_miss is a price question by now (Q30, see botReply); the rest are
-// FYIs. One alert per thread per incident comes free: each of these switches the bot
-// off for the thread, so the next message can't alert again. Bot errors and the daily
-// reply limit are ours, not the owner's: they go to bot_events (HANDOFF_EVENTS,
-// botReply's Gemini catch), like medical, guard and the other safety handoffs (review §2).
+// S3 — the handoffs that alert the owner: a price question (Q30, see botReply) and an
+// ask for a person (an FYI). One alert per thread per incident comes free: both switch
+// the bot off for the thread, so the next message can't alert again. Everything else is
+// ours, not the owner's: bot errors, the reply limit, guard and the safety handoffs
+// (emergency, medical, distress) go to bot_events (HANDOFF_EVENTS and botReply's
+// Gemini catch; review §1 §2).
 const OWNER_ALERTS = {
   kb_miss:   { head: '❓ Price question',      ask: 'Reply to this message with the price and I’ll pass it on.' },
-  emergency: { head: '🔴 Emergency',           ask: 'The bot didn’t reply. Please answer them yourself.' },
-  crisis:    { head: '🆘 Distress message',    ask: 'The bot sent one short line and stepped back. Please reach out to them yourself.' },
   requested: { head: '🙋 Asked for a person',  ask: 'The bot has stepped back. Please answer them yourself.' },
 };
 
@@ -2234,8 +2237,11 @@ async function sendAlertEmail(cfg, subject, title, body, footer) {
 // At most twice per customer: a potential_lead, then a lead once a phone
 // arrives. bot_state.lead_pushed stamps each sent type, so a Meta redelivery, a
 // later handoff or the next hourly run never resends it.
+// A chat whose last handoff was emergency / medical / distress is never a lead
+// (review §1): the handoff push and bot-hourly's quiet push both stop here.
 function leadPushDue(lead) {
   if ((lead?.category || 'lead') !== 'lead') return null;
+  if (SAFETY_HANDOFFS.includes(lead.bot_state?.handoff_reason)) return null;
   const q    = lead.bot_state?.qualification || {};
   const type = q.phone ? 'lead' : q.service ? 'potential_lead' : null;
   const sent = lead.bot_state?.lead_pushed || {};
