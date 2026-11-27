@@ -2139,7 +2139,7 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
   // The first line only: what the customer said (a symptom, for medical) stays in the chat.
   if (HANDOFF_EVENTS[decision.reason])
     await logEvent(HANDOFF_EVENTS[decision.reason], decision.reason, summary.split('\n')[0], { lead_id: lead.id });
-  // S2 — a handoff settles the chat: push it to the client's webhook (never throws).
+  // S2 — a handoff settles the chat: push it to the branch's WhatsApp (never throws).
   // S6 — except a price question the owner can still answer: that chat settles at
   // their answer (the bot resumes) or at the 20 h fallback (owner_no_reply).
   if (!ownerQuestionOpen(nextState)) await pushLead(db, { ...lead, category, bot_state: nextState }, cfg);
@@ -2235,7 +2235,7 @@ async function sendAlertEmail(cfg, subject, title, body, footer) {
   }
 }
 
-// ── Lead push → the branch's WhatsApp (S2b), else the client's webhook (Make) · service tracker S2 (Q7 Q31 Q34) ──
+// ── Lead push → the branch's WhatsApp (S2b; Make removed, review §3) · service tracker S2 (Q7 Q31 Q34) ──
 // A chat settles at a bot handoff, or after chatbot_config.lead_quiet_hours with
 // no new message (bot-hourly.js). Then: `lead` if a phone is known,
 // `potential_lead` if only a service is, nothing for non-leads or empty chats.
@@ -2251,13 +2251,6 @@ function leadPushDue(lead) {
   const type = q.phone ? 'lead' : q.service ? 'potential_lead' : null;
   const sent = lead.bot_state?.lead_pushed || {};
   return type && !sent[type] && !sent.lead ? type : null;
-}
-
-// The whole thread, one line per message: "[2 Oct, 10:15] Customer: …".
-function conversationText(rows) {
-  return rows.map(m =>
-    `[${istStamp(m.created_at)}] ${isIncomingRow(m) ? 'Customer' : m.is_bot ? 'Bot' : 'Staff'}: ${m.message}`
-  ).join('\n');
 }
 
 // What the bot would quote: a fresh post offer, else the sheet price (S11c),
@@ -2276,28 +2269,6 @@ function priceQuoted(botState, cfg) {
   }
   const e = (cfg?.kb?.entries || []).find(x => x.type === 'service' && x.key === svc && x.price);
   return e ? `from ₹${e.price}` : '';
-}
-
-// One POST, 3 tries with backoff on 429 / 5xx / network errors (same pattern as
-// send-automation-webhook). Any other 4xx (400 bad payload, 410 webhook gone)
-// won't fix itself on retry. Optional LEAD_WEBHOOK_KEY → Make's API-key header (Q10).
-async function postLeadWebhook(url, payload) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (process.env.LEAD_WEBHOOK_KEY) headers['x-make-apikey'] = process.env.LEAD_WEBHOOK_KEY;
-  let error;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(payload),
-                                     signal: AbortSignal.timeout(8000) });
-      if (res.ok) return { ok: true };
-      error = `HTTP ${res.status}`;
-      if (res.status !== 429 && res.status < 500) break;
-    } catch (e) {
-      error = e.message;
-    }
-    if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
-  }
-  return { ok: false, error };
 }
 
 // S2b (W18): the customer's own pick first, then a branch staff or a button set.
@@ -2336,76 +2307,40 @@ async function leadSummary(model, rows, q, price) {
 
 // Never throws: a failed push must not break the handoff or the hourly run.
 // Unstamped failures are retried by the next hourly run; we get one email and one
-// bot_events row per lead + type, so a dead webhook can't flood either.
-// S2b: chatbot_config.branch_whatsapp ({ "Janakpuri": "91…" }) set → the lead goes
-// to its branch's WhatsApp as the lead_alert template, not to Make. Remove the
-// key to roll back to Make.
+// bot_events row per lead + type, so a failing send can't flood either.
+// S2b: chatbot_config.branch_whatsapp ({ "Janakpuri": "91…" }) → the lead goes to its
+// branch's WhatsApp as the lead_alert template. Remove the key to stop lead alerts.
 async function pushLead(db, lead, cfg, quiet = false) {
   const type = leadPushDue(lead);
   const wa   = cfg?.branch_whatsapp;
-  const url  = process.env.LEAD_WEBHOOK_URL;
   if (!type) return null;
-  if (!wa && !url) { console.warn('[meta-service] LEAD_WEBHOOK_URL not set — lead push skipped'); return null; }
+  if (!wa) { console.warn('[meta-service] branch_whatsapp not set, lead push skipped'); return null; }
   const bs = lead.bot_state || {};
   const q  = bs.qualification || {};
   try {
-    let branch = q.branch || '';
-    if (wa) {
-      branch = leadBranch(lead, await db.listBranches())?.name;
-      // No branch, no message (W18). Unstamped, so the hourly run sends it once one is named.
-      if (!branch) { console.log(`[meta-service] lead push: lead ${lead.id} has no branch yet — not sent`); return null; }
-    } else if (!branch && lead.branch_id && lead.branch_id !== process.env.META_BRANCH_ID) {
-      branch = (await db.listBranches()).find(b => b.id === lead.branch_id)?.name || '';
-    }
+    const branch = leadBranch(lead, await db.listBranches())?.name;
+    // No branch, no message (W18). Unstamped, so the hourly run sends it once one is named.
+    if (!branch) { console.log(`[meta-service] lead push: lead ${lead.id} has no branch yet — not sent`); return null; }
     const profile = lead.instagram_user_id ? await fetchInstagramProfile(lead.instagram_user_id) : null;
     const conversationUrl = profile?.username ? `https://ig.me/m/${profile.username}` : '';
-    const summary = (quiet ? `Chat went quiet${qualificationBits(q)}` +
-                               (bs.handoff_summary ? `\nEarlier: ${bs.handoff_summary}` : '')
-                           : bs.handoff_summary) +
-                    (bs.team_questions?.length ? `\nTeam to confirm: ${bs.team_questions.map(x => `"${x}"`).join(', ')}` : '');
-    let r, where, hint;
-    if (wa) {
-      where = `the ${branch} WhatsApp`;
-      hint  = `401 = the token; 132001 = the template isn't approved; no number = branch_whatsapp has no entry for ${branch}.`;
-      // The chat itself isn't sent (W9), only leadSummary's two sentences. The other
-      // fields carry service, phone, time and price; the alert email keeps `summary`.
-      if (!wa[branch]) r = { ok: false, error: `no number for ${branch} in branch_whatsapp` };
-      else {
-        const price = priceQuoted(bs, cfg);
-        // Only this conversation (botReply's conv_started_at): a returning customer's old chat isn't this lead.
-        const since = Date.parse(bs.conv_started_at || '');
-        const about = await leadSummary(cfg.model, (await db.listRecentMessages(lead.id, 50))
-          .filter(m => !(Date.parse(m.created_at) < since)), q, price);
-        r = await sendWhatsAppTemplate(wa[branch], 'lead_alert', [type.replace('_', ' '), branch, lead.customer_name,
-              q.phone, q.service, q.preferred_time, price, about, conversationUrl])
-              .then(() => ({ ok: true }), e => ({ ok: false, error: e.message }));
-      }
-    } else {
-      // ponytail: 500 newest messages; a longer thread loses its oldest lines.
-      const rows = await db.listRecentMessages(lead.id, 500);
-      // Fixed field list, every key always present: Make locks its data structure
-      // to the first payload it sees.
-      const payload = {
-        lead_type:        type,
-        source:           bs.source || lead.source || 'instagram',   // S7: 'instagram_comment'
-        ig_user_id:       lead.instagram_user_id || '',
-        name:             lead.customer_name || '',
-        phone:            q.phone || '',
-        service:          q.service || '',
-        branch,
-        location:         q.location || '',
-        preferred_time:   q.preferred_time || '',
-        price_quoted:     priceQuoted(bs, cfg),
-        reason:           bs.handoff_reason || 'quiet',
-        summary,
-        conversation:     conversationText(rows),
-        conversation_url: conversationUrl,
-        post_url:         bs.post_url || '',                    // S7: the post a comment lead came from
-        created_at:       lead.created_at || '',
-      };
-      where = 'the webhook';
-      hint  = 'A 4xx usually means the webhook URL is wrong or the scenario is off.';
-      r = await postLeadWebhook(url, payload);
+    // The push-failed email's body. The WhatsApp lead itself carries leadSummary's sentences.
+    const summary = quiet ? `Chat went quiet${qualificationBits(q)}` + (bs.handoff_summary ? `\nEarlier: ${bs.handoff_summary}` : '')
+                          : bs.handoff_summary || '';
+    const where = `the ${branch} WhatsApp`;
+    const hint  = `401 = the token; 132001 = the template isn't approved; no number = branch_whatsapp has no entry for ${branch}.`;
+    let r;
+    // The chat itself isn't sent (W9), only leadSummary's two sentences. The other
+    // fields carry service, phone, time and price.
+    if (!wa[branch]) r = { ok: false, error: `no number for ${branch} in branch_whatsapp` };
+    else {
+      const price = priceQuoted(bs, cfg);
+      // Only this conversation (botReply's conv_started_at): a returning customer's old chat isn't this lead.
+      const since = Date.parse(bs.conv_started_at || '');
+      const about = await leadSummary(cfg.model, (await db.listRecentMessages(lead.id, 50))
+        .filter(m => !(Date.parse(m.created_at) < since)), q, price);
+      r = await sendWhatsAppTemplate(wa[branch], 'lead_alert', [type.replace('_', ' '), branch, lead.customer_name,
+            q.phone, q.service, q.preferred_time, price, about, conversationUrl])
+            .then(() => ({ ok: true }), e => ({ ok: false, error: e.message }));
     }
     const now = new Date().toISOString();
     if (r.ok) {
@@ -3081,7 +3016,8 @@ function settleDecision(decision, leadCategory, cfg, ctx = {}) {
   }
   // Q30 — the owner is asked about unknown PRICES only. Any other question the
   // KB can't answer: no handoff, the bot says the team will confirm it and keeps
-  // qualifying, and the question goes in the lead summary (team_questions).
+  // qualifying, and the question is kept in team_questions (no reader since Make went;
+  // review R6 turns it into the Unanswered questions queue).
   if (decision.reason === 'kb_miss' && !decision.asks_price) {
     decision = { ...decision, handoff: false,
                  reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss') };

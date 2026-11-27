@@ -1577,7 +1577,7 @@ assert.equal(extractComments({}).length, 0);
       const WA = CFG('live', { branch_whatsapp: { Janakpuri: '91111' } });
       c = botMock({ config: CFG('live'), history: [LISTED], decision: CLOSE });
       let r = await botReply(LEAD, { ...EV, messageText: '9998853310' }, 'instagram');
-      assert.equal(r.handoff, 'wants_booking', 'the Make path sends a lead without a branch: no question');
+      assert.equal(r.handoff, 'wants_booking', 'no branch_whatsapp → no lead goes out, so no question');
       c = botMock({ config: WA, history: [LISTED], decision: CLOSE });
       r = await botReply(LEAD, { ...EV, messageText: '9998853310' }, 'instagram');
       assert.deepEqual(r, { sent: true });
@@ -2613,9 +2613,25 @@ assert.equal(extractComments({}).length, 0);
     const m = computeBotMetrics({ chats, stamped, commentIds: ['d', 'f'], botMessages: 12 }, SINCE);
     assert.deepEqual(m, { chats: 7, complete: 2, potential: 2, general: 2, comment_dms: 2, comment_leads: 1,
                           top_services: 'laser 3 · PRP 1', branches: 'Dwarka 2 · Adajan 1 · no branch yet 1',
-                          pushed: 3, push_failed: 1, price_asked: 2, price_answered: 1, price_no_reply: 1,
+                          pushed: 3, push_failed: 1, no_branch: 3, price_asked: 2, price_answered: 1, price_no_reply: 1,
                           safety: 2, kb_miss: 1, turn_cap: 1, redirected: 1, abuse: 1, guard: 2, crisis: 1,
                           resumed_signoff: 1, resumed_quiet: 1, bot_messages: 12 });
+    // Review §3: "Not sent (no branch)" — due to go, but no branch to send it to
+    process.env.META_BRANCH_ID = 'FALLBACK';
+    const nb = (bs, extra = {}) => ({ id: 'x', category: 'lead', bot_state: bs, ...extra });
+    const P = { phone: '9876543210', service: 'laser' };
+    assert.equal(computeBotMetrics({ chats: [
+      nb(q(P)),                                          // counted
+      nb(q(P), { branch_id: 'FALLBACK' }),               // the Instagram default isn't a branch → counted
+      nb(q({ service: 'laser' })),                       // a potential lead → counted
+      nb(q(P), { branch_id: 'JPR' }),                    // staff routed it
+      nb(q({ ...P, branch: 'Dwarka' })),                 // the customer picked one
+      nb({ ...q(P), lead_pushed: { lead: IN } }),        // already sent
+      nb({ ...q(P), handoff_reason: 'medical' }),        // never a lead (review §1)
+      nb(q({ location: 'Adajan' })),                     // nothing to send
+      { ...nb(q(P)), category: 'collab' },               // not a customer
+    ], stamped: [], commentIds: [], botMessages: 0 }, SINCE).no_branch, 3);
+    delete process.env.META_BRANCH_ID;
     const empty = computeBotMetrics({ chats: [], stamped: [], commentIds: [], botMessages: 0 }, SINCE);
     assert.equal(empty.top_services, 'none');
     assert.equal(empty.branches, 'none');
@@ -2639,6 +2655,7 @@ assert.equal(extractComments({}).length, 0);
       'Leads per branch: Dwarka 2 · Adajan 1 · no branch yet 1',
       '',
       'Leads sent: 3 · ⚠️ 1 failed, check the alert email',
+      'Not sent (no branch): 3',
       'Price questions to you: 2 · 1 answered · 1 no reply in time',
       'Medical / emergency: 2',
       'Bot didn’t know (kb_miss): 1',
@@ -2653,17 +2670,15 @@ assert.equal(extractComments({}).length, 0);
     assert.ok(reportText(empty, 7).startsWith('📊 DSkin DM Assistant — weekly report (last 7 days)'));
   }
 
-  // ── S2 lead push → client webhook (Q7 Q31 Q34) ──
+  // ── S2 lead push → the branch's WhatsApp (Q7 Q31 Q34; S2b; Make removed, review §3) ──
   {
     const { pushLead, leadPushDue } = require('./meta-service');
-    const realSetTimeout = global.setTimeout;
-    global.setTimeout = (fn) => realSetTimeout(fn, 0);           // no real backoff waits
     process.env.SUPABASE_URL = 'http://supabase.test';
     process.env.SUPABASE_SERVICE_ROLE_KEY = 'service_key';
     process.env.META_ACCESS_TOKEN = 'ig_token';
     process.env.META_BRANCH_ID = 'FALLBACK';
     process.env.RESEND_API_KEY = 'test_resend';
-    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+    process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'PNID';
 
     // Types (Q34): phone → lead · service only → potential_lead · else nothing;
     // a sent type never repeats, a potential_lead upgrades once to a lead.
@@ -2683,18 +2698,11 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(leadPushDue(L({ service: 'LHR', phone: '9876543210' }, { handoff_reason })), null, handoff_reason);
     assert.equal(leadPushDue(L({ service: 'LHR' }, { handoff_reason: 'requested' })), 'potential_lead');
 
-    // `hook` = the webhook's answers in order (a number = status, 'net' = network error)
     // `waError` = Meta's error message for a WhatsApp send (else it's accepted)
-    const pushMock = ({ hook = [200], history = [], botTurn = null, waError = null } = {}) => {
-      const calls = { hooks: [], alerts: [], patches: [], profiles: 0, sends: [], inserts: [], wa: [], events: [] };
+    const pushMock = ({ history = [], botTurn = null, waError = null } = {}) => {
+      const calls = { alerts: [], patches: [], profiles: 0, sends: [], inserts: [], wa: [], events: [] };
       global.fetch = async (url, opts = {}) => {
         if (url.includes('/rest/v1/bot_events')) { calls.events.push(JSON.parse(opts.body)); return { ok: true, status: 201 }; }
-        if (url.startsWith('https://hook.make.test')) {
-          calls.hooks.push({ headers: opts.headers, body: JSON.parse(opts.body) });
-          const r = hook[calls.hooks.length - 1] ?? hook.at(-1);
-          if (r === 'net') throw new Error('fetch failed');
-          return { ok: r < 300, status: r };
-        }
         if (url.includes('graph.facebook.com')) {
           calls.wa.push(JSON.parse(opts.body));
           return waError ? { ok: false, status: 401, json: async () => ({ error: { message: waError } }) }
@@ -2715,7 +2723,8 @@ assert.equal(extractComments({}).length, 0);
         if (url.includes('/lead_messages') && opts.method === 'POST') { calls.inserts.push(JSON.parse(opts.body)); return { ok: true, json: async () => [{ id: 'o1' }] }; }
         if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') { calls.patches.push(JSON.parse(opts.body)); return { ok: true, json: async () => [] }; }
         if (url.includes('settings?key=eq.chatbot_config'))
-          return { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live', canned: {}, kb: { entries: [] } }) }] };
+          return { ok: true, json: async () => [{ value: JSON.stringify({ mode: 'live', canned: {}, kb: { entries: [] },
+                                                                          branch_whatsapp: { Janakpuri: '91111' } }) }] };
         if (url.includes('generativelanguage.googleapis.com'))
           return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(botTurn) }] } }] }) };
         throw new Error('unexpected fetch: ' + url);
@@ -2724,6 +2733,8 @@ assert.equal(extractComments({}).length, 0);
     };
     const db = createSupabaseClient();
     const CFG = { kb: { entries: [{ type: 'service', key: 'LHR FULL BODY P/S', price: 35000 }] } };
+    const WA_CFG = { ...CFG, branch_whatsapp: { 'Janakpuri': '91111', 'Dwarka Sec 12': '91333' } };   // no Kirti Nagar
+    const params = (c) => c.wa[0].template.components[0].parameters.map(p => p.text);
     const HISTORY = [
       { id: 'm1', direction: 'incoming', message: 'laser price?', is_bot: false, created_at: '2026-10-02T04:45:00Z' },
       { id: 'm2', direction: 'outgoing', message: 'Starts from ₹35000. Your WhatsApp?', is_bot: true, created_at: '2026-10-02T04:45:05Z' },
@@ -2737,105 +2748,7 @@ assert.equal(extractComments({}).length, 0);
                                 handoff_reason: 'wants_booking', handoff_summary: 'Bot handed off (wants_booking) — service LHR FULL BODY P/S',
                                 turn_count: 2 } };
 
-    // Payload: fixed field list, every key present, values from the lead + thread
-    let calls = pushMock({ history: HISTORY });
-    assert.equal(await pushLead(db, LEAD, CFG), 'lead');
-    assert.equal(calls.hooks.length, 1);
-    const p = calls.hooks[0].body;
-    assert.deepEqual(Object.keys(p), ['lead_type', 'source', 'ig_user_id', 'name', 'phone', 'service', 'branch',
-      'location', 'preferred_time', 'price_quoted', 'reason', 'summary', 'conversation', 'conversation_url',
-      'post_url', 'created_at'], 'fixed field list (Make locks it after the first sample)');
-    assert.deepEqual({ ...p, conversation: undefined }, {
-      lead_type: 'lead', source: 'instagram', ig_user_id: 'IGS_9', name: 'Riya Sharma', phone: '9876543210',
-      service: 'LHR FULL BODY P/S', branch: 'Janakpuri', location: 'Uttam Nagar', preferred_time: 'Saturday evening',
-      price_quoted: 'from ₹35000', reason: 'wants_booking',
-      summary: 'Bot handed off (wants_booking) — service LHR FULL BODY P/S',
-      conversation: undefined, conversation_url: 'https://ig.me/m/riya.s', post_url: '', created_at: '2026-10-02T04:44:00Z' });
-    assert.equal(p.conversation, [
-      '[2 Oct, 10:15] Customer: laser price?',
-      '[2 Oct, 10:15] Bot: Starts from ₹35000. Your WhatsApp?',
-      '[2 Oct, 10:16] Customer: 9876543210',
-      '[2 Oct, 10:30] Staff: Our team will call you.'].join('\n'), 'whole thread, one IST-stamped line per message');
-    assert.equal(calls.hooks[0].headers['x-make-apikey'], undefined, 'no key header unless LEAD_WEBHOOK_KEY is set');
-    // stamp keeps the rest of bot_state
-    assert.equal(calls.patches.length, 1);
-    assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'type stamped with a time');
-    assert.equal(calls.patches[0].bot_state.turn_count, 2, 'stamp merges into bot_state, never replaces it');
-
-    // S11c P3: with a synced sheet, price_quoted is the sheet price, never the corpus one
-    const SHEET_CFG = { ...CFG, price_list: { items: [{ kind: 'service', name: 'LHR FULL BODY 1s', price: 8700 },
-                                                      { kind: 'package', name: 'LHR FULL BODY 6s', price: 45000 }] } };
-    const svcLead = (service) => ({ ...LEAD, bot_state: { ...LEAD.bot_state, qualification: { ...LEAD.bot_state.qualification, service } } });
-    // The model's case or a dropped unit code still finds the price (live 2026-11-04);
-    // a vaguer name ("LHR") never borrows a longer service's price.
-    for (const [service, quoted] of [['LHR FULL BODY 1s', '₹8,700'], ['LHR FULL BODY P/S', ''],
-                                     ['Lhr full body', '₹8,700'], ['LHR', ''], ['LHR FULL BODY 6s', '₹45,000']]) {
-      calls = pushMock({ history: HISTORY });
-      await pushLead(db, svcLead(service), SHEET_CFG);
-      assert.equal(calls.hooks[0].body.price_quoted, quoted, service);
-    }
-
-    // Quiet push: "Chat went quiet" summary keeps the earlier handoff; a routed
-    // branch is named when the customer never typed one; a fresh post offer wins
-    process.env.LEAD_WEBHOOK_KEY = 'mk_123';
-    calls = pushMock({ history: HISTORY });
-    const quietLead = { ...LEAD, branch_id: 'DWK', bot_state: { ...LEAD.bot_state,
-      qualification: { service: 'LHR FULL BODY P/S' }, lead_pushed: {},
-      last_offer: { service: 'LHR FULL BODY P/S', offer_price: 9999, last_seen: new Date().toISOString() } } };
-    assert.equal(await pushLead(db, quietLead, CFG, true), 'potential_lead');
-    const q = calls.hooks[0].body;
-    assert.equal(q.lead_type, 'potential_lead');
-    assert.equal(q.phone, '');
-    assert.equal(q.branch, 'Dwarka Sec 12');
-    assert.equal(q.price_quoted, '₹9999 (post offer)');
-    assert.equal(q.summary, 'Chat went quiet — service LHR FULL BODY P/S\nEarlier: Bot handed off (wants_booking) — service LHR FULL BODY P/S');
-    assert.equal(calls.hooks[0].headers['x-make-apikey'], 'mk_123', 'LEAD_WEBHOOK_KEY → Make API-key header (Q10)');
-    delete process.env.LEAD_WEBHOOK_KEY;
-
-    // Retry: 429 / 5xx / network errors get 3 tries; success on the 3rd still stamps
-    calls = pushMock({ hook: [503, 'net', 200], history: HISTORY });
-    assert.equal(await pushLead(db, LEAD, CFG), 'lead');
-    assert.equal(calls.hooks.length, 3);
-    assert.equal(calls.alerts.length, 0);
-    calls = pushMock({ hook: [429], history: HISTORY });
-    assert.equal(await pushLead(db, LEAD, CFG), null);
-    assert.equal(calls.hooks.length, 3, '429 retried, gives up after 3');
-
-    // No retry on 400 / 410: one try, one alert email, no lead_pushed stamp (the
-    // hourly run retries) — and the alert is sent once per lead + type
-    for (const status of [400, 410]) {
-      calls = pushMock({ hook: [status], history: HISTORY });
-      assert.equal(await pushLead(db, LEAD, CFG), null);
-      assert.equal(calls.hooks.length, 1, `${status} not retried`);
-      assert.equal(calls.alerts.length, 1, `${status} alerts us`);
-      assert.match(calls.alerts[0].subject, /Lead push failed — Riya Sharma/);
-      assert.match(calls.alerts[0].html, new RegExp(`HTTP ${status}`));
-      assert.deepEqual(calls.events.map(e => [e.level, e.kind, e.lead_id]), [['error', 'lead_push', LEAD.id]], 'and one Activity row');
-      assert.match(calls.events[0].message, new RegExp(`The lead for Riya Sharma didn't reach the webhook \\(HTTP ${status}`));
-      assert.equal(calls.patches.length, 1);
-      assert.equal(calls.patches[0].bot_state.lead_pushed, undefined, 'a failed push is not stamped as sent');
-      assert.ok(calls.patches[0].bot_state.lead_push_alerted.lead);
-    }
-    calls = pushMock({ hook: [410], history: HISTORY });
-    await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_push_alerted: { lead: 't' } } }, CFG);
-    assert.equal(calls.alerts.length + calls.events.length, 0, 'already alerted for this lead + type → no second email or row');
-
-    // Nothing due / no URL → no webhook call at all
-    calls = pushMock({ history: HISTORY });
-    assert.equal(await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_pushed: { lead: 't' } } }, CFG), null);
-    delete process.env.LEAD_WEBHOOK_URL;
-    assert.equal(await pushLead(db, LEAD, CFG), null);
-    assert.equal(calls.hooks.length + calls.patches.length, 0);
-    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
-
-    // S3 (Q30): non-price questions the bot left to the team ride in the summary
-    calls = pushMock({ history: HISTORY });
-    await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, team_questions: ['is there parking?', 'open Sunday?'] } }, CFG);
-    assert.equal(calls.hooks[0].body.summary,
-      'Bot handed off (wants_booking) — service LHR FULL BODY P/S\nTeam to confirm: "is there parking?", "open Sunday?"');
-
-    // S2b L2: branch_whatsapp set → the branch's WhatsApp gets the lead_alert
-    // template instead of Make, and only once a branch is known (W18)
+    // The branch: the customer's pick, else a branch staff or a button set (W18)
     {
       const { leadBranch } = require('./meta-service');
       const BR = [{ id: 'DWK', name: 'Dwarka Sec 12' }, { id: 'JPR', name: 'Janakpuri' }, { id: 'KN', name: 'Kirti Nagar' }];
@@ -2845,22 +2758,54 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(leadBranch(at(undefined, 'FALLBACK'), BR), null, 'the fallback branch is "never chose"');
       assert.equal(leadBranch(at('Uttam Nagar', 'FALLBACK'), BR), null, 'a pick that is no branch');
       assert.equal(leadBranch({ branch_id: 'KN' }, BR).name, 'Kirti Nagar', 'no bot_state yet');
-
-      process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'PNID';
-      const WA_CFG = { ...CFG, branch_whatsapp: { 'Janakpuri': '91111', 'Dwarka Sec 12': '91333' } };   // no Kirti Nagar
+    }
+    let calls;
+    {
       const withQ = (qual, extra = {}) => ({ ...LEAD, ...extra, bot_state: { ...LEAD.bot_state, qualification: qual } });
-      const params = (c) => c.wa[0].template.components[0].parameters.map(p => p.text);
 
+      // The branch's WhatsApp gets the lead_alert template
       calls = pushMock({ history: HISTORY });
       assert.equal(await pushLead(db, LEAD, WA_CFG), 'lead');
-      assert.equal(calls.hooks.length, 0, 'not to Make');
       assert.equal(calls.wa.length, 1);
       assert.equal(calls.wa[0].to, '91111', "the customer's branch's number");
       assert.equal(calls.wa[0].template.name, 'lead_alert');
       // No summary from the model → the customer's own words, not the bot's handoff reason (2026-11-04)
       assert.deepEqual(params(calls), ['lead', 'Janakpuri', 'Riya Sharma', '9876543210', 'LHR FULL BODY P/S',
         'Saturday evening', 'from ₹35000', 'laser price? / 9876543210', 'https://ig.me/m/riya.s']);
-      assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'send OK → stamped');
+      assert.equal(calls.patches.length, 1);
+      assert.ok(calls.patches[0].bot_state.lead_pushed.lead, 'send OK → stamped with a time');
+      assert.equal(calls.patches[0].bot_state.turn_count, 2, 'stamp merges into bot_state, never replaces it');
+
+      // No branch_whatsapp, or nothing due → no call at all (review §3: Make is gone)
+      calls = pushMock({ history: HISTORY });
+      assert.equal(await pushLead(db, LEAD, CFG), null);
+      assert.equal(await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_pushed: { lead: 't' } } }, WA_CFG), null);
+      assert.equal(calls.wa.length + calls.patches.length + calls.alerts.length + calls.profiles, 0);
+
+      // S11c P3: with a synced sheet, the price is the sheet price, never the corpus one.
+      // The model's case or a dropped unit code still finds it (live 2026-11-04);
+      // a vaguer name ("LHR") never borrows a longer service's price.
+      const SHEET_CFG = { ...WA_CFG, price_list: { items: [{ kind: 'service', name: 'LHR FULL BODY 1s', price: 8700 },
+                                                           { kind: 'package', name: 'LHR FULL BODY 6s', price: 45000 }] } };
+      for (const [service, quoted] of [['LHR FULL BODY 1s', '₹8,700'], ['LHR FULL BODY P/S', '–'],
+                                       ['Lhr full body', '₹8,700'], ['LHR', '–'], ['LHR FULL BODY 6s', '₹45,000']]) {
+        calls = pushMock({ history: HISTORY });
+        await pushLead(db, withQ({ ...LEAD.bot_state.qualification, service }), SHEET_CFG);
+        assert.equal(params(calls)[6], quoted, service);
+      }
+
+      // Quiet push: a routed branch counts when the customer never typed one; a fresh post offer wins
+      const quietLead = { ...LEAD, branch_id: 'DWK', bot_state: { ...LEAD.bot_state,
+        qualification: { service: 'LHR FULL BODY P/S' }, lead_pushed: {},
+        last_offer: { service: 'LHR FULL BODY P/S', offer_price: 9999, last_seen: new Date().toISOString() } } };
+      calls = pushMock({ history: HISTORY });
+      assert.equal(await pushLead(db, quietLead, WA_CFG, true), 'potential_lead');
+      assert.equal(calls.wa[0].to, '91333');
+      assert.deepEqual([params(calls)[1], params(calls)[6]], ['Dwarka Sec 12', '₹9999 (post offer)']);
+      // …and if it fails, the email's "Chat went quiet" summary keeps the earlier handoff
+      calls = pushMock({ history: HISTORY, waError: 'x' });
+      await pushLead(db, quietLead, WA_CFG, true);
+      assert.ok(calls.alerts[0].html.includes('Chat went quiet — service LHR FULL BODY P/S\nEarlier: Bot handed off (wants_booking)'));
       // The model's short summary goes instead (2026-11-19); it's told the time, price and the chat
       const SUM = 'Customer asked about full body laser and was quoted from ₹35000. They want a visit on Sat, 21 Nov 2026, evening.';
       process.env.GEMINI_API_KEY = 'test_key';
@@ -2918,7 +2863,7 @@ assert.equal(extractComments({}).length, 0);
                           { service: 'LHR FULL BODY P/S', phone: '9876543210', branch: 'Uttam Nagar' }]) {
         calls = pushMock({ history: HISTORY });
         assert.equal(await pushLead(db, withQ(qual), WA_CFG), null);
-        assert.equal(calls.wa.length + calls.hooks.length + calls.patches.length + calls.alerts.length, 0, qual.branch || 'no pick');
+        assert.equal(calls.wa.length + calls.patches.length + calls.alerts.length, 0, qual.branch || 'no pick');
       }
 
       // A branch with no number → not sent, not stamped, one email naming it
@@ -2930,7 +2875,8 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.patches[0].bot_state.lead_pushed, undefined, 'not stamped as sent');
       assert.ok(calls.patches[0].bot_state.lead_push_alerted.potential_lead);
 
-      // Meta error → not stamped, one email with Meta's reason and the WhatsApp hint
+      // Meta error → not stamped (the hourly run retries), one email with Meta's reason and
+      // the WhatsApp hint, one Activity row
       calls = pushMock({ history: HISTORY, waError: 'Invalid OAuth access token' });
       assert.equal(await pushLead(db, LEAD, WA_CFG), null);
       assert.equal(calls.wa.length, 1);
@@ -2938,46 +2884,40 @@ assert.equal(extractComments({}).length, 0);
       assert.match(calls.alerts[0].subject, /Lead push failed — Riya Sharma/);
       assert.match(calls.alerts[0].html, /Janakpuri WhatsApp \(WhatsApp send failed: 401 Invalid OAuth access token\)/);
       assert.match(calls.alerts[0].html, /401 = the token; 132001 = the template/);
-      assert.equal(calls.patches[0].bot_state.lead_pushed, undefined);
+      assert.equal(calls.patches.length, 1);
+      assert.equal(calls.patches[0].bot_state.lead_pushed, undefined, 'a failed push is not stamped as sent');
+      assert.ok(calls.patches[0].bot_state.lead_push_alerted.lead);
+      assert.deepEqual(calls.events.map(e => [e.level, e.kind, e.lead_id]), [['error', 'lead_push', LEAD.id]]);
       assert.match(calls.events[0].message, /didn't reach the Janakpuri WhatsApp \(WhatsApp send failed: 401/);
       calls = pushMock({ history: HISTORY, waError: 'x' });
       await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_push_alerted: { lead: 't' } } }, WA_CFG);
-      assert.equal(calls.alerts.length, 0, 'one email per lead + type');
-
-      // Without LEAD_WEBHOOK_URL (L6 deletes it) the WhatsApp path still sends
-      delete process.env.LEAD_WEBHOOK_URL;
-      calls = pushMock({ history: HISTORY });
-      assert.equal(await pushLead(db, LEAD, WA_CFG), 'lead');
-      process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
-      delete process.env.WHATSAPP_ACCESS_TOKEN; delete process.env.WHATSAPP_PHONE_NUMBER_ID;
+      assert.equal(calls.alerts.length + calls.events.length, 0, 'one email and one row per lead + type');
     }
 
     // Settle trigger 1 — a handoff pushes; a failed push never blocks the handoff
     process.env.GEMINI_API_KEY = 'test_key';
     const BOT_LEAD = { id: 'L9', customer_name: 'Riya Sharma', instagram_user_id: 'IGS_9', source: 'instagram',
                        branch_id: 'FALLBACK', bot_active: true, category: 'lead', created_at: new Date().toISOString(),
-                       bot_state: { qualification: { service: 'LHR FULL BODY P/S' } } };
+                       bot_state: { qualification: { service: 'LHR FULL BODY P/S', branch: 'Janakpuri' } } };
     const HANDOFF = { category: 'lead', is_medical: false, reply: 'Thanks! Our team will call you on WhatsApp.',
                       kb_covers: true, handoff: true, reason: 'qualified', qualification: { phone: '98765 43210' } };
     const EV9 = { messageText: '98765 43210', senderId: 'IGS_9', messageId: 'mid_9' };
     calls = pushMock({ history: HISTORY, botTurn: HANDOFF });
     let r = await botReply(BOT_LEAD, EV9, 'instagram');
     assert.equal(r.handoff, 'qualified');
-    assert.equal(calls.hooks.length, 1, 'the handoff settles the chat → one push');
-    assert.equal(calls.hooks[0].body.lead_type, 'lead');
-    assert.equal(calls.hooks[0].body.phone, '9876543210');
-    assert.equal(calls.hooks[0].body.reason, 'qualified');
-    assert.match(calls.hooks[0].body.summary, /^Bot handed off \(qualified\)/);
+    assert.equal(calls.wa.length, 1, 'the handoff settles the chat → one push');
+    assert.deepEqual([params(calls)[0], params(calls)[3]], ['lead', '9876543210']);
     assert.ok(calls.patches.at(-1).bot_state.lead_pushed.lead);
     assert.equal(calls.patches.at(-1).bot_state.handoff_reason, 'qualified', 'stamp kept the handoff state');
-    calls = pushMock({ hook: [500], history: HISTORY, botTurn: HANDOFF });
+    assert.match(calls.patches.at(-1).bot_state.handoff_summary, /^Bot handed off \(qualified\)/);
+    calls = pushMock({ history: HISTORY, botTurn: HANDOFF, waError: 'down' });
     r = await botReply(BOT_LEAD, EV9, 'instagram');
-    assert.equal(r.handoff, 'qualified', 'webhook down → the handoff still completes');
+    assert.equal(r.handoff, 'qualified', 'WhatsApp down → the handoff still completes');
     assert.equal(calls.sends.length, 1, 'and the customer still got the reply');
-    // a normal (non-handoff) turn never pushes
-    calls = pushMock({ history: HISTORY, botTurn: { ...HANDOFF, handoff: false } });
-    await botReply(BOT_LEAD, EV9, 'instagram');
-    assert.equal(calls.hooks.length, 0);
+    // a normal (non-handoff) turn never pushes (not a number: that would be closingTurn's handoff)
+    calls = pushMock({ history: HISTORY, botTurn: { ...HANDOFF, handoff: false, qualification: {} } });
+    assert.deepEqual(await botReply(BOT_LEAD, { ...EV9, messageText: 'ok thanks' }, 'instagram'), { sent: true });
+    assert.equal(calls.wa.length, 0);
     delete process.env.GEMINI_API_KEY;
 
     // Settle trigger 2 — bot-hourly: chats quiet ≥ lead_quiet_hours, live mode only
@@ -2992,39 +2932,39 @@ assert.equal(extractComments({}).length, 0);
     ], now, 2 * 3600e3), ['A', 'C']);
 
     const hourlyMock = ({ mode, quietHours, msgs, leads }) => {
-      const calls = { hooks: [], patches: [], msgQueries: [] };
+      const calls = { wa: [], patches: [], msgQueries: [] };
       global.fetch = async (url, opts = {}) => {
         if (url.includes('settings?key=eq.chatbot_config'))
-          return { ok: true, json: async () => [{ value: JSON.stringify({ mode, lead_quiet_hours: quietHours }) }] };
+          return { ok: true, json: async () => [{ value: JSON.stringify({ mode, lead_quiet_hours: quietHours,
+                                                                          branch_whatsapp: { Janakpuri: '91111' } }) }] };
         if (url.includes('lead_messages?created_at=gt.')) { calls.msgQueries.push(url); return { ok: true, json: async () => msgs }; }
         if (url.includes('leads?bot_state->>handoff_reason=eq.kb_miss')) return { ok: true, json: async () => [] };   // S6: no open owner questions
         if (url.includes('/leads?id=in.(')) return { ok: true, json: async () => leads.filter(l => url.includes(l.id)) };
+        if (url.includes('/branches?')) return { ok: true, json: async () => [{ id: 'JPR', name: 'Janakpuri' }] };
         if (url.includes('lead_messages?lead_id=eq.')) return { ok: true, json: async () => [] };
         if (url.includes('graph.instagram.com')) return { ok: true, json: async () => ({ username: 'u' }) };
-        if (url.startsWith('https://hook.make.test')) { calls.hooks.push(JSON.parse(opts.body)); return { ok: true, status: 200 }; }
+        if (url.includes('graph.facebook.com')) { calls.wa.push(JSON.parse(opts.body)); return { ok: true, json: async () => ({ messages: [{ id: 'w' }] }) }; }
         if (url.includes('/leads?id=eq.') && opts.method === 'PATCH') { calls.patches.push(JSON.parse(opts.body)); return { ok: true, json: async () => [] }; }
         throw new Error('unexpected fetch: ' + url);
       };
       return calls;
     };
     const ago = (min) => new Date(Date.now() - min * 60e3).toISOString();
-    const QUIET = { id: 'Q1', customer_name: 'A', instagram_user_id: 'I1', category: 'lead', branch_id: 'FALLBACK',
+    const QUIET = { id: 'Q1', customer_name: 'A', instagram_user_id: 'I1', category: 'lead', branch_id: 'JPR',
                     bot_state: { qualification: { service: 'LHR FULL BODY P/S' } } };
     const BUSY  = { ...QUIET, id: 'Q2' };
     const opts = { quietHours: 0.05, msgs: [{ lead_id: 'Q1', created_at: ago(10) }, { lead_id: 'Q2', created_at: ago(1) }],
                    leads: [QUIET, BUSY] };
     calls = hourlyMock({ mode: 'live', ...opts });
     await hourly();
-    assert.equal(calls.hooks.length, 1, 'only the chat quiet ≥ 3 min (0.05 h) is pushed');
-    assert.equal(calls.hooks[0].lead_type, 'potential_lead');
-    assert.match(calls.hooks[0].summary, /^Chat went quiet/);
-    assert.equal(calls.hooks[0].reason, 'quiet');
+    assert.equal(calls.wa.length, 1, 'only the chat quiet ≥ 3 min (0.05 h) is pushed');
+    assert.deepEqual(params(calls).slice(0, 3), ['potential lead', 'Janakpuri', 'A']);
     calls = hourlyMock({ mode: 'shadow', ...opts });
     await hourly();
-    assert.equal(calls.msgQueries.length + calls.hooks.length, 0, 'not live → the hourly run does nothing');
+    assert.equal(calls.msgQueries.length + calls.wa.length, 0, 'not live → the hourly run does nothing');
 
-    global.setTimeout = realSetTimeout;
-    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'RESEND_API_KEY',
+                     'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'])
       delete process.env[k];
   }
 
@@ -3037,7 +2977,7 @@ assert.equal(extractComments({}).length, 0);
     process.env.META_ACCESS_TOKEN = 'ig_token';
     process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
     process.env.RESEND_API_KEY = 'test_resend';
-    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+    process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'PNID';
     const H = 3600e3;
 
     // Fake clock: the price question went to the owner at T0
@@ -3066,11 +3006,12 @@ assert.equal(extractComments({}).length, 0);
                          { direction: 'outgoing', is_bot: true, message: 'Let me check with our team.', created_at: ago(h) }];
     const CANNED = { owner_no_reply: 'Our team will get in touch here soon 🙏', llm_error: 'Connecting you to our team 🙏' };
     const s6 = ({ leads = [], msgs = {}, cfg = {}, owner = { chat_id: 555 } }) => {
-      const st = { leads, tg: [], sends: [], inserts: [], hooks: [], alerts: [] };
+      const st = { leads, tg: [], sends: [], inserts: [], wa: [], alerts: [] };
       const json = (v) => ({ ok: true, json: async () => v });
       const open = (l) => l.bot_state.handoff_reason === 'kb_miss' && l.bot_state.owner_alert_msg_id && !l.bot_state.owner_answered_at;
       global.fetch = async (url, opts = {}) => {
-        if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify({ mode: 'live', canned: CANNED, ...cfg }) }]);
+        if (url.includes('settings?key=eq.chatbot_config'))
+          return json([{ value: JSON.stringify({ mode: 'live', canned: CANNED, branch_whatsapp: { Janakpuri: '91111' }, ...cfg }) }]);
         if (url.includes('settings?key=eq.telegram_owner')) return json(owner ? [{ value: JSON.stringify(owner) }] : []);
         if (url.includes('api.telegram.org')) { st.tg.push(JSON.parse(opts.body)); return json({ ok: true, result: { message_id: 900 } }); }
         if (url.includes('api.resend.com')) { st.alerts.push(JSON.parse(opts.body)); return json({}); }
@@ -3088,11 +3029,12 @@ assert.equal(extractComments({}).length, 0);
         }
         if (url.includes('graph.instagram.com') && url.includes('fields=')) return json({ username: 'u' });
         if (url.includes('graph.instagram.com')) { st.sends.push(JSON.parse(opts.body)); return json({ message_id: 'm' }); }
-        if (url.startsWith('https://hook.make.test')) { st.hooks.push(JSON.parse(opts.body)); return { ok: true, status: 200 }; }
+        if (url.includes('graph.facebook.com')) { st.wa.push(JSON.parse(opts.body)); return json({ messages: [{ id: 'w' }] }); }
         throw new Error('unexpected fetch: ' + url);
       };
       return st;
     };
+    const waParams = (st) => st.wa[0].template.components[0].parameters.map(p => p.text);
 
     // One hourly run: R (3 h, unanswered) → reminder · F (21 h, reminded) → fallback ·
     // S (3 h, staff replied in the IG app) → closed, nothing sent · N (1 h) → nothing yet
@@ -3117,19 +3059,17 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(st.inserts.length, 1);
     assert.equal(st.inserts[0].is_bot, true);
     assert.equal(F.bot_state.handoff_reason, 'owner_no_reply');
-    assert.equal(st.hooks.length, 1, 'only F is pushed: R’s question is still open, so R hasn’t settled');
-    assert.equal(st.hooks[0].ig_user_id, 'IG_F');
-    assert.equal(st.hooks[0].lead_type, 'potential_lead');
-    assert.equal(st.hooks[0].reason, 'owner_no_reply');
-    assert.equal(st.hooks[0].summary, 'Bot handed off (owner_no_reply) — service LHR FULL BODY P/S\nBot didn\'t know: "price of laser"');
+    assert.equal(F.bot_state.handoff_summary, 'Bot handed off (owner_no_reply) — service LHR FULL BODY P/S\nBot didn\'t know: "price of laser"');
+    assert.equal(st.wa.length, 1, 'only F is pushed: R’s question is still open, so R hasn’t settled');
+    assert.deepEqual(waParams(st).slice(0, 3), ['potential lead', 'Janakpuri', 'Cust F']);
 
     assert.ok(S.bot_state.owner_answered_at, 'staff reply closes S’s question');
     assert.equal(N.bot_state.owner_reminded_at, undefined);
 
     // The next run: nothing repeats
-    st.tg.length = st.sends.length = st.hooks.length = 0;
+    st.tg.length = st.sends.length = st.wa.length = 0;
     await hourly();
-    assert.equal(st.tg.length + st.sends.length + st.hooks.length, 0, 'one reminder, one fallback, one push');
+    assert.equal(st.tg.length + st.sends.length + st.wa.length, 0, 'one reminder, one fallback, one push');
 
     // A config saved before S6 has no owner_no_reply copy → the hand-off line, never the
     // llm_error line (since F1 it asks the customer to write again; review §2)
@@ -3145,7 +3085,7 @@ assert.equal(extractComments({}).length, 0);
     // Not live → nothing
     st = s6({ leads: [mk('X', 21)], msgs: { X: hold(21) }, cfg: { mode: 'shadow' } });
     await hourly();
-    assert.equal(st.sends.length + st.tg.length + st.hooks.length, 0);
+    assert.equal(st.sends.length + st.tg.length + st.wa.length, 0);
 
     // A price question the owner can answer doesn't settle the chat at the handoff;
     // an emailed one (no reply path) does. A new question resets the last one's stamps.
@@ -3153,21 +3093,22 @@ assert.equal(extractComments({}).length, 0);
     const prev = { ...mk('Q', 30).bot_state, handoff_reason: 'qualified',
                    owner_answered_at: 'old', owner_reminded_at: 'old', owner_reminder_msg_id: 5 };
     const price = () => handoffToStaff(db, { ...mk('Q', 0), bot_state: prev }, { senderId: 'IG_Q', messageText: 'hydra price?' },
-                                        'instagram', { mode: 'live', canned: {} }, { reason: 'kb_miss', category: 'lead' }, prev, false);
+                                        'instagram', { mode: 'live', canned: {}, branch_whatsapp: { Janakpuri: '91111' } },
+                                        { reason: 'kb_miss', category: 'lead' }, prev, false);
     const q = mk('Q', 0);
     st = s6({ leads: [q] });
     await price();
     assert.equal(st.tg.length, 1);
-    assert.equal(st.hooks.length, 0, 'waiting on the owner → not pushed yet');
+    assert.equal(st.wa.length, 0, 'waiting on the owner → not pushed yet');
     assert.deepEqual([q.bot_state.owner_alert_msg_id, q.bot_state.owner_answered_at, q.bot_state.owner_reminded_at,
                       q.bot_state.owner_reminder_msg_id], [900, null, null, null]);
     st = s6({ leads: [mk('Q', 0)], owner: null });
     await price();
     assert.equal(st.alerts.length, 1, 'no owner linked → emailed');
-    assert.equal(st.hooks.length, 1, 'nobody can answer it in Telegram → settled now, as before S6');
-    assert.equal(st.hooks[0].reason, 'kb_miss');
+    assert.equal(st.wa.length, 1, 'nobody can answer it in Telegram → settled now, as before S6');
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY', 'LEAD_WEBHOOK_URL'])
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'TELEGRAM_BOT_TOKEN', 'RESEND_API_KEY',
+                     'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'])
       delete process.env[k];
   }
 
@@ -3179,7 +3120,7 @@ assert.equal(extractComments({}).length, 0);
     process.env.META_ACCESS_TOKEN = 'ig_token';
     process.env.META_BRANCH_ID = 'FALLBACK';
     process.env.GEMINI_API_KEY = 'test_key';
-    process.env.LEAD_WEBHOOK_URL = 'https://hook.make.test/abc';
+    process.env.WHATSAPP_ACCESS_TOKEN = 't'; process.env.WHATSAPP_PHONE_NUMBER_ID = 'PNID';
     const RULES = [{ keyword: 'price, cost, rate, kitna, kitne, charges, fees, details, info, interested, book, dm',
                      public: 'Sent you a DM 💬', dm: 'Hi! Thanks for asking 😊 Which branch is closest to you — Janakpuri, Kirti Nagar or Dwarka?' }];
     const POST_URL = 'https://www.instagram.com/p/ABC123/';
@@ -3187,7 +3128,7 @@ assert.equal(extractComments({}).length, 0);
                    kb_covers: true, asks_price: true, handoff: false, reason: 'qualified',
                    qualification: { service: 'LHR FULL BODY P/S', branch: 'Janakpuri' } };
     const s7 = ({ mode = 'live', media = true, offerCache = null } = {}) => {
-      const st = { leads: [], msgs: [], shadow: [], dms: [], publics: [], sends: [], cache: [], hooks: [], media: 0, parses: 0, turns: [] };
+      const st = { leads: [], msgs: [], shadow: [], dms: [], publics: [], sends: [], cache: [], wa: [], media: 0, parses: 0, turns: [] };
       const json = (v) => ({ ok: true, json: async () => v });
       global.fetch = async (url, opts = {}) => {
         const body = opts.body ? JSON.parse(opts.body) : null;
@@ -3226,7 +3167,7 @@ assert.equal(extractComments({}).length, 0);
           st.msgs.push(m); return json([m]);
         }
         if (url.includes('/bot_shadow_log')) { st.shadow.push(body); return json([{}]); }
-        if (url.startsWith('https://hook.make.test')) { st.hooks.push(body); return { ok: true, status: 200 }; }
+        if (url.includes('graph.facebook.com')) { st.wa.push(body); return json({ messages: [{ id: 'w' }] }); }
         throw new Error('unexpected fetch: ' + url);
       };
       return st;
@@ -3261,11 +3202,10 @@ assert.equal(extractComments({}).length, 0);
     assert.equal(st.sends.length, 1);
     assert.match(st.sends[0].message.text, /₹9999/);
 
-    // The lead push carries the comment fields
-    assert.equal(await pushLead(createSupabaseClient(), lead, {}, true), 'potential_lead');
-    assert.equal(st.hooks[0].source, 'instagram_comment');
-    assert.equal(st.hooks[0].post_url, POST_URL);
-    assert.equal(st.hooks[0].price_quoted, '₹9999 (post offer)');
+    // The lead push quotes the post's offer, to the tapped branch
+    assert.equal(await pushLead(createSupabaseClient(), lead, { branch_whatsapp: { Janakpuri: '91111' } }, true), 'potential_lead');
+    const pushed = st.wa[0].template.components[0].parameters.map(p => p.text);
+    assert.deepEqual([pushed[1], pushed[6]], ['Janakpuri', '₹9999 (post offer)']);
 
     // A post already in the cache isn't parsed again, and a comment on an old post
     // makes its offer fresh (the post is still up, client 2026-10-19); a post that
@@ -3310,7 +3250,8 @@ assert.equal(extractComments({}).length, 0);
     await handleWebhook(comment('Price kya hai?'));
     assert.equal(st.dms.length + st.publics.length + st.leads.length + st.shadow.length + st.media, 0);
 
-    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'GEMINI_API_KEY', 'LEAD_WEBHOOK_URL'])
+    for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'META_ACCESS_TOKEN', 'META_BRANCH_ID', 'GEMINI_API_KEY',
+                     'WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'])
       delete process.env[k];
   }
 

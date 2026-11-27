@@ -8,7 +8,7 @@
 // ============================================================
 
 const { schedule } = require('@netlify/functions');
-const { getSettingJson, sendTelegram } = require('./utils/meta-service');
+const { getSettingJson, sendTelegram, leadPushDue } = require('./utils/meta-service');
 
 const has = (v) => String(v ?? '').trim() !== '';
 
@@ -21,7 +21,7 @@ function tally(values, n = Infinity) {
 }
 
 // Pure → the report numbers.
-//   chats:      leads the customer wrote to in the window ({id, category, bot_state})
+//   chats:      leads the customer wrote to in the window ({id, category, branch_id, bot_state})
 //   stamped:    leads with any bot_state stamp in the window ({bot_state})
 //   commentIds: ids of chats that started from a comment in the window
 // Customers = category 'lead' (collab / sales / misc left out), split by what the bot
@@ -55,6 +55,10 @@ function computeBotMetrics({ chats, stamped, commentIds, botMessages }, since) {
     branches: tally(leads.map(l => qOf(l).branch || qOf(l).location || 'no branch yet')),
     pushed,
     push_failed: pushFailed,
+    // Review §3: due to go (a phone or service, not sent yet, not a safety chat) but no branch to send it to.
+    // A branch is the customer's pick, or a branch_id that isn't the Instagram default (META_BRANCH_ID).
+    no_branch: chats.filter(l => leadPushDue(l) && !has(qOf(l).branch)
+                                 && (!l.branch_id || l.branch_id === process.env.META_BRANCH_ID)).length,
     price_asked: stamped.filter(l => inWindow(l.bot_state?.owner_asked_at)).length,
     price_answered: stamped.filter(l => inWindow(l.bot_state?.owner_answered_at)).length,
     price_no_reply: count('owner_no_reply'),
@@ -94,6 +98,7 @@ function reportText(m, days) {
     row('Leads per branch', m.branches),
     '',
     row('Leads sent', m.pushed, m.push_failed ? `⚠️ ${m.push_failed} failed, check the alert email` : ''),
+    row('Not sent (no branch)', m.no_branch),
     row('Price questions to you', m.price_asked, `${m.price_answered} answered · ${m.price_no_reply} no reply in time`),
     row('Medical / emergency', m.safety),
     row('Bot didn’t know (kb_miss)', m.kb_miss),
@@ -136,7 +141,7 @@ const handler = async () => {
   const inbound = await get(`lead_messages?direction=in.(in,incoming)&created_at=gt.${since}&select=lead_id,message`);
   const ids = [...new Set(inbound.map(r => r.lead_id))];
   const commentIds = [...new Set(inbound.filter(r => String(r.message).startsWith('[comment]')).map(r => r.lead_id))];
-  const chats = ids.length ? await get(`leads?id=in.(${ids.join(',')})&select=id,category,bot_state`) : [];
+  const chats = ids.length ? await get(`leads?id=in.(${ids.join(',')})&select=id,category,branch_id,bot_state`) : [];
   const botMessages = (await get(`lead_messages?is_bot=is.true&created_at=gt.${since}&select=id`)).length;
   const m = computeBotMetrics({ chats, stamped, commentIds, botMessages }, since);
 
