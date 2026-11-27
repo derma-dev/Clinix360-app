@@ -181,6 +181,7 @@ function switchAdminTab(tab) {
   if (tab === 'leads') loadAdminLeads();
   if (tab === 'reports') initReportsTab();
   if (tab === 'notifications') loadAdminAlerts();
+  if (tab === 'activity') loadActivity();
   if (tab === 'settings') { loadAutomations(); renderPaymentModesList(); loadIntegrations(); loadCommentRules(); loadChatbotConfig(); loadKbCandidates(); }
   setRoute('#/admin/' + tab);
 }
@@ -1560,6 +1561,83 @@ async function discardKbCandidate(id) {
 }
 
 // ============================================================
+// ACTIVITY (bot_events — review R8)
+// Developer alerts and safety events the server logs (logEvent): bot
+// errors, Instagram token, price sheet, reply limit, failed lead push,
+// emergency / medical / distress handoffs. bot-hourly deletes rows
+// older than 90 days. The badge counts errors + warnings since this
+// browser last opened the tab.
+// ============================================================
+const ACTIVITY_SEEN_KEY = 'activity_seen_at';
+const ACTIVITY_ICON = { error: '⛔', warn: '⚠️', info: 'ℹ️' };
+const DAY_MS = 864e5;
+
+function setActivityBadge(n) {
+  ['sidebar-activity-badge', 'bottom-activity-badge'].forEach(id => {
+    const b = document.getElementById(id);
+    if (!b) return;
+    b.textContent = n;
+    b.style.display = n > 0 ? 'inline-flex' : 'none';
+  });
+}
+
+// ponytail: "seen" lives in this browser's localStorage, so a second browser has its own
+// count; fine for one admin account, move it to a settings row if more people read Activity.
+async function loadActivityBadge() {
+  let seen = null;
+  try { seen = localStorage.getItem(ACTIVITY_SEEN_KEY); } catch {}
+  let q = db.from('bot_events').select('id', { count: 'exact', head: true }).in('level', ['error', 'warn']);
+  if (seen) q = q.gt('created_at', seen);
+  const { count, error } = await q;
+  if (error) console.error('[bot_events badge]', error.message);
+  setActivityBadge(count || 0);
+}
+
+async function loadActivity() {
+  const list = document.getElementById('activity-list');
+  if (!list) return;
+  let q = db.from('bot_events').select('id, created_at, level, kind, message')
+    .gte('created_at', new Date(Date.now() - 90 * DAY_MS).toISOString())
+    .order('created_at', { ascending: false }).limit(200);
+  if (document.getElementById('activity-filter')?.value === 'problems') q = q.in('level', ['error', 'warn']);
+  const { data, error } = await q;
+  if (error) {
+    console.error('[bot_events]', error.message);
+    list.innerHTML = '<div style="padding:24px;font-size:13px;color:#e53935">Could not load the activity. Try again.</div>';
+    return;
+  }
+  // Seen = the newest row shown (server time, so a fast or slow laptop clock can't hide a row).
+  if (data.length) try { localStorage.setItem(ACTIVITY_SEEN_KEY, data[0].created_at); } catch {}
+  setActivityBadge(0);
+  if (!data.length) {
+    list.innerHTML = '<div style="padding:24px;font-size:13px;color:#9ca3af;text-align:center">Nothing in the last 90 days.</div>';
+    return;
+  }
+  list.innerHTML = data.map(e => `
+    <div class="notif-row">
+      <div class="notif-tag" style="background:#f3f4f6;color:#374151">${ACTIVITY_ICON[e.level] || 'ℹ️'} ${esc(e.kind)}</div>
+      <div class="notif-body"><div class="notif-detail" style="font-weight:400;color:#374151">${esc(e.message || '')}</div></div>
+      <div class="notif-right"><div class="notif-time">${new Date(e.created_at).toLocaleString('en-IN',
+        { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</div></div>
+    </div>`).join('');
+}
+
+// ≤ 7 days left on the connected Instagram token → a red strip on every admin tab.
+// expiresAt is null for the env token (and for an expired DB token: then the daily
+// ig_token row in Activity is the alarm). Test from the console:
+// showIgTokenBanner(new Date(Date.now() + 5 * 864e5).toISOString())
+function showIgTokenBanner(expiresAt) {
+  const el = document.getElementById('ig-token-banner');
+  if (!el) return;
+  const days = Math.floor((Date.parse(expiresAt) - Date.now()) / DAY_MS);   // NaN without a date
+  if (!(days <= 7)) { el.style.display = 'none'; return; }
+  const left = days < 1 ? 'less than a day' : days === 1 ? '1 day' : `${days} days`;
+  const date = new Date(expiresAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' });
+  el.textContent = `Instagram token expires in ${left} (${date}). The bot stops replying on Instagram then. Reconnect Instagram before that.`;
+  el.style.display = 'block';
+}
+
+// ============================================================
 // SCREEN NAVIGATION
 // ============================================================
 
@@ -1598,10 +1676,14 @@ async function openAdminPanel() {
   document.getElementById('admin-tab-overview')?.classList.add('active');
   document.querySelectorAll('[data-tab="overview"]').forEach(b => b.classList.add('active'));
 
+  // Not awaited: meta-status pings Instagram, and nothing else waits on the banner.
+  fetch('/.netlify/functions/meta-status').then(r => r.ok ? r.json() : {})
+    .then(st => showIgTokenBanner(st.instagram?.expires_at)).catch(() => {});
   await Promise.all([
     loadAdminBranches(),
     !OFF_AREAS.includes('performance') && loadAdminStats(),
     !OFF_AREAS.includes('notifications') && loadAdminAlerts(),   // also fills the nav badges
+    loadActivityBadge(),   // awaited, so a refresh on #/admin/activity clears it after, not before
   ]);
 }
 

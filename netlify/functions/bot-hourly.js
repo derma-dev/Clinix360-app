@@ -1,6 +1,7 @@
 // ============================================================
 // Netlify Scheduled Function: bot-hourly
 // Runs every hour, on the hour.
+// Any mode (review R8): bot_events rows older than 90 days are deleted.
 // Shadow or live (S11c P4): the price sheet → settings.price_list (syncPriceSheet).
 // Shadow mode: nothing else (drafts are reviewed in the console, review R7).
 // Live mode:
@@ -30,6 +31,12 @@ const handler = async () => {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!url || !key) { console.error('[bot-hourly] missing env vars'); return { statusCode: 500 }; }
+  // Review R8: the console's Activity page keeps 90 days. A failure only logs.
+  try {
+    const r = await fetch(`${url}/rest/v1/bot_events?created_at=lt.${new Date(Date.now() - 90 * 864e5).toISOString()}`,
+                          { method: 'DELETE', headers: { apikey: key, Authorization: `Bearer ${key}` } });
+    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  } catch (e) { console.error('[bot-hourly] bot_events clean-up failed:', e.message); }
   const cfg = (await getBotConfig()) || {};
   // S11c P4: the price sheet, any mode but off. A failure keeps the last list and
   // logs a bot_events row once a day (syncPriceSheet), and never stops the work below.

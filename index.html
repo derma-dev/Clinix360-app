@@ -34,6 +34,7 @@
 <symbol id="i-branches" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M136,216V32a8,8,0,0,0-12.44-6.65l-80,53.33A8,8,0,0,0,40,85.35V216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M136,88h72a8,8,0,0,1,8,8V216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="16" y1="216" x2="240" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="112" x2="104" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="72" y1="112" x2="72" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="72" y1="168" x2="72" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="168" x2="104" y2="184" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-calendar" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><rect x="40" y="40" width="176" height="176" rx="8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="176" y1="24" x2="176" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="80" y1="24" x2="80" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="40" y1="88" x2="216" y2="88" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-bolt" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polygon points="160 16 144 96 208 120 96 240 112 160 48 136 160 16" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-pulse" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="24 128 56 128 96 56 160 200 200 128 232 128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-edit" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M92.69,216H48a8,8,0,0,1-8-8V163.31a8,8,0,0,1,2.34-5.65L165.66,34.34a8,8,0,0,1,11.31,0L221.66,79a8,8,0,0,1,0,11.31L98.34,213.66A8,8,0,0,1,92.69,216Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="136" y1="64" x2="192" y2="120" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-trash" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="216" y1="56" x2="40" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="104" x2="104" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="152" y1="104" x2="152" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M200,56V208a8,8,0,0,1-8,8H64a8,8,0,0,1-8-8V56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M168,56V40a16,16,0,0,0-16-16H104A16,16,0,0,0,88,40V56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-logout" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="112 40 48 40 48 216 112 216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="112" y1="128" x2="224" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="184 88 224 128 184 168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
@@ -449,6 +450,11 @@
           <span class="sidebar-label">Notifications</span>
           <span class="sidebar-badge" id="sidebar-notif-badge" style="display:none">0</span>
         </button>
+        <button class="sidebar-item" data-tab="activity">
+          <span class="sidebar-icon"><svg class="icon"><use href="#i-pulse"/></svg></span>
+          <span class="sidebar-label">Activity</span>
+          <span class="sidebar-badge" id="sidebar-activity-badge" style="display:none">0</span>
+        </button>
         <button class="sidebar-item" data-tab="settings">
           <span class="sidebar-icon"><svg class="icon"><use href="#i-settings"/></svg></span>
           <span class="sidebar-label">Settings</span>
@@ -464,6 +470,9 @@
 
     <!-- ── Main content ── -->
     <main class="admin-main">
+
+      <!-- Instagram token ≤ 7 days left (review R8, showIgTokenBanner) -->
+      <div id="ig-token-banner" style="display:none;background:#e53935;color:#fff;font-size:13px;font-weight:600;padding:10px 18px;text-align:center"></div>
 
       <!-- TAB: Overview -->
       <div class="admin-tab active" id="admin-tab-overview">
@@ -663,6 +672,24 @@
         </div>
       </div>
 
+      <!-- TAB: Activity (bot_events — review R8) -->
+      <div class="admin-tab" id="admin-tab-activity">
+        <div class="admin-tab-header">Activity</div>
+        <div class="section-card" style="padding:0">
+          <div class="section-header">
+            <span class="section-icon"><svg class="icon"><use href="#i-pulse"/></svg></span>
+            <span class="section-title">Bot events · last 90 days</span>
+            <select id="activity-filter" class="ov-select" style="width:auto" onchange="loadActivity()">
+              <option value="all">All</option>
+              <option value="problems">Errors and warnings</option>
+            </select>
+          </div>
+          <div id="activity-list">
+            <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
+          </div>
+        </div>
+      </div>
+
       <!-- TAB: Settings -->
       <div class="admin-tab" id="admin-tab-settings">
         <div class="admin-tab-header">Settings</div>
@@ -825,6 +852,10 @@
       <button class="bottom-nav-item" data-tab="notifications">
         <span><svg class="icon"><use href="#i-bell"/></svg></span><span>Notifs</span>
         <span class="sidebar-badge" id="bottom-notif-badge" style="display:none">0</span>
+      </button>
+      <button class="bottom-nav-item" data-tab="activity">
+        <span><svg class="icon"><use href="#i-pulse"/></svg></span><span>Activity</span>
+        <span class="sidebar-badge" id="bottom-activity-badge" style="display:none">0</span>
       </button>
       <button class="bottom-nav-item" data-tab="settings">
         <span><svg class="icon"><use href="#i-settings"/></svg></span><span>Settings</span>

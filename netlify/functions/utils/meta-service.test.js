@@ -2937,6 +2937,7 @@ assert.equal(extractComments({}).length, 0);
     const hourlyMock = ({ mode, quietHours, msgs, leads }) => {
       const calls = { wa: [], patches: [], msgQueries: [] };
       global.fetch = async (url, opts = {}) => {
+        if (url.includes('/bot_events?') && opts.method === 'DELETE') return { ok: true };   // R8 90-day clean-up
         if (url.includes('settings?key=eq.chatbot_config'))
           return { ok: true, json: async () => [{ value: JSON.stringify({ mode, lead_quiet_hours: quietHours,
                                                                           branch_whatsapp: { Janakpuri: '91111' } }) }] };
@@ -3013,6 +3014,7 @@ assert.equal(extractComments({}).length, 0);
       const json = (v) => ({ ok: true, json: async () => v });
       const open = (l) => l.bot_state.handoff_reason === 'kb_miss' && l.bot_state.owner_alert_msg_id && !l.bot_state.owner_answered_at;
       global.fetch = async (url, opts = {}) => {
+        if (url.includes('/bot_events?') && opts.method === 'DELETE') return json(null);   // R8 90-day clean-up
         if (url.includes('settings?key=eq.chatbot_config'))
           return json([{ value: JSON.stringify({ mode: 'live', canned: CANNED, branch_whatsapp: { Janakpuri: '91111' }, ...cfg }) }]);
         if (url.includes('settings?key=eq.telegram_owner')) return json(owner ? [{ value: JSON.stringify(owner) }] : []);
@@ -3413,17 +3415,23 @@ assert.equal(extractComments({}).length, 0);
     await handleOwnerUpdate({ message: { message_id: 30, text: 'Say Vadodara has no branch yet', chat: { id: 555 }, reply_to_message: { message_id: 950 } } });
     assert.deepEqual(tg.map(t => t.text), ['Reply to a ❓ price question (swipe left on it) so I know which customer it’s for.']);
 
-    // bot-hourly in shadow: the price sync only (not set up here), whatever the hour
+    // bot-hourly in shadow: the 90-day bot_events clean-up (R8) and the price sync only (not set up
+    // here), whatever the hour. A failing clean-up only logs.
     const { handler: hourly } = require('../bot-hourly');
     const urls = [];
-    global.fetch = async (url) => {
+    global.fetch = async (url, opts = {}) => {
       urls.push(url);
+      if (url.includes('/bot_events?') && opts.method === 'DELETE') return { ok: false, status: 500, text: async () => 'db down' };
       if (url.includes('settings?key=eq.chatbot_config')) return json([{ value: JSON.stringify({ mode: 'shadow', draft_digest_hour: 17 }) }]);
       if (url.includes('settings?key=eq.')) return json([]);
       throw new Error('unexpected fetch: ' + url);
     };
     assert.equal((await hourly()).statusCode, 200);
-    assert.equal(urls.filter(u => !u.includes('/settings?')).length, 0, 'no digest, quiet-chat push or owner timers in shadow');
+    const cut = urls.filter(u => u.includes('/bot_events?'));
+    assert.equal(cut.length, 1, 'one clean-up a run');
+    assert.ok(Math.abs(Date.now() - 90 * 864e5 - Date.parse(/created_at=lt\.([^&]+)/.exec(cut[0])[1])) < 60e3, 'rows older than 90 days');
+    assert.ok(urls.some(u => u.includes('settings?key=eq.chatbot_config')), 'a failed clean-up doesn’t stop the run');
+    assert.equal(urls.filter(u => !u.includes('/settings?') && u !== cut[0]).length, 0, 'no digest, quiet-chat push or owner timers in shadow');
 
     for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'TELEGRAM_BOT_TOKEN']) delete process.env[k];
   }
@@ -3775,8 +3783,8 @@ assert.equal(extractComments({}).length, 0);
     const p4 = (o) => {
       const s = p2(o), inner = global.fetch;
       s.rest = [];
-      global.fetch = async (url, opts) => /\/rest\/v1\/(leads|lead_messages)\?/.test(url)
-        ? (s.rest.push(url), json([])) : inner(url, opts);
+      global.fetch = async (url, opts) => url.includes('/bot_events?') ? json(null)   // R8 90-day clean-up
+        : /\/rest\/v1\/(leads|lead_messages)\?/.test(url) ? (s.rest.push(url), json([])) : inner(url, opts);
       return s;
     };
     // shadow: synced, and nothing else (no digest since review R7)
