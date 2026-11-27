@@ -1,7 +1,8 @@
 // ============================================================
 // Netlify Scheduled Function: ig-token-refresh
 // Daily (service tracker S9): renews the connected Instagram token once it's
-// > 50 days old (it lives 60). A failure alerts the owner's Telegram.
+// > 50 days old (it lives 60). A failure logs an error row in bot_events (the
+// console's Activity page) with the days left, once a day until it works.
 // Cron: "0 4 * * *" = 09:30 IST (trigger it by hand from the Netlify UI to test)
 // ============================================================
 

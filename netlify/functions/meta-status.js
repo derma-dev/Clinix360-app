@@ -2,18 +2,19 @@
 // Netlify Function: meta-status
 // Read-only connection check for the admin "Connected Accounts" panel.
 // Pings the Graph API per platform using the server-side token and reports
-// { connected, name }. No secret ever leaves the server.
+// { connected, name }, plus Instagram's expires_at (null for the env token) for the
+// console's token banner. No secret ever leaves the server.
 // ============================================================
 
 const { getIgToken } = require('./utils/meta-service');
 
 async function checkInstagram() {
   try {
-    const { token } = await getIgToken();   // S9: the connected account, else env
+    const { token, expires_at } = await getIgToken();   // S9: the connected account, else env
     const res = await fetch(`https://graph.instagram.com/me?fields=user_id,username&access_token=${encodeURIComponent(token)}`);
     if (!res.ok) return { connected: false };
     const d = await res.json();
-    return { connected: true, name: d.username ? '@' + d.username : 'Connected' };
+    return { connected: true, name: d.username ? '@' + d.username : 'Connected', expires_at };
   } catch { return { connected: false }; }
 }
 

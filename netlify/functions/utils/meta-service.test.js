@@ -1111,8 +1111,12 @@ assert.equal(extractComments({}).length, 0);
                        owner = null, telegram = 200 } = {}) => {
       const calls = { sends: [], msgInserts: [], patches: [], shadowLogs: [], gemini: [],
                       historyFetches: 0, settingUpserts: [], offerCacheReads: 0, imageFetches: 0,
-                      alerts: [], telegrams: [] };
+                      alerts: [], telegrams: [], events: [] };
       global.fetch = async (url, opts = {}) => {
+        if (url.includes('/rest/v1/bot_events')) {                         // review §2: logEvent
+          calls.events.push(JSON.parse(opts.body));
+          return { ok: true, status: 201, text: async () => '' };
+        }
         if (url.includes('api.resend.com')) {                              // alert email (fallback)
           if (alertFails) return { ok: false, status: 500, text: async () => 'smtp down' };
           calls.alerts.push(JSON.parse(opts.body));
@@ -1651,6 +1655,10 @@ assert.equal(extractComments({}).length, 0);
         'Hi! I am the clinic’s assistant 🤖\n\nLet me connect you with our team.');
       assert.equal(calls.patches[0].body.bot_active, false);
       assert.equal(calls.patches[0].body.status, 'qualified');
+      // review §2: one error row for us, nothing to the owner
+      assert.deepEqual(calls.events.map(e => [e.level, e.kind, e.lead_id]), [['error', 'llm_error', LEAD.id]]);
+      assert.match(calls.events[0].message, /quota exceeded/);
+      assert.equal(calls.telegrams.length + calls.alerts.length, 0);
     }
 
     // 12) handoff survives a failed SEND: message delivery is not the handoff
@@ -1686,6 +1694,7 @@ assert.equal(extractComments({}).length, 0);
       assert.match(calls.shadowLogs[0].error, /429/);
       assert.equal(calls.shadowLogs[0].decision.reason, 'llm_error');
       assert.equal(calls.sends.length + calls.patches.length, 0);
+      assert.deepEqual(calls.events.map(e => e.kind), ['llm_error'], 'a bot error is logged for us in shadow too');
 
       // safety tier in shadow: no Gemini call, no mutation — just the row
       calls = botMock({ config: CFG('shadow') });
@@ -1936,7 +1945,7 @@ assert.equal(extractComments({}).length, 0);
     //     checked after the safety net, before Gemini; the counter ticks on normal
     //     live turns and starts again each IST day
     {
-      // at the limit today → the next inbound hands off, no Gemini, the owner is told
+      // at the limit today → the next inbound hands off, no Gemini, one warn row for us (review §2)
       process.env.TELEGRAM_BOT_TOKEN = 'tg_token';
       let calls = botMock({ config: CFG('live', { daily_reply_cap: 30 }), owner: { chat_id: 4242, name: 'Owner' } });
       let r = await botReply({ ...LEAD, bot_state: { turn_count: 30, turn_day: TODAY } }, EV, 'instagram');
@@ -1948,9 +1957,9 @@ assert.equal(extractComments({}).length, 0);
         'turn_cap reuses the llm_error hold copy (dedicated canned.turn_cap wins if set)');
       assert.ok(!calls.sends[0].message.text.includes('assistant'),
         'no disclosure prepend — the chat had bot replies today');
-      assert.equal(calls.telegrams.length, 1, 'the owner is alerted (it used to alert nobody)');
-      assert.match(calls.telegrams[0].body.text, /^🔁 Reply limit reached: Priya Sharma/);
-      assert.equal(calls.telegrams[0].body.reply_markup, undefined, 'an FYI, not a question to reply to');
+      assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'the owner is not told: it’s ours');
+      assert.deepEqual(calls.events.map(e => [e.level, e.kind, e.lead_id]), [['warn', 'turn_cap', LEAD.id]]);
+      assert.match(calls.events[0].message, /^Bot handed off \(turn_cap\)/);
       let b = calls.patches[0].body;
       assert.equal(b.bot_active, false);
       assert.match(b.bot_state.handoff_summary, /turn_cap/);
@@ -2153,14 +2162,13 @@ assert.equal(extractComments({}).length, 0);
       assert.match(calls.sends[0].message.text, /Let me check with our team\.$/);
       assert.deepEqual(calls.patches[0].body.bot_state.team_questions, ['is there parking?', 'do you open on Sunday?']);
 
-      // FYIs: emergency (nothing sent to the customer), asks for a person, LLM down.
+      // FYIs: emergency (nothing sent to the customer), asks for a person.
       // No ForceReply, no stored message id.
-      for (const [ev, over, head] of [
-        [{ ...EV, messageText: 'emergency! khoon beh raha hai' }, {}, '🔴 Emergency: Priya Sharma'],
-        [{ ...EV, messageText: 'talk to a human please' }, {}, '🙋 Asked for a person: Priya Sharma'],
-        [EV, { geminiError: 'overloaded' }, '⚠️ Bot error: Priya Sharma'],
+      for (const [ev, head] of [
+        [{ ...EV, messageText: 'emergency! khoon beh raha hai' }, '🔴 Emergency: Priya Sharma'],
+        [{ ...EV, messageText: 'talk to a human please' }, '🙋 Asked for a person: Priya Sharma'],
       ]) {
-        calls = botMock({ config: CFG('live'), owner: OWNER, ...over });
+        calls = botMock({ config: CFG('live'), owner: OWNER });
         await botReply(LEAD, ev, 'instagram');
         assert.equal(calls.telegrams.length, 1, head);
         assert.ok(calls.telegrams[0].body.text.startsWith(head), head);
@@ -2168,17 +2176,24 @@ assert.equal(extractComments({}).length, 0);
         assert.equal(calls.telegrams[0].body.reply_markup, undefined, 'an FYI expects no reply');
         assert.equal(calls.patches[0].body.bot_state.owner_alert_msg_id, undefined);
       }
-      assert.equal(calls.sends.length, 1, 'llm_error still sends its hold copy');
 
       // one alert per incident: the alerting handoff switched the bot off, so the
-      // next message in the outage reaches no alert at all
+      // next message reaches no alert at all
       const after = calls.patches[0].body;
-      calls = botMock({ config: CFG('live'), owner: OWNER, geminiError: 'overloaded' });
+      calls = botMock({ config: CFG('live'), owner: OWNER, decision: PRICE_MISS });
       assert.deepEqual(await botReply({ ...LEAD, ...after }, EV, 'instagram'), { skipped: 'bot_inactive' });
       assert.equal(calls.telegrams.length + calls.alerts.length, 0);
 
-      // medical, soft handoff, normal turn → nobody alerted (turn_cap alerts since S12c: test 18)
+      // a bot error is ours (review §2): no Telegram, no email, one error row; the hold copy still goes
+      calls = botMock({ config: CFG('live'), owner: OWNER, geminiError: 'overloaded' });
+      assert.equal((await botReply(LEAD, EV, 'instagram')).handoff, 'llm_error');
+      assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'no owner alert for a bot error');
+      assert.equal(calls.sends.length, 1, 'llm_error still sends its hold copy');
+      assert.deepEqual(calls.events.map(e => [e.level, e.kind]), [['error', 'llm_error']]);
+
+      // medical, soft handoff, normal turn → nobody alerted; only medical leaves a row for us
       let quiet = 0;
+      const kinds = [], rows = [];
       for (const [lead, ev, over] of [
         [LEAD, { ...EV, messageText: 'khujli ho rahi hai' }, {}],
         [LEAD, EV, { decision: { ...REPLY_DECISION, handoff: true, reason: 'qualified', reply: 'Team will confirm 🙏' } }],
@@ -2187,8 +2202,13 @@ assert.equal(extractComments({}).length, 0);
         calls = botMock({ config: CFG('live'), owner: OWNER, ...over });
         await botReply(lead, ev, 'instagram');
         quiet += calls.telegrams.length + calls.alerts.length;
+        kinds.push(calls.events.map(e => `${e.level} ${e.kind}`));
+        rows.push(...calls.events);
       }
-      assert.equal(quiet, 0, 'only price questions + emergency/requested/llm_error alert');
+      assert.equal(quiet, 0, 'only price questions + emergency/crisis/requested alert the owner');
+      assert.deepEqual(kinds, [['info medical'], [], []]);
+      assert.equal(rows[0].lead_id, LEAD.id);
+      assert.ok(!/khujli/.test(JSON.stringify(rows)), 'what the customer said stays in the chat');
 
       // email fallback: no owner linked, or Telegram refuses (403 = owner blocked
       // the bot) → the same alert by email to cfg.alert_email, no message id
@@ -2613,8 +2633,9 @@ assert.equal(extractComments({}).length, 0);
     // `hook` = the webhook's answers in order (a number = status, 'net' = network error)
     // `waError` = Meta's error message for a WhatsApp send (else it's accepted)
     const pushMock = ({ hook = [200], history = [], botTurn = null, waError = null } = {}) => {
-      const calls = { hooks: [], alerts: [], patches: [], profiles: 0, sends: [], inserts: [], wa: [] };
+      const calls = { hooks: [], alerts: [], patches: [], profiles: 0, sends: [], inserts: [], wa: [], events: [] };
       global.fetch = async (url, opts = {}) => {
+        if (url.includes('/rest/v1/bot_events')) { calls.events.push(JSON.parse(opts.body)); return { ok: true, status: 201 }; }
         if (url.startsWith('https://hook.make.test')) {
           calls.hooks.push({ headers: opts.headers, body: JSON.parse(opts.body) });
           const r = hook[calls.hooks.length - 1] ?? hook.at(-1);
@@ -2736,13 +2757,15 @@ assert.equal(extractComments({}).length, 0);
       assert.equal(calls.alerts.length, 1, `${status} alerts us`);
       assert.match(calls.alerts[0].subject, /Lead push failed — Riya Sharma/);
       assert.match(calls.alerts[0].html, new RegExp(`HTTP ${status}`));
+      assert.deepEqual(calls.events.map(e => [e.level, e.kind, e.lead_id]), [['error', 'lead_push', LEAD.id]], 'and one Activity row');
+      assert.match(calls.events[0].message, new RegExp(`The lead for Riya Sharma didn't reach the webhook \\(HTTP ${status}`));
       assert.equal(calls.patches.length, 1);
       assert.equal(calls.patches[0].bot_state.lead_pushed, undefined, 'a failed push is not stamped as sent');
       assert.ok(calls.patches[0].bot_state.lead_push_alerted.lead);
     }
     calls = pushMock({ hook: [410], history: HISTORY });
     await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_push_alerted: { lead: 't' } } }, CFG);
-    assert.equal(calls.alerts.length, 0, 'already alerted for this lead + type → no second email');
+    assert.equal(calls.alerts.length + calls.events.length, 0, 'already alerted for this lead + type → no second email or row');
 
     // Nothing due / no URL → no webhook call at all
     calls = pushMock({ history: HISTORY });
@@ -2863,6 +2886,7 @@ assert.equal(extractComments({}).length, 0);
       assert.match(calls.alerts[0].html, /Janakpuri WhatsApp \(WhatsApp send failed: 401 Invalid OAuth access token\)/);
       assert.match(calls.alerts[0].html, /401 = the token; 132001 = the template/);
       assert.equal(calls.patches[0].bot_state.lead_pushed, undefined);
+      assert.match(calls.events[0].message, /didn't reach the Janakpuri WhatsApp \(WhatsApp send failed: 401/);
       calls = pushMock({ history: HISTORY, waError: 'x' });
       await pushLead(db, { ...LEAD, bot_state: { ...LEAD.bot_state, lead_push_alerted: { lead: 't' } } }, WA_CFG);
       assert.equal(calls.alerts.length, 0, 'one email per lead + type');
@@ -3246,11 +3270,12 @@ assert.equal(extractComments({}).length, 0);
     process.env.IG_APP_ID = 'APP1';
     process.env.IG_APP_SECRET = 'APPSECRET';
     const s9 = ({ secret = null, secretsStatus = 200, failAt = null } = {}) => {
-      const st = { secret, saved: [], calls: [], tg: [], mails: [], secretHeaders: [] };
+      const st = { secret, saved: [], calls: [], tg: [], mails: [], secretHeaders: [], events: [] };
       const json = (v, status = 200) => ({ ok: status < 400, status, json: async () => v, text: async () => JSON.stringify(v) });
       global.fetch = async (url, opts = {}) => {
         st.calls.push(String(url));
         if (failAt && String(url).includes(failAt)) return json({ error: { message: 'Invalid OAuth access token' } }, 400);
+        if (url === 'http://supabase.test/rest/v1/bot_events') { st.events.push(JSON.parse(opts.body)); return json(null, 201); }
         if (url.startsWith('http://supabase.test/rest/v1/secrets')) {
           st.secretHeaders.push(opts.headers.apikey);
           if (opts.method === 'POST') { const b = JSON.parse(opts.body); st.saved.push(b); st.secret = b.value; return json(null, 201); }
@@ -3306,12 +3331,12 @@ assert.equal(extractComments({}).length, 0);
     const fresh = { token: 'DB_TOKEN', ig_user_id: '1784', username: 'dskin.test',
                     refreshed_at: new Date(Date.now() - DAY).toISOString(), expires_at: new Date(Date.now() + 59 * DAY).toISOString() };
     s9({ secret: fresh });
-    assert.deepEqual(await getIgToken(), { token: 'DB_TOKEN', igId: 'me' });
+    assert.deepEqual(await getIgToken(), { token: 'DB_TOKEN', igId: 'me', expires_at: fresh.expires_at }, 'expiry for the banner');
     st = s9({ secret: fresh });
     await sendInstagramMessage('IGSID_1', 'hi');
     assert.deepEqual(st.send, { url: 'https://graph.instagram.com/v21.0/me/messages', auth: 'Bearer DB_TOKEN' }, 'sends use the DB token');
     s9({ secret: { ...fresh, expires_at: new Date(Date.now() - 1000).toISOString() } });
-    assert.deepEqual(await getIgToken(), { token: 'env_token', igId: 'ENV_IG' }, 'expired DB token → env');
+    assert.deepEqual(await getIgToken(), { token: 'env_token', igId: 'ENV_IG', expires_at: null }, 'expired DB token → env');
     s9();
     assert.equal((await getIgToken()).token, 'env_token', 'not connected → env');
     s9({ secret: fresh, secretsStatus: 404 });
@@ -3333,20 +3358,31 @@ assert.equal(extractComments({}).length, 0);
     const old = { ...fresh, refreshed_at: isoDaysAgo(51, NOW), expires_at: isoDaysAgo(-9, NOW) };
     st = s9({ secret: { ...fresh, refreshed_at: isoDaysAgo(10, NOW) } });
     assert.equal(await refreshIgToken(NOW), 'not due');
-    assert.equal(st.saved.length + st.tg.length, 0);
+    assert.equal(st.saved.length + st.tg.length + st.events.length, 0);
     st = s9({ secret: old });
     assert.equal(await refreshIgToken(NOW), 'refreshed');
     assert.ok(st.calls.some(u => u.includes('grant_type=ig_refresh_token') && u.includes('access_token=DB_TOKEN')));
     assert.deepEqual(st.saved[0].value, { ...old, token: 'LONG2', refreshed_at: '2026-10-08T00:00:00.000Z', expires_at: '2026-12-07T00:00:00.000Z' });
-    // A failed refresh keeps the old token and alerts the owner's Telegram
+    // A failed refresh keeps the old token and logs one error row with the days left (review §2 §9):
+    // no Telegram, no email
     st = s9({ secret: old, failAt: 'refresh_access_token' });
     assert.equal(await refreshIgToken(NOW), 'failed');
     assert.equal(st.saved.length, 0);
-    assert.equal(st.tg.length, 1);
-    assert.equal(st.tg[0].chat_id, 42);
-    assert.match(st.tg[0].text, /Instagram token refresh failed \(token refresh failed: 400 Invalid OAuth access token\)/);
-    assert.match(st.tg[0].text, /stops working on 17 Oct/);
-    assert.ok(!st.tg[0].text.includes('DB_TOKEN'), 'the token never appears in an alert');
+    assert.equal(st.tg.length + st.mails.length, 0, 'not the owner’s job any more');
+    assert.deepEqual(st.events.map(e => [e.level, e.kind, e.lead_id]), [['error', 'ig_token', null]]);
+    assert.match(st.events[0].message, /^Instagram token refresh failed \(token refresh failed: 400 Invalid OAuth access token\)\. 9 days left: it stops working on 17 Oct/);
+    assert.ok(!st.events[0].message.includes('DB_TOKEN'), 'the token never appears in a row');
+    // the last day says "1 day"; past expiry it says so
+    st = s9({ secret: { ...old, expires_at: new Date(NOW + 1.5 * DAY).toISOString() }, failAt: 'refresh_access_token' });
+    await refreshIgToken(NOW);
+    assert.match(st.events[0].message, /\. 1 day left: /);
+    st = s9({ secret: { ...old, expires_at: isoDaysAgo(1, NOW) }, failAt: 'refresh_access_token' });
+    await refreshIgToken(NOW);
+    assert.match(st.events[0].message, /\. It expired on 7 Oct.*: reconnect Instagram\.$/);
+    // secrets unreadable: the row still goes, without a countdown
+    st = s9({ secret: old, secretsStatus: 500 });
+    assert.equal(await refreshIgToken(NOW), 'failed');
+    assert.match(st.events[0].message, /^Instagram token refresh failed \(secrets read failed: 500.*\)\.$/);
 
     for (const k of ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'IG_APP_ID', 'IG_APP_SECRET', 'TELEGRAM_BOT_TOKEN'])
       delete process.env[k];
@@ -3809,9 +3845,10 @@ assert.equal(extractComments({}).length, 0);
     process.env.TELEGRAM_BOT_TOKEN = 'tg';
     const p2 = ({ cfg = { price_sheet_id: 'SHEET_ID', price_name_fixes: FIXES }, prev = null,
                   sheet = () => json({ valueRanges: [{ values: PRICES }, { values: ANSWERS }] }) } = {}) => {
-      const st = { upserts: [], tg: [], sheets: [] };
+      const st = { upserts: [], tg: [], sheets: [], events: [] };
       global.fetch = async (url, opts = {}) => {
         url = String(url);
+        if (url === 'http://supabase.test/rest/v1/bot_events') { st.events.push(JSON.parse(opts.body)); return json(null, 201); }
         if (url.includes('/rest/v1/settings?key=eq.')) {
           const v = { chatbot_config: cfg, price_list: prev, telegram_owner: { chat_id: 42 } }[url.split('key=eq.')[1].split('&')[0]];
           return json(v ? [{ value: JSON.stringify(v) }] : []);
@@ -3836,31 +3873,32 @@ assert.equal(extractComments({}).length, 0);
     assert.match(st.sheets[0], /ranges=Prices!A%3AF&ranges='Bot%20answers'!A%3AC/);
     assert.deepEqual(st.saved(), [{ synced_at: '2026-10-14T06:00:00.000Z', items, counts: { services: 7, packages: 3, owner: 2 } }]);
     assert.equal(st.upserts.some(u => u.key === 'chatbot_config'), false, 'chatbot_config is never written');
-    assert.equal(st.tg.length, 0);
+    assert.equal(st.tg.length + st.events.length, 0);
     // no sheet set up → nothing read, nothing saved
     st = p2({ cfg: { mode: 'shadow' } });
     assert.equal(await syncPriceSheet(NOW), null);
     assert.equal(st.sheets.length + st.upserts.length, 0);
 
-    // a failed read: the last list is kept, the owner is told once, and the error is thrown
+    // a failed read: the last list is kept, one error row for us (review §2, not the owner), and the error is thrown
     st = p2({ prev: PREV, sheet: () => json({ error: { message: 'Requested entity was not found.' } }, 404) });
     await assert.rejects(syncPriceSheet(NOW), /Google Sheets 404/);
-    assert.equal(st.tg.length, 1);
-    assert.match(st.tg[0].text, /Couldn't read the price sheet \(Google Sheets 404.*\)\. The bot keeps the prices from 13 Oct/);
+    assert.equal(st.tg.length, 0, 'not the owner’s Telegram any more');
+    assert.deepEqual(st.events.map(e => [e.level, e.kind]), [['error', 'price_sheet']]);
+    assert.match(st.events[0].message, /^Couldn't read the price sheet \(Google Sheets 404.*\)\. The bot keeps the prices from 13 Oct/);
     assert.deepEqual(st.saved(), [{ ...PREV, error: 'Google Sheets 404: Requested entity was not found.', alerted_at: '2026-10-14T06:00:00.000Z' }]);
-    // still failing an hour later: no second alert, nothing rewritten
+    // still failing an hour later: no second row, nothing rewritten
     const alerted = st.saved()[0];
     st = p2({ prev: alerted, sheet: () => json({}, 404) });
     await assert.rejects(syncPriceSheet(NOW + HOUR), /404/);
-    assert.equal(st.tg.length + st.upserts.length, 0);
-    // a day later: one more alert
+    assert.equal(st.events.length + st.upserts.length, 0, 'one row a day, not one an hour');
+    // a day later: one more row
     st = p2({ prev: alerted, sheet: () => json({}, 404) });
     await assert.rejects(syncPriceSheet(NOW + 25 * HOUR), /404/);
-    assert.equal(st.tg.length, 1);
+    assert.equal(st.events.length, 1);
     // the first sync failing: there's no list to keep
     st = p2({ sheet: () => json({}, 404) });
     await assert.rejects(syncPriceSheet(NOW), /404/);
-    assert.match(st.tg[0].text, /The bot has no sheet prices yet/);
+    assert.match(st.events[0].message, /The bot has no sheet prices yet/);
 
     // a missing header, an empty tab, or under half the services of last time: same guard
     const bad = (rows) => () => json({ valueRanges: [{ values: rows }, { values: ANSWERS }] });
@@ -3870,7 +3908,7 @@ assert.equal(extractComments({}).length, 0);
       st = p2({ prev: PREV, sheet: bad(rows) });
       await assert.rejects(syncPriceSheet(NOW), why);
       assert.deepEqual(st.saved()[0].items, PREV.items, 'the last list is kept');
-      assert.equal(st.tg.length, 1);
+      assert.equal(st.events.length, 1);
     }
     // a good sync after a failure: a clean row (no error, no alert stamp), so the next failure alerts at once
     st = p2({ prev: { ...PREV, counts: { services: 10, packages: 3, owner: 0 }, error: 'x', alerted_at: new Date(NOW).toISOString() } });

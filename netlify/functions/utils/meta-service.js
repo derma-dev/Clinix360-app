@@ -252,6 +252,16 @@ function createSupabaseClient() {
       return res.json();
     },
 
+    // One bot_events row (logEvent). Nothing reads the answer, so none is asked for.
+    async insertEvent(row) {
+      const res = await fetch(`${url}/rest/v1/bot_events`, {
+        method: 'POST',
+        headers: { ...headers, Prefer: 'return=minimal' },
+        body:   JSON.stringify(row),
+      });
+      if (!res.ok) throw new Error(`bot_events insert failed: ${res.status} ${await res.text()}`);
+    },
+
     // Settings-row upsert (value is the stringified JSON, same shape getSettingJson reads).
     // ponytail: whole-row read-modify-write by callers — a concurrent write loses
     // one update; fine for the offer cache / config at this volume.
@@ -323,7 +333,8 @@ async function igJson(res, what) {
 }
 
 // Fallback order: the connected account's token (secrets, unexpired) → env
-// META_ACCESS_TOKEN → throw. igId: the DB token is resolved by `me`.
+// META_ACCESS_TOKEN → throw. igId: the DB token is resolved by `me`. expires_at:
+// the DB token's, for the console's expiry banner (meta-status); null for env.
 let lastIgTokenSource = null;
 async function getIgToken() {
   let s = null;
@@ -335,7 +346,7 @@ async function getIgToken() {
   const source = fromDb ? `db (@${s.username || s.ig_user_id})` : 'env';
   if (source !== lastIgTokenSource) console.log(`[meta-service] IG token from ${source}`);
   lastIgTokenSource = source;
-  return { token, igId: fromDb ? 'me' : (process.env.META_IG_ID || 'me') };
+  return { token, igId: fromDb ? 'me' : (process.env.META_IG_ID || 'me'), expires_at: fromDb ? s.expires_at : null };
 }
 
 const igAuthorizeUrl = (redirectUri, state) => 'https://www.instagram.com/oauth/authorize' +
@@ -366,8 +377,9 @@ async function connectInstagram(code, redirectUri, now = Date.now()) {
 
 const igTokenDue = (s, now) => !!s?.token && now - Date.parse(s.refreshed_at) > IG_REFRESH_AFTER_MS;
 
-// Daily (ig-token-refresh.js). Never throws. A failure alerts the owner's
-// Telegram (email if that fails) every day until it works or they reconnect.
+// Daily (ig-token-refresh.js). Never throws. A failure logs one bot_events row a day
+// (the job's own pace) until it works or Instagram is reconnected; its countdown of
+// days left is the warning. Not the owner's job (review §2 §9).
 async function refreshIgToken(now = Date.now()) {
   let s = null;
   try {
@@ -381,21 +393,23 @@ async function refreshIgToken(now = Date.now()) {
     return 'refreshed';
   } catch (e) {
     console.error('[meta-service] IG token refresh failed:', e.message);
-    await alertOwner('Instagram token refresh failed', `⚠️ Instagram token refresh failed (${e.message}).` +
-      (s?.expires_at ? ` The token stops working on ${istStamp(s.expires_at)}.` : '') +
-      ' Open the Connect Instagram link again before then, or the bot stops replying on Instagram.');
+    const left = Math.floor((Date.parse(s?.expires_at) - now) / DAY_MS);   // NaN when no token was read
+    const days = left === 1 ? '1 day' : `${left} days`;
+    await logEvent('error', 'ig_token', `Instagram token refresh failed (${e.message}).` + (
+      left > 0  ? ` ${days} left: it stops working on ${istStamp(s.expires_at)}, and then the bot stops replying on Instagram. Reconnect Instagram before then.`
+      : left <= 0 ? ` It expired on ${istStamp(s.expires_at)}: reconnect Instagram.` : ''));
     return 'failed';
   }
 }
 
-// The owner's Telegram, or an email when that fails. Never throws.
-async function alertOwner(title, text) {
+// Developer alerts and safety events → bot_events, for the console's Activity page
+// (review §2 §8). Never throws: a failed insert only reaches the function log.
+async function logEvent(level, kind, message, { lead_id = null, details = null } = {}) {
   try {
-    const owner = await getSettingJson('telegram_owner');
-    if (!owner?.chat_id) throw new Error('no owner linked');
-    await sendTelegram(owner.chat_id, text);
+    await createSupabaseClient().insertEvent({ level, kind, lead_id, details,
+                                               message: String(message ?? '').slice(0, 1000) });
   } catch (e) {
-    await sendAlertEmail(null, `⚠️ ${title}`, title, text, `Sent by email because the Telegram alert failed (${e.message}).`);
+    console.error(`[meta-service] bot_events row not saved (${level} ${kind}): ${e.message}`);
   }
 }
 
@@ -494,8 +508,9 @@ function parsePriceSheet(pricesRows, answerRows, fixes = {}) {
 // Sheet → settings.price_list { synced_at, items, counts } (its own row, so a
 // console Settings save can't put old prices back). Returns counts, or null when
 // no sheet is set up. A bad read, a missing header, no services or fewer than half
-// of last time keeps the last list, alerts the owner (once a day while it lasts),
-// saves the error on the row and throws.
+// of last time keeps the last list, logs a bot_events row (once a day while it lasts:
+// the alerted_at stamp), saves the error on the row and throws. The owner hears of it
+// only through /prices.
 const DAY_MS = 86400e3;
 async function syncPriceSheet(now = Date.now()) {
   const [cfg, prev] = await Promise.all([getSettingJson('chatbot_config'), getSettingJson('price_list')]);
@@ -514,7 +529,7 @@ async function syncPriceSheet(now = Date.now()) {
   } catch (e) {
     console.error('[meta-service] price sheet sync failed, last list kept:', e.message);
     if (!(now - Date.parse(prev?.alerted_at) < DAY_MS)) {
-      await alertOwner('Price sheet sync failed', `⚠️ Couldn't read the price sheet (${e.message}). ` +
+      await logEvent('error', 'price_sheet', `Couldn't read the price sheet (${e.message}). ` +
         (prev?.items ? `The bot keeps the prices from ${istStamp(prev.synced_at)}.` : 'The bot has no sheet prices yet.'));
       try { await db.upsertSetting('price_list', JSON.stringify({ ...prev, error: e.message, alerted_at: isoAt(now) })); }
       catch (e2) { console.error('[meta-service] price_list alert stamp not saved:', e2.message); }
@@ -2049,6 +2064,9 @@ function buildHandoffSummary(reason, botState, ev, guard) {
 // send the model's own closing reply when it wrote one. A failed send never
 // aborts the handoff — staff still get the summary and the lead.
 const SOFT_HANDOFFS = ['qualified', 'wants_booking', 'declined_booking'];
+// The handoffs we watch on the console's Activity page (bot_events), with their level.
+// Live only: a shadow turn never reaches handoffToStaff; bot_shadow_log has those.
+const HANDOFF_EVENTS = { turn_cap: 'warn', guard: 'info', emergency: 'info', medical: 'info', crisis: 'info' };
 
 async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, firstBotTurn) {
   let text = null;
@@ -2108,6 +2126,9 @@ async function handoffToStaff(db, lead, ev, platform, cfg, decision, botState, f
     bot_state:  nextState,
   });
   console.log(`[meta-service] handoffToStaff: lead ${lead.id} reason=${decision.reason} — "${summary.split('\n')[0]}"`);
+  // The first line only: what the customer said (a symptom, for medical) stays in the chat.
+  if (HANDOFF_EVENTS[decision.reason])
+    await logEvent(HANDOFF_EVENTS[decision.reason], decision.reason, summary.split('\n')[0], { lead_id: lead.id });
   // S2 — a handoff settles the chat: push it to the client's webhook (never throws).
   // S6 — except a price question the owner can still answer: that chat settles at
   // their answer (the bot resumes) or at the 20 h fallback (owner_no_reply).
@@ -2141,18 +2162,17 @@ async function telegramApi(method, body) {
 // Plain text, so customer words need no escaping. Returns the Message.
 const sendTelegram = (chatId, text, extra = {}) => telegramApi('sendMessage', { chat_id: chatId, text, ...extra });
 
-// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies, S12b GQ1 distress, S12c the
-// daily reply limit). kb_miss is a price question by now (Q30, see botReply); the rest are
-// FYIs. Medical and soft handoffs alert nobody. One alert per thread per incident
-// comes free: each of these switches the bot off for the thread, so the next
-// message can't alert again (an LLM outage pings once per chat, not per message).
+// S3 — the handoffs that alert the owner (Q12 + Q32 emergencies, S12b GQ1 distress, asks
+// for a person). kb_miss is a price question by now (Q30, see botReply); the rest are
+// FYIs. One alert per thread per incident comes free: each of these switches the bot
+// off for the thread, so the next message can't alert again. Bot errors and the daily
+// reply limit are ours, not the owner's: they go to bot_events (HANDOFF_EVENTS,
+// botReply's Gemini catch), like medical, guard and the other safety handoffs (review §2).
 const OWNER_ALERTS = {
   kb_miss:   { head: '❓ Price question',      ask: 'Reply to this message with the price and I’ll pass it on.' },
   emergency: { head: '🔴 Emergency',           ask: 'The bot didn’t reply. Please answer them yourself.' },
   crisis:    { head: '🆘 Distress message',    ask: 'The bot sent one short line and stepped back. Please reach out to them yourself.' },
   requested: { head: '🙋 Asked for a person',  ask: 'The bot has stepped back. Please answer them yourself.' },
-  llm_error: { head: '⚠️ Bot error',           ask: 'They were told the team will help. Please answer them yourself.' },
-  turn_cap:  { head: '🔁 Reply limit reached', ask: 'The bot has answered this chat its daily limit and stepped back. It may be another business’s auto-reply. Please check it yourself.' },
 };
 
 // Telegram to the bound owner (settings.telegram_owner, set by telegram-webhook).
@@ -2304,8 +2324,8 @@ async function leadSummary(model, rows, q, price) {
 }
 
 // Never throws: a failed push must not break the handoff or the hourly run.
-// Unstamped failures are retried by the next hourly run; we're emailed once per
-// lead + type so a dead webhook can't flood the inbox.
+// Unstamped failures are retried by the next hourly run; we get one email and one
+// bot_events row per lead + type, so a dead webhook can't flood either.
 // S2b: chatbot_config.branch_whatsapp ({ "Janakpuri": "91…" }) set → the lead goes
 // to its branch's WhatsApp as the lead_alert template, not to Make. Remove the
 // key to roll back to Make.
@@ -2384,6 +2404,8 @@ async function pushLead(db, lead, cfg, quiet = false) {
     }
     console.error(`[meta-service] lead push failed for lead ${lead.id} (${type}): ${r.error}`);
     if (!bs.lead_push_alerted?.[type]) {
+      await logEvent('error', 'lead_push', `The ${type} for ${lead.customer_name || lead.id} didn't reach ${where} (${r.error})`,
+                     { lead_id: lead.id });
       await sendAlertEmail(cfg, `⚠️ Lead push failed — ${lead.customer_name || lead.id}`,
         `The ${type} for ${lead.customer_name || lead.id} didn't reach ${where} (${r.error})`,
         summary,
@@ -3207,6 +3229,8 @@ async function botReply(lead, ev, platform, inboundRow = null) {
         // one error row in shadow.
         console.error('[meta-service] Gemini failed → llm_error handoff:', err.message);
         llmError = err.message;
+        // Ours, not the owner's (review §2): in shadow too, so an outage shows before go-live.
+        await logEvent('error', 'llm_error', err.message, { lead_id: lead.id });
         decision = { reason: 'llm_error', reply: '', kb_covers: false, handoff: true, category: 'lead' };
       }
       // The gate allows a number the customer typed in the last 10 messages, or the one on file.

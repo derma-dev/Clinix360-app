@@ -33,7 +33,7 @@ const handler = async () => {
   if (!url || !key) { console.error('[bot-hourly] missing env vars'); return { statusCode: 500 }; }
   const cfg = (await getBotConfig()) || {};
   // S11c P4: the price sheet, any mode but off. A failure keeps the last list and
-  // alerts the owner (syncPriceSheet), and never stops the work below.
+  // logs a bot_events row once a day (syncPriceSheet), and never stops the work below.
   if (cfg.mode === 'shadow' || cfg.mode === 'live') {
     try { console.log('[bot-hourly] price sheet:', (await syncPriceSheet()) || 'not set up'); }
     catch (e) { console.error('[bot-hourly] price sheet sync failed:', e.message); }
