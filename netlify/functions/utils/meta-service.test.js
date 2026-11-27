@@ -564,6 +564,15 @@ assert.equal(extractComments({}).length, 0);
   assert.deepEqual(settleDecision(turn('', { reason: 'kb_miss', asks_price: false, handoff: true }), 'lead',
                                   { ...cfg, canned: { kb_miss: 'Let me check with our team.' } }),
     turn('I don’t have that information right now. You can ask our team when you visit 😊', { reason: 'kb_miss', asks_price: false }));
+  // …and with a reply, the model's answer is dropped (it made one up, live 2026-11-27):
+  // only a separate closing question follows the line
+  const miss = (reply) => settleDecision(turn(reply, { reason: 'kb_miss', asks_price: false }), 'lead', cfg).reply;
+  assert.equal(miss('Hamari sabhi branches ke paas parking available hai, aap aasaani se aa sakte hain. Aur bataiye, aapka preferred time kya rahega visit ke liye?'),
+    'I don’t have that information right now. You can ask our team when you visit 😊 Aur bataiye, aapka preferred time kya rahega visit ke liye?');
+  assert.equal(miss('Yes, we have free parking at every branch, which one suits you?'),
+    'I don’t have that information right now. You can ask our team when you visit 😊', 'a one-sentence reply goes entirely');
+  assert.equal(miss('Free parking is available at all branches.'),
+    'I don’t have that information right now. You can ask our team when you visit 😊', 'no closing question → the line alone');
   // the KB line's label is cut, not held back (G0)
   assert.equal(settleDecision(turn('Hydra facial (SERVICE HYDRA FACIAL 1s) costs ₹3,000'), null, cfg).reply,
     'Hydra facial (HYDRA FACIAL 1s) costs ₹3,000');
@@ -2171,7 +2180,7 @@ assert.equal(extractComments({}).length, 0);
         reply: 'I don’t have parking details right now, you can ask at your visit. Which branch suits you?' } });
       assert.deepEqual(await botReply(LEAD, { ...EV, messageText: 'is there parking?' }, 'instagram'), { sent: true });
       assert.equal(calls.telegrams.length + calls.alerts.length, 0, 'the owner is asked about prices only');
-      assert.match(calls.sends[0].message.text, /Which branch suits you\?$/);
+      assert.ok(calls.sends[0].message.text.endsWith(`${OTHER} Which branch suits you?`), calls.sends[0].message.text);
       assert.equal(calls.patches[0].body.bot_active, undefined, 'bot stays on');
       assert.deepEqual(calls.kb, [{ lead_id: LEAD.id, question: 'is there parking?' }], 'one pending row, no answer');
       assert.equal(calls.patches[0].body.bot_state.team_questions, undefined);

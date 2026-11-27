@@ -2796,9 +2796,13 @@ function settleDecision(decision, leadCategory, cfg, ctx = {}) {
   // KB can't answer: no handoff, the bot says it doesn't have that information and
   // suggests asking at the visit (review §5), keeps qualifying, and botReply queues
   // the question in the console's Unanswered questions (queueUnanswered).
+  // The model's answer can't be trusted here: it flagged the miss and still made one up
+  // ("parking available at all branches", live 2026-11-27, R10). The line goes out, then
+  // only the model's last sentence, when that's a separate question (the next qualifying one).
+  // ponytail: that question can still restate the made-up fact; ask it in code if that shows up.
   if (decision.reason === 'kb_miss' && !decision.asks_price) {
-    decision = { ...decision, handoff: false,
-                 reply: String(decision.reply || '').trim() || cannedCopy(cfg, 'kb_miss_other') };
+    const ask = String(decision.reply || '').trim().match(/[.!?।]\s+([^.!?।]+\?)$/)?.[1];
+    decision = { ...decision, handoff: false, reply: [cannedCopy(cfg, 'kb_miss_other'), ask].filter(Boolean).join(' ') };
   }
   // A price kb_miss with no reply and no handoff would send nothing ("Gfc price", 5 of 6
   // G3 replays; "RF cost plz?" 2 of 3 before G3): it hands off like any price kb_miss.
