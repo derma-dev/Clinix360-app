@@ -1633,7 +1633,7 @@ const PRICE_RULE = {
 const assistantSystemPrompt = (sheet) => `You are the Instagram DM assistant for Derma Skin and Hair Solutions, a Delhi-NCR dermatology clinic (branches: Janakpuri main, Kirti Nagar, Dwarka Sec 12).
 
 HARD RULES — breaking any is a failure:
-- Answer ONLY from the KNOWLEDGE BASE below. asks_price=true whenever the customer asks what something costs. Which treatments we offer ("kaun se treatment karte ho?"), or whether we offer a treatment a SERVICE line names, is covered: answer from those lines. Anything else the KB doesn't state (payment methods, facilities, the doctors, a treatment no line names) is kb_miss. If the KB does not answer the question, set kb_covers=false and reason='kb_miss'; then for a PRICE you don't have, reply="" and handoff=true (the team checks the price and comes back), and for ANY OTHER question handoff=false: say you don't have that information right now and suggest asking at the visit, then carry on with the next qualifying question.
+- Answer ONLY from the KNOWLEDGE BASE below. asks_price=true whenever the customer asks what something costs. Which treatments we offer ("kaun se treatment karte ho?"), or whether we offer a treatment a SERVICE line names, is covered: answer from those lines. Anything else asked that the KB doesn't state (payment methods, facilities, the doctors, a treatment no line names) is kb_miss; a greeting, thanks or small talk asks nothing, so it is never kb_miss. If the KB does not answer the question, set kb_covers=false and reason='kb_miss'; then for a PRICE you don't have, reply="" and handoff=true (the team checks the price and comes back), and for ANY OTHER question handoff=false: say you don't have that information right now and suggest asking at the visit, then carry on with the next qualifying question.
 - NEVER diagnose, prescribe medicines, or interpret symptoms. A message describing active symptoms (pain, itching, bleeding, a reaction) is not yours to answer: set is_medical=true, reply="" and handoff=true.
 - "Is it safe / painful for my condition?" questions about a STABLE condition (e.g. "PCOS hai to laser safe?") are NOT medical — answer from the KB's safety entries, is_medical=false.
 - Quote a price ONLY from the KB entry for that exact service, OR from a "LIVE OFFER (quotable)" block naming that service — that offer price is the one exception (D9). Otherwise you don't have the price: kb_miss, handoff=true (above). NEVER invent, estimate, or average prices. A "STALE OFFER" block must never be quoted. ${sheet ? PRICE_RULE.sheet : PRICE_RULE.corpus} A LIVE OFFER may state only what its post caption states. Never reuse one service's price for a different service.
@@ -2341,7 +2341,7 @@ const REPHRASE_SCHEMA = { type: 'OBJECT', required: ['text'],
 async function rephraseOwnerAnswer(model, answer, question, latest) {
   try {
     const d = await geminiJson({ model, schema: REPHRASE_SCHEMA,
-      system: 'You are the Instagram DM assistant of Derma Skin and Hair Solutions, a dermatology clinic. The clinic team has answered a customer’s question. Pass the answer on to the customer: warm, 1–3 sentences, in the language and script of the customer’s latest message (English → English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi). Keep every number exactly as the team wrote it, in digits. Add nothing the team didn’t say, and don’t say who on the team answered.\n' +
+      system: 'You are the Instagram DM assistant of Derma Skin and Hair Solutions, a dermatology clinic. The clinic team has answered a customer’s question. Pass the answer on to the customer: warm, 1–3 sentences, in the language and script of the customer’s latest message (English → English; Roman-letter Hindi/Hinglish → Roman Hinglish; Devanagari → Devanagari Hindi). Keep every number exactly as the team wrote it, in digits. Write a price as ₹ with commas, and the clinic’s billing codes in words: p/s = per session, p/u = per unit ("6000 p/s" → "₹6,000 per session"). Add nothing the team didn’t say, and don’t say who on the team answered.\n' +
               'Also fill `item`: a short UPPERCASE name for what the team priced, in the style of a clinic price list (e.g. "LHR FULL FACE 6 SESSIONS PACKAGE"), and `price`: that price in rupees as a plain number. If the answer gives no price, leave item empty and price 0.',
       user: `Customer asked: """${question || ''}"""\nCustomer's latest message: """${latest || ''}"""\nTeam's answer: """${answer}"""` });
     const text = String(d?.text || '').trim();
@@ -2796,6 +2796,10 @@ function settleDecision(decision, leadCategory, cfg, ctx = {}) {
   // KB can't answer: no handoff, the bot says it doesn't have that information and
   // suggests asking at the visit (review §5), keeps qualifying, and botReply queues
   // the question in the console's Unanswered questions (queueUnanswered).
+  // kb_miss with kb_covers=true contradicts itself, and the model's answer is the right half:
+  // "hi" came back that way 3 of 3, "kaun se treatment karte ho?" 2 of 3; a real miss
+  // comes with kb_covers=false (31 of 33, probe 2026-11-27). Not a miss: no line, not queued.
+  if (decision.reason === 'kb_miss' && decision.kb_covers && !decision.asks_price) decision = { ...decision, reason: null, handoff: false };
   // The model's answer can't be trusted here: it flagged the miss and still made one up
   // ("parking available at all branches", live 2026-11-27, R10). The line goes out, then
   // only the model's last sentence, when that's a separate question (the next qualifying one).

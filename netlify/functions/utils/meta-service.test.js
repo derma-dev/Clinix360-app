@@ -573,6 +573,9 @@ assert.equal(extractComments({}).length, 0);
     'I don’t have that information right now. You can ask our team when you visit 😊', 'a one-sentence reply goes entirely');
   assert.equal(miss('Free parking is available at all branches.'),
     'I don’t have that information right now. You can ask our team when you visit 😊', 'no closing question → the line alone');
+  // kb_miss + kb_covers=true ("hi", 3 of 3): the model's answer goes out, no line, nothing queued, no handoff
+  assert.deepEqual(settleDecision(turn('Hello! Which treatment are you looking for?', { reason: 'kb_miss', kb_covers: true, asks_price: false, handoff: true }), 'lead', cfg),
+    turn('Hello! Which treatment are you looking for?', { reason: null, kb_covers: true, asks_price: false }));
   // the KB line's label is cut, not held back (G0)
   assert.equal(settleDecision(turn('Hydra facial (SERVICE HYDRA FACIAL 1s) costs ₹3,000'), null, cfg).reply,
     'Hydra facial (HYDRA FACIAL 1s) costs ₹3,000');
