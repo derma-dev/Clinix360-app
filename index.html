@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#C4922A">
   <title>Clinix360</title>
+  <meta name="description" content="Clinix360, the DSkin console: branches, the Instagram assistant’s activity and review, and its settings.">
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="apple-touch-icon" href="favicon.png">
   <link rel="preload" href="fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -16,7 +17,7 @@
 </head>
 <body>
 
-<!-- Icon sprite (Phosphor, regular) — referenced via <svg class="icon"><use href="#i-…"/></svg> -->
+<!-- Icon sprite (Phosphor, regular) — referenced via <svg class="icon" aria-hidden="true"><use href="#i-…"/></svg> -->
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
 <symbol id="i-cashup" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="96" y1="152" x2="160" y2="152" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="96" y1="120" x2="160" y2="120" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M160,40h40a8,8,0,0,1,8,8V216a8,8,0,0,1-8,8H56a8,8,0,0,1-8-8V48a8,8,0,0,1,8-8H96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M88,72V64a40,40,0,0,1,80,0v8Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-emails" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><path d="M32,56H224a0,0,0,0,1,0,0V192a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V56A0,0,0,0,1,32,56Z" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="224 56 128 144 32 56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
@@ -39,6 +40,11 @@
 <symbol id="i-trash" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="216" y1="56" x2="40" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="104" y1="104" x2="104" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="152" y1="104" x2="152" y2="168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M200,56V208a8,8,0,0,1-8,8H64a8,8,0,0,1-8-8V56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><path d="M168,56V40a16,16,0,0,0-16-16H104A16,16,0,0,0,88,40V56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-logout" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="112 40 48 40 48 216 112 216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="112" y1="128" x2="224" y2="128" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="184 88 224 128 184 168" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 <symbol id="i-download" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="128" y1="40" x2="128" y2="216" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><polyline points="56 144 128 216 200 144" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-caret-down" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="208 96 128 176 48 96" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-caret-left" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="160 208 80 128 160 48" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-caret-right" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="96 48 176 128 96 208" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-x" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><line x1="200" y1="56" x2="56" y2="200" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/><line x1="200" y1="200" x2="56" y2="56" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
+<symbol id="i-check" viewBox="0 0 256 256"><rect width="256" height="256" fill="none"/><polyline points="40 144 96 200 224 72" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="16"/></symbol>
 </svg>
 
 <!-- ============================================================
@@ -82,21 +88,21 @@
       </div>
     </div>
     <nav class="sidebar-nav">
-      <button class="sidebar-item active" data-btab="cashup">
-        <span class="sidebar-icon"><svg class="icon"><use href="#i-cashup"/></svg></span>
+      <button type="button" class="sidebar-item active" data-btab="cashup">
+        <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-cashup"/></svg></span>
         <span class="sidebar-label">Daily Cashup</span>
       </button>
-      <button class="sidebar-item" data-btab="emails">
-        <span class="sidebar-icon"><svg class="icon"><use href="#i-emails"/></svg></span>
+      <button type="button" class="sidebar-item" data-btab="emails">
+        <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-emails"/></svg></span>
         <span class="sidebar-label">Emails</span>
       </button>
-      <button class="sidebar-item" data-btab="leads">
-        <span class="sidebar-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
+      <button type="button" class="sidebar-item" data-btab="leads">
+        <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-leads"/></svg></span>
         <span class="sidebar-label">Leads</span>
       </button>
     </nav>
     <div class="sidebar-footer">
-      <button class="sidebar-logout" id="btn-branch-logout"><span>←</span> Logout</button>
+      <button type="button" class="sidebar-logout" id="btn-branch-logout"><span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg></span>Logout</button>
     </div>
   </aside>
 
@@ -107,24 +113,24 @@
    <div class="branch-tab active" id="branch-tab-cashup">
   <div class="dashboard-wrap">
     <div class="date-nav" id="dash-date-nav">
-      <button class="date-nav-arrow" id="btn-date-prev" title="Previous day">‹</button>
+      <button type="button" class="date-nav-arrow" id="btn-date-prev" title="Previous day" aria-label="Previous day"><svg class="icon" aria-hidden="true"><use href="#i-caret-left"/></svg></button>
       <div class="date-nav-center" id="dash-date-badge">
         <span id="dash-date-label">Loading…</span>
         <input type="date" id="dash-date-picker" tabindex="-1">
       </div>
-      <button class="date-nav-arrow" id="btn-date-next" title="Next day">›</button>
+      <button type="button" class="date-nav-arrow" id="btn-date-next" title="Next day" aria-label="Next day"><svg class="icon" aria-hidden="true"><use href="#i-caret-right"/></svg></button>
     </div>
 
     <!-- Yesterday closing warning (shown only when yesterday is incomplete) -->
     <div class="yesterday-warning" id="yesterday-warning" style="display:none">
       <div class="yesterday-warning-left">
-        <span class="yesterday-warning-icon"><svg class="icon"><use href="#i-warning"/></svg></span>
+        <span class="yesterday-warning-icon"><svg class="icon" aria-hidden="true"><use href="#i-warning"/></svg></span>
         <div>
-          <div class="yesterday-warning-title" id="yesterday-warning-title">Yesterday's closing is pending</div>
-          <div class="yesterday-warning-sub">This may affect today's opening balance</div>
+          <div class="yesterday-warning-title" id="yesterday-warning-title">Yesterday’s closing is pending</div>
+          <div class="yesterday-warning-sub">This may affect today’s opening balance</div>
         </div>
       </div>
-      <button class="yesterday-warning-btn" id="btn-fix-yesterday">Complete Now</button>
+      <button type="button" class="yesterday-warning-btn" id="btn-fix-yesterday">Complete Now</button>
     </div>
 
     <!-- Today cashup status card -->
@@ -136,8 +142,8 @@
     </div>
 
     <div class="dash-actions-row">
-      <button class="primary-btn full-width" id="btn-open-cashup">
-        Enter Today's Cashup
+      <button type="button" class="primary-btn full-width" id="btn-open-cashup">
+        Enter Today’s Cashup
       </button>
     </div>
 
@@ -145,19 +151,19 @@
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-label">This Week</div>
-        <div class="stat-value" id="stat-week-val">—</div>
+        <div class="stat-value" id="stat-week-val">…</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">Last Week</div>
-        <div class="stat-value" id="stat-lweek-val">—</div>
+        <div class="stat-value" id="stat-lweek-val">…</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">This Month</div>
-        <div class="stat-value" id="stat-month-val">—</div>
+        <div class="stat-value" id="stat-month-val">…</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">Last Month</div>
-        <div class="stat-value" id="stat-lmonth-val">—</div>
+        <div class="stat-value" id="stat-lmonth-val">…</div>
       </div>
     </div>
   </div>
@@ -166,7 +172,7 @@
    <!-- TAB: Emails -->
    <div class="branch-tab" id="branch-tab-emails">
      <div class="coming-soon">
-       <div class="coming-soon-icon"><svg class="icon"><use href="#i-emails"/></svg></div>
+       <div class="coming-soon-icon"><svg class="icon" aria-hidden="true"><use href="#i-emails"/></svg></div>
        <div class="coming-soon-title">Emails</div>
        <div class="coming-soon-sub">Coming soon</div>
      </div>
@@ -181,19 +187,19 @@
          <div class="leads-toolbar">
            <h2 class="leads-page-title">Leads</h2>
            <div class="leads-platform-toggle" id="leads-platform-toggle">
-             <button class="plat-btn active" data-src="all">All</button>
-             <button class="plat-btn" data-src="instagram">Instagram</button>
-             <button class="plat-btn" data-src="facebook">Facebook</button>
-             <button class="plat-btn" data-src="whatsapp">WhatsApp</button>
+             <button type="button" class="plat-btn active" data-src="all">All</button>
+             <button type="button" class="plat-btn" data-src="instagram">Instagram</button>
+             <button type="button" class="plat-btn" data-src="facebook">Facebook</button>
+             <button type="button" class="plat-btn" data-src="whatsapp">WhatsApp</button>
            </div>
            <!-- Bot-filed categories (chatbot Step 11, D2): 'Leads' shows everything
                 not filed as collab/sales/misc (incl. pre-bot leads with no category). -->
            <div class="leads-category-toggle" id="leads-category-toggle">
-             <button class="plat-btn active" data-cat="all">All</button>
-             <button class="plat-btn" data-cat="lead">Leads</button>
-             <button class="plat-btn" data-cat="collaboration">Collab</button>
-             <button class="plat-btn" data-cat="sales_pitch">Sales</button>
-             <button class="plat-btn" data-cat="misc">Misc</button>
+             <button type="button" class="plat-btn active" data-cat="all">All</button>
+             <button type="button" class="plat-btn" data-cat="lead">Leads</button>
+             <button type="button" class="plat-btn" data-cat="collaboration">Collab</button>
+             <button type="button" class="plat-btn" data-cat="sales_pitch">Sales</button>
+             <button type="button" class="plat-btn" data-cat="misc">Misc</button>
            </div>
          </div>
 
@@ -217,7 +223,7 @@
 
          <!-- Shown when no conversation is open -->
          <div class="leads-detail-empty" id="leads-detail-empty">
-           <div class="inbox-welcome-icon"><svg class="icon"><use href="#i-inbox"/></svg></div>
+           <div class="inbox-welcome-icon"><svg class="icon" aria-hidden="true"><use href="#i-inbox"/></svg></div>
            <div class="inbox-welcome-title">Clinix360 Inbox</div>
            <div class="inbox-welcome-sub">Select a conversation to start messaging</div>
          </div>
@@ -226,15 +232,15 @@
          <div class="leads-detail-content" id="leads-detail-content" style="display:none">
 
            <div class="leads-detail-header">
-             <button class="back-btn leads-back-btn" id="btn-lead-back">‹</button>
+             <button type="button" class="back-btn leads-back-btn" id="btn-lead-back">‹</button>
              <div class="conv-header-avatar" id="lead-header-avatar"></div>
              <div class="conv-header-info">
                <div class="conv-header-name" id="lead-detail-name"></div>
                <div class="conv-header-platform" id="lead-platform-label"></div>
              </div>
              <!-- Chatbot Step 10 (D12): shortcut for what a staff reply does anyway -->
-             <button class="takeover-btn" id="btn-takeover" style="display:none"
-               title="Pause the bot on this conversation and reply as staff">🤖⏯ Take over</button>
+             <button type="button" class="takeover-btn" id="btn-takeover" style="display:none"
+               title="Pause the bot on this conversation and reply as staff">Take over</button>
            </div>
 
            <div class="leads-convo-log" id="leads-convo-log">
@@ -244,8 +250,8 @@
            <div class="leads-convo-compose">
              <input type="text" id="leads-convo-input" class="convo-input"
                placeholder="Type a message…">
-             <button class="convo-send-btn" id="btn-convo-log" aria-label="Send">
-               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+             <button type="button" class="convo-send-btn" id="btn-convo-log" aria-label="Send">
+               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
                </svg>
              </button>
@@ -261,10 +267,10 @@
 
   <!-- ── Branch mobile bottom nav ── -->
   <nav class="admin-bottom-nav">
-    <button class="bottom-nav-item active" data-btab="cashup"><span><svg class="icon"><use href="#i-cashup"/></svg></span><span>Cashup</span></button>
-    <button class="bottom-nav-item" data-btab="emails"><span><svg class="icon"><use href="#i-emails"/></svg></span><span>Emails</span></button>
-    <button class="bottom-nav-item" data-btab="leads"><span><svg class="icon"><use href="#i-leads"/></svg></span><span>Leads</span></button>
-    <button class="bottom-nav-item" id="btn-branch-logout-mobile"><span><svg class="icon"><use href="#i-logout"/></svg></span><span>Logout</span></button>
+    <button type="button" class="bottom-nav-item active" data-btab="cashup"><span><svg class="icon" aria-hidden="true"><use href="#i-cashup"/></svg></span><span>Cashup</span></button>
+    <button type="button" class="bottom-nav-item" data-btab="emails"><span><svg class="icon" aria-hidden="true"><use href="#i-emails"/></svg></span><span>Emails</span></button>
+    <button type="button" class="bottom-nav-item" data-btab="leads"><span><svg class="icon" aria-hidden="true"><use href="#i-leads"/></svg></span><span>Leads</span></button>
+    <button type="button" class="bottom-nav-item" id="btn-branch-logout-mobile"><span><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg></span><span>Logout</span></button>
   </nav>
 
  </div>
@@ -275,7 +281,7 @@
      ============================================================ -->
 <div id="screen-cashup" class="screen">
   <div class="screen-header">
-    <button class="back-btn" id="btn-cashup-back">‹</button>
+    <button type="button" class="back-btn" id="btn-cashup-back">‹</button>
     <div class="screen-title" id="cashup-form-title">Daily Cashup</div>
     <div style="width:40px"></div>
   </div>
@@ -284,18 +290,18 @@
   <div class="cashup-date-hero-wrap">
     <div class="cashup-date-hero" id="cashup-form-date"></div>
     <div class="cashup-live-time" id="cashup-live-time"></div>
-    <button id="btn-feedback" class="feedback-btn" onclick="openFeedbackModal()"><svg class="icon"><use href="#i-chat"/></svg> Leave Feedback</button>
+    <button type="button" id="btn-feedback" class="feedback-btn" onclick="openFeedbackModal()"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg> Leave Feedback</button>
   </div>
 
   <div id="cashup-view-banner" class="view-only-banner" style="display:none">
-    View only — past dates cannot be edited
+    View only: past dates cannot be edited.
   </div>
   <div class="cashup-form-wrap" id="cashup-form-wrap">
 
     <!-- Section: Sales Entries -->
     <div class="section-card section-sales">
       <div class="section-header">
-        <span class="section-icon"><svg class="icon"><use href="#i-receipt"/></svg></span>
+        <span class="section-icon"><svg class="icon" aria-hidden="true"><use href="#i-receipt"/></svg></span>
         <span class="section-title">Sales Entries</span>
         <span class="section-total" id="entries-total">₹0</span>
       </div>
@@ -310,18 +316,18 @@
         </div>
         <div id="entries-list"></div>
       </div>
-      <button class="add-row-btn" id="btn-add-entry">+ Add Entry</button>
+      <button type="button" class="add-row-btn" id="btn-add-entry">+ Add Entry</button>
     </div>
 
     <!-- Section: Daily Summary -->
     <div class="section-card section-summary">
       <div class="section-header">
-        <span class="section-icon"><svg class="icon"><use href="#i-reports"/></svg></span>
+        <span class="section-icon"><svg class="icon" aria-hidden="true"><use href="#i-reports"/></svg></span>
         <span class="section-title">Daily Summary</span>
       </div>
       <div class="summary-grid">
         <div class="summary-row">
-          <label>Opening Balance <small style="color:#9ca3af;font-weight:400">(prev. closing)</small></label>
+          <label>Opening Balance <small class="label-note">(prev. closing)</small></label>
           <div class="summary-value" id="s-opening-display">₹0.00</div>
         </div>
         <div class="summary-row summary-auto">
@@ -333,7 +339,7 @@
           <div class="summary-value" id="s-balance-1">₹0.00</div>
         </div>
         <div class="summary-row">
-          <label>Less Scan <small style="color:#9ca3af;font-weight:400">(auto)</small></label>
+          <label>Less Scan <small class="label-note">(auto)</small></label>
           <div class="summary-value" id="s-less-scan">₹0.00</div>
         </div>
         <div class="summary-row summary-auto summary-highlight">
@@ -364,7 +370,7 @@
           <div class="summary-value" id="s-closing">₹0.00</div>
         </div>
         <div class="summary-row">
-          <label>Actual Closing <small style="color:#9ca3af;font-weight:400">(count till)</small></label>
+          <label>Actual Closing <small class="label-note">(count till)</small></label>
           <div class="summary-input-wrap">
             <span class="currency-prefix">₹</span>
             <input type="number" id="s-actual-closing" class="summary-input" placeholder="Count…" step="0.01" min="0">
@@ -372,7 +378,7 @@
         </div>
         <div class="summary-row summary-auto" id="variance-row" style="display:none">
           <label>Variance</label>
-          <div class="summary-value" id="s-variance">—</div>
+          <div class="summary-value" id="s-variance">…</div>
         </div>
         <div class="summary-row">
           <label>Notes</label>
@@ -385,30 +391,30 @@
     <!-- Section: Extra Cash Added -->
     <div class="section-card section-extras">
       <div class="section-header">
-        <span class="section-icon"><svg class="icon"><use href="#i-plus"/></svg></span>
+        <span class="section-icon"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg></span>
         <span class="section-title">Extra Cash Added to Till</span>
         <span class="section-total" id="extras-total">₹0</span>
       </div>
       <div id="extras-list"></div>
-      <button class="add-row-btn" id="btn-add-extra-row">+ Add Entry</button>
+      <button type="button" class="add-row-btn" id="btn-add-extra-row">+ Add Entry</button>
     </div>
 
     <!-- Section: Expenses -->
     <div class="section-card section-expenses">
       <div class="section-header">
-        <span class="section-icon"><svg class="icon"><use href="#i-receipt"/></svg></span>
+        <span class="section-icon"><svg class="icon" aria-hidden="true"><use href="#i-receipt"/></svg></span>
         <span class="section-title">Expenses</span>
         <span class="section-total" id="expenses-total">₹0</span>
       </div>
       <div id="expenses-list"></div>
-      <button class="add-row-btn" id="btn-add-expense">+ Add Expense</button>
+      <button type="button" class="add-row-btn" id="btn-add-expense">+ Add Expense</button>
     </div>
 
     <!-- Submit -->
     <div class="submit-section">
       <div class="submit-btn-row">
-        <button class="secondary-btn submit-draft-btn" id="btn-save-draft">Save Draft</button>
-        <button class="primary-btn submit-final-btn" id="btn-submit-final">Submit Final</button>
+        <button type="button" class="secondary-btn submit-draft-btn" id="btn-save-draft">Save Draft</button>
+        <button type="button" class="primary-btn submit-final-btn" id="btn-submit-final">Submit Final</button>
       </div>
       <p class="submit-note" id="submit-note">Save draft anytime · Submit Final requires till count</p>
     </div>
@@ -425,49 +431,50 @@
     <!-- ── Sidebar ── -->
     <aside class="admin-sidebar">
       <div class="sidebar-brand">
-        <img src="dskin-logo.png" alt="DSkin" class="sidebar-logo-img">
+        <img src="dskin-logo.png" alt="" class="sidebar-logo-img" width="3000" height="2121">
         <div>
           <div class="sidebar-brand-name">DSkin</div>
           <div class="sidebar-brand-sub">Admin</div>
         </div>
       </div>
 
-      <nav class="sidebar-nav">
-        <button class="sidebar-item active" data-tab="overview">
-          <span class="sidebar-icon"><svg class="icon"><use href="#i-overview"/></svg></span>
+      <nav class="sidebar-nav" aria-label="Admin">
+        <button type="button" class="sidebar-item active" data-tab="overview">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-overview"/></svg></span>
           <span class="sidebar-label">Overview</span>
         </button>
-        <button class="sidebar-item" data-tab="leads">
-          <span class="sidebar-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
+        <button type="button" class="sidebar-item" data-tab="leads">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-leads"/></svg></span>
           <span class="sidebar-label">Leads</span>
         </button>
-        <button class="sidebar-item" data-tab="reports">
-          <span class="sidebar-icon"><svg class="icon"><use href="#i-reports"/></svg></span>
+        <button type="button" class="sidebar-item" data-tab="reports">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-reports"/></svg></span>
           <span class="sidebar-label">Reports</span>
         </button>
-        <button class="sidebar-item" data-tab="notifications">
-          <span class="sidebar-icon"><svg class="icon"><use href="#i-bell"/></svg></span>
+        <button type="button" class="sidebar-item" data-tab="notifications">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg></span>
           <span class="sidebar-label">Notifications</span>
           <span class="sidebar-badge" id="sidebar-notif-badge" style="display:none">0</span>
         </button>
-        <button class="sidebar-item" data-tab="activity">
-          <span class="sidebar-icon"><svg class="icon"><use href="#i-pulse"/></svg></span>
+        <button type="button" class="sidebar-item" data-tab="activity">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-pulse"/></svg></span>
           <span class="sidebar-label">Activity</span>
           <span class="sidebar-badge" id="sidebar-activity-badge" style="display:none">0</span>
         </button>
-        <button class="sidebar-item" data-tab="review">
-          <span class="sidebar-icon"><svg class="icon"><use href="#i-chat"/></svg></span>
+        <button type="button" class="sidebar-item" data-tab="review">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg></span>
           <span class="sidebar-label">Bot review</span>
         </button>
-        <button class="sidebar-item" data-tab="settings">
-          <span class="sidebar-icon"><svg class="icon"><use href="#i-settings"/></svg></span>
+        <button type="button" class="sidebar-item" data-tab="settings">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></span>
           <span class="sidebar-label">Settings</span>
         </button>
       </nav>
 
       <div class="sidebar-footer">
-        <button class="sidebar-logout" id="btn-admin-panel-back">
-          <span>←</span> Exit Admin
+        <button type="button" class="sidebar-logout" id="btn-admin-panel-back">
+          <span class="sidebar-icon"><svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg></span>
+          Exit Admin
         </button>
       </div>
     </aside>
@@ -476,39 +483,42 @@
     <main class="admin-main">
 
       <!-- Instagram token ≤ 7 days left (review R8, showIgTokenBanner) -->
-      <div id="ig-token-banner" style="display:none;background:#e53935;color:#fff;font-size:13px;font-weight:600;padding:10px 18px;text-align:center"></div>
+      <div id="ig-token-banner" class="admin-banner" role="alert" style="display:none"></div>
 
       <!-- TAB: Overview -->
-      <div class="admin-tab active" id="admin-tab-overview">
-        <div class="admin-tab-header">Overview</div>
-
-        <!-- Branches -->
-        <div class="section-card">
-          <div class="section-header">
-            <span class="section-icon"><svg class="icon"><use href="#i-branches"/></svg></span>
-            <span class="section-title">Branches</span>
-            <button class="icon-text-btn" id="btn-add-branch-admin">+ Add</button>
-          </div>
-          <div id="admin-branches-list">
-            <div class="loading-wrap"><div class="spinner"></div></div>
-          </div>
+      <section class="admin-tab active" id="admin-tab-overview" aria-labelledby="h-overview">
+        <div class="tab-head">
+          <h1 class="admin-tab-header" id="h-overview">Overview</h1>
         </div>
 
-        <!-- KPI filter bar (cashup sales) -->
-        <div class="section-card" data-area="performance">
-          <div class="section-header">
-            <span class="section-icon"><svg class="icon"><use href="#i-reports"/></svg></span>
-            <span class="section-title">Performance</span>
+        <!-- Branches -->
+        <section class="panel" aria-labelledby="h-branches">
+          <div class="panel-head">
+            <h2 class="panel-title" id="h-branches">Branches</h2>
+            <button type="button" class="secondary-btn" id="btn-add-branch-admin"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add</button>
+          </div>
+          <div id="admin-branches-list">
+            <div class="skel-stack panel-body" aria-hidden="true">
+              <div class="skel skel-line"></div>
+              <div class="skel skel-line"></div>
+              <div class="skel skel-line"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Performance (cashup sales) -->
+        <section class="panel" data-area="performance" aria-labelledby="h-performance">
+          <div class="panel-head">
+            <h2 class="panel-title" id="h-performance">Performance</h2>
           </div>
 
-          <!-- Filters row -->
           <div class="ov-filters-row">
             <div class="ov-filter-group">
-              <label class="ov-filter-label">Branch</label>
+              <span class="ov-filter-label" id="lbl-ov-branch">Branch</span>
               <div class="ov-multiselect" id="ov-branch-multiselect">
-                <button type="button" class="ov-multiselect-trigger" id="ov-branch-trigger">
+                <button type="button" class="ov-multiselect-trigger" id="ov-branch-trigger" aria-labelledby="lbl-ov-branch ov-branch-label">
                   <span id="ov-branch-label">All Branches</span>
-                  <svg width="12" height="8" viewBox="0 0 12 8" fill="none"><path d="M1 1l5 5 5-5" stroke="#9ca3af" stroke-width="1.5" stroke-linecap="round"/></svg>
+                  <svg class="icon" aria-hidden="true"><use href="#i-caret-down"/></svg>
                 </button>
                 <div class="ov-multiselect-dropdown" id="ov-branch-dropdown" style="display:none">
                   <label class="ov-ms-option ov-ms-all">
@@ -520,7 +530,7 @@
               </div>
             </div>
             <div class="ov-filter-group">
-              <label class="ov-filter-label">Period</label>
+              <label class="ov-filter-label" for="ov-period-select">Period</label>
               <select id="ov-period-select" class="ov-select">
                 <option value="week" selected>This Week</option>
                 <option value="month">This Month</option>
@@ -530,35 +540,29 @@
               </select>
             </div>
           </div>
-          <div id="ov-custom-range" style="display:none;padding:4px 18px 8px">
-            <div class="reports-date-row">
-              <div class="reports-date-field">
-                <label>From</label>
-                <input type="date" id="ov-date-from" class="text-input" style="margin:0">
-              </div>
-              <div class="reports-date-field">
-                <label>To</label>
-                <input type="date" id="ov-date-to" class="text-input" style="margin:0">
-              </div>
+          <div id="ov-custom-range" style="display:none">
+            <div class="date-pair">
+              <label class="field"><span>From</span><input type="date" id="ov-date-from" class="text-input"></label>
+              <label class="field"><span>To</span><input type="date" id="ov-date-to" class="text-input"></label>
             </div>
           </div>
-          <div class="reports-range-display" id="ov-range-display" style="padding:0 18px 4px"></div>
+          <div class="reports-range-display" id="ov-range-display"></div>
 
-          <!-- KPI cards -->
           <div class="admin-kpi-grid" id="admin-kpi-grid">
             <div class="skel-card"></div>
             <div class="skel-card"></div>
             <div class="skel-card"></div>
             <div class="skel-card"></div>
           </div>
-        </div>
-      </div>
+        </section>
+      </section>
 
       <!-- TAB: Leads -->
-      <div class="admin-tab" id="admin-tab-leads">
-        <div class="admin-tab-header">Leads</div>
+      <section class="admin-tab" id="admin-tab-leads" aria-labelledby="h-leads">
+        <div class="tab-head">
+          <h1 class="admin-tab-header" id="h-leads">Leads</h1>
+        </div>
 
-        <!-- KPI strip -->
         <div class="leads-kpi-grid" id="leads-kpi-grid">
           <div class="skel-card"></div>
           <div class="skel-card"></div>
@@ -566,26 +570,22 @@
           <div class="skel-card"></div>
         </div>
 
-        <!-- Pipeline -->
-        <div class="section-card">
-          <div class="section-header">
-            <span class="section-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
-            <span class="section-title">All Leads</span>
-            <span class="section-count" id="leads-admin-count"></span>
+        <section class="panel" aria-labelledby="h-all-leads">
+          <div class="panel-head">
+            <h2 class="panel-title" id="h-all-leads">All Leads <span class="section-count" id="leads-admin-count"></span></h2>
           </div>
 
-          <!-- Filters -->
           <div class="ov-filters-row leads-filters-row">
             <div class="ov-filter-group">
-              <label class="ov-filter-label">Branch</label>
+              <label class="ov-filter-label" for="leads-filter-branch">Branch</label>
               <select id="leads-filter-branch" class="text-input"><option value="">All branches</option></select>
             </div>
             <div class="ov-filter-group">
-              <label class="ov-filter-label">Source</label>
+              <label class="ov-filter-label" for="leads-filter-source">Source</label>
               <select id="leads-filter-source" class="text-input"><option value="">All sources</option></select>
             </div>
             <div class="ov-filter-group">
-              <label class="ov-filter-label">Status</label>
+              <label class="ov-filter-label" for="leads-filter-status">Status</label>
               <select id="leads-filter-status" class="text-input">
                 <option value="">All statuses</option>
                 <option value="new">New</option>
@@ -595,304 +595,321 @@
               </select>
             </div>
             <div class="ov-filter-group leads-search-group">
-              <label class="ov-filter-label">Search</label>
+              <label class="ov-filter-label" for="leads-filter-search">Search</label>
               <input type="text" id="leads-filter-search" class="text-input" placeholder="Name…">
             </div>
           </div>
 
           <div class="leads-table-wrap">
             <div id="leads-admin-table">
-              <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
+              <div class="loading-wrap"><div class="spinner"></div></div>
             </div>
           </div>
-        </div>
-      </div>
+        </section>
+      </section>
 
       <!-- TAB: Reports -->
-      <div class="admin-tab" id="admin-tab-reports">
-        <div class="admin-tab-header">Reports</div>
+      <section class="admin-tab" id="admin-tab-reports" aria-labelledby="h-reports">
+        <div class="tab-head">
+          <h1 class="admin-tab-header" id="h-reports">Reports</h1>
+        </div>
 
-        <div class="section-card">
-          <div class="section-header">
-            <span class="section-icon"><svg class="icon"><use href="#i-calendar"/></svg></span>
-            <span class="section-title">Date Range</span>
+        <section class="panel" aria-labelledby="h-date-range">
+          <div class="panel-head">
+            <h2 class="panel-title" id="h-date-range">Date Range</h2>
           </div>
           <div class="reports-presets">
-            <button class="report-preset-btn active" data-preset="today">Today</button>
-            <button class="report-preset-btn" data-preset="week">This Week</button>
-            <button class="report-preset-btn" data-preset="month">This Month</button>
-            <button class="report-preset-btn" data-preset="lastmonth">Last Month</button>
-            <button class="report-preset-btn" data-preset="custom">Custom</button>
+            <button type="button" class="report-preset-btn active" data-preset="today">Today</button>
+            <button type="button" class="report-preset-btn" data-preset="week">This Week</button>
+            <button type="button" class="report-preset-btn" data-preset="month">This Month</button>
+            <button type="button" class="report-preset-btn" data-preset="lastmonth">Last Month</button>
+            <button type="button" class="report-preset-btn" data-preset="custom">Custom</button>
           </div>
           <div class="reports-date-inputs" id="reports-custom-range" style="display:none">
-            <div class="reports-date-row">
-              <div class="reports-date-field">
-                <label>From</label>
-                <input type="date" id="report-date-from" class="text-input" style="margin:0">
-              </div>
-              <div class="reports-date-field">
-                <label>To</label>
-                <input type="date" id="report-date-to" class="text-input" style="margin:0">
-              </div>
+            <div class="date-pair">
+              <label class="field"><span>From</span><input type="date" id="report-date-from" class="text-input"></label>
+              <label class="field"><span>To</span><input type="date" id="report-date-to" class="text-input"></label>
             </div>
           </div>
           <div class="reports-range-display" id="reports-range-display"></div>
-        </div>
+        </section>
 
-        <div class="section-card">
-          <div class="section-header">
-            <span class="section-icon"><svg class="icon"><use href="#i-branches"/></svg></span>
-            <span class="section-title">Branch</span>
+        <section class="panel" aria-labelledby="h-report-branch">
+          <div class="panel-head">
+            <h2 class="panel-title" id="h-report-branch">Branch</h2>
           </div>
           <div class="reports-presets" id="reports-branch-filter">
-            <button class="report-preset-btn active" data-branch="all">All Branches</button>
+            <button type="button" class="report-preset-btn active" data-branch="all">All Branches</button>
           </div>
+        </section>
+
+        <div>
+          <button type="button" class="primary-btn" id="btn-run-report">Run Report</button>
         </div>
-
-
-        <button class="primary-btn" id="btn-run-report" style="width:100%;padding:14px;font-size:15px">
-          Run Report
-        </button>
 
         <div id="reports-output">
           <div class="reports-empty-state">
-            <div class="reports-empty-icon" style="margin-bottom:12px;color:var(--primary)"><svg class="icon"><use href="#i-reports"/></svg></div>
-            <div style="font-weight:600;color:#374151;margin-bottom:6px">Select a report type</div>
-            <div style="font-size:13px;color:#9ca3af">Choose your date range and run a report</div>
+            <div class="reports-empty-icon"><svg class="icon" aria-hidden="true"><use href="#i-reports"/></svg></div>
+            <strong>Select a report type</strong>
+            <span>Choose your date range and run a report</span>
           </div>
         </div>
-      </div>
+      </section>
 
       <!-- TAB: Notifications -->
-      <div class="admin-tab" id="admin-tab-notifications">
-        <div class="admin-tab-header">
-          Notifications
-          <span class="alert-badge" id="admin-alert-badge" style="display:none;margin-left:8px">0</span>
-        </div>
-        <div class="section-card" style="padding:0">
-          <div id="admin-alerts-list">
-            <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
+      <section class="admin-tab" id="admin-tab-notifications" aria-labelledby="h-notifications">
+        <div class="tab-head">
+          <div class="tab-title-row">
+            <h1 class="admin-tab-header" id="h-notifications">Notifications</h1>
+            <span class="alert-badge" id="admin-alert-badge" style="display:none">0</span>
           </div>
         </div>
-      </div>
+        <div id="admin-alerts-list" class="item-list">
+          <div class="loading-wrap"><div class="spinner"></div></div>
+        </div>
+      </section>
 
-      <!-- TAB: Activity (bot_events — review R8) -->
-      <div class="admin-tab" id="admin-tab-activity">
-        <div class="admin-tab-header">Activity</div>
-        <div class="section-card" style="padding:0">
-          <div class="section-header">
-            <span class="section-icon"><svg class="icon"><use href="#i-pulse"/></svg></span>
-            <span class="section-title">Bot events · last 90 days</span>
-            <select id="activity-filter" class="ov-select" style="width:auto" onchange="loadActivity()">
-              <option value="all">All</option>
-              <option value="problems">Errors and warnings</option>
-            </select>
+      <!-- TAB: Activity (bot_events, review R8) -->
+      <section class="admin-tab" id="admin-tab-activity" aria-labelledby="h-activity">
+        <div class="tab-head">
+          <div>
+            <h1 class="admin-tab-header" id="h-activity">Activity</h1>
+            <p class="tab-sub">Bot events, last 90 days</p>
           </div>
-          <div id="activity-list">
-            <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- TAB: Bot review (shadow drafts + live bot replies — review R9) -->
-      <div class="admin-tab" id="admin-tab-review">
-        <div class="admin-tab-header">Bot review</div>
-        <div class="section-card" style="padding:0">
-          <div class="section-header">
-            <span class="section-icon"><svg class="icon"><use href="#i-chat"/></svg></span>
-            <span class="section-title" id="review-counter"></span>
-            <select id="review-days" class="ov-select" style="width:auto" onchange="loadReview()">
-              <option value="7">Last 7 days</option>
-              <option value="30">Last 30 days</option>
-              <option value="0">All</option>
-            </select>
-          </div>
-          <div class="review-layout">
-            <div id="review-list">
-              <div class="loading-wrap" style="padding:24px"><div class="spinner"></div></div>
-            </div>
-            <div class="leads-convo-log" id="review-thread">
-              <div class="leads-convo-empty">Pick a conversation</div>
+          <div class="tab-tools">
+            <div class="ov-filter-group">
+              <label class="ov-filter-label" for="activity-filter">Show</label>
+              <select id="activity-filter" class="ov-select" onchange="loadActivity()">
+                <option value="all">All</option>
+                <option value="problems">Errors and warnings</option>
+              </select>
             </div>
           </div>
         </div>
-      </div>
+        <div id="activity-list">
+          <div class="skel-stack" aria-hidden="true">
+            <div class="skel skel-line"></div>
+            <div class="skel skel-line"></div>
+            <div class="skel skel-line"></div>
+            <div class="skel skel-line"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Bot review (shadow drafts + live bot replies, review R9) -->
+      <section class="admin-tab" id="admin-tab-review" aria-labelledby="h-review">
+        <div class="tab-head">
+          <h1 class="admin-tab-header" id="h-review">Bot review</h1>
+          <div class="tab-tools">
+            <div class="ov-filter-group">
+              <label class="ov-filter-label" for="review-days">Period</label>
+              <select id="review-days" class="ov-select" onchange="loadReview()">
+                <option value="7">Last 7 days</option>
+                <option value="30">Last 30 days</option>
+                <option value="0">All</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="figures review-counter" id="review-counter" aria-live="polite"></div>
+        <div class="review-layout">
+          <div id="review-list" role="region" aria-label="Conversations">
+            <div class="loading-wrap"><div class="spinner"></div></div>
+          </div>
+          <div class="leads-convo-log" id="review-thread" role="region" aria-label="Conversation">
+            <div class="leads-convo-empty">Pick a conversation</div>
+          </div>
+        </div>
+      </section>
 
       <!-- TAB: Settings -->
-      <div class="admin-tab" id="admin-tab-settings">
-        <div class="admin-tab-header">Settings</div>
-
-        <!-- Connected Accounts -->
-        <div class="section-card settings-card collapsed">
-          <div class="section-header settings-head">
-            <span class="section-icon"><svg class="icon"><use href="#i-leads"/></svg></span>
-            <span class="section-title">Connected Accounts</span>
-            <span class="settings-chevron">▾</span>
-          </div>
-          <div class="settings-body" style="padding:8px 18px 18px">
-            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">Instagram, Facebook and WhatsApp accounts feeding the Leads inbox. Turn one off to pause ingesting new messages from that platform — existing leads and history stay untouched.</p>
-            <div id="integrations-list">
-              <div class="loading-wrap" style="padding:16px"><div class="spinner"></div></div>
-            </div>
-          </div>
+      <section class="admin-tab" id="admin-tab-settings" aria-labelledby="h-settings">
+        <div class="tab-head">
+          <h1 class="admin-tab-header" id="h-settings">Settings</h1>
         </div>
 
-        <!-- Automations -->
-        <div class="section-card settings-card collapsed">
-          <div class="section-header settings-head" style="justify-content:space-between">
-            <div style="display:flex;align-items:center;gap:8px">
-              <span class="section-icon"><svg class="icon"><use href="#i-bolt"/></svg></span>
-              <span class="section-title">Automations</span>
-            </div>
-            <div style="display:flex;align-items:center;gap:10px">
-              <button class="primary-btn" id="btn-add-automation" style="padding:6px 14px;font-size:13px">+ Add</button>
-              <span class="settings-chevron">▾</span>
-            </div>
-          </div>
-          <div class="settings-body">
-            <div id="automations-list" style="padding:0 0 4px">
-              <div class="loading-wrap" style="padding:20px"><div class="spinner"></div></div>
-            </div>
-          </div>
-        </div>
+        <div class="settings-list">
 
-        <!-- Comment Automation (Instagram + Facebook) -->
-        <div class="section-card settings-card collapsed">
-          <div class="section-header settings-head">
-            <span class="section-icon"><svg class="icon"><use href="#i-chat"/></svg></span>
-            <span class="section-title">Comment Automation</span>
-            <span class="settings-chevron">▾</span>
-          </div>
-          <div class="settings-body" style="padding:8px 18px 18px">
-            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">When someone comments on an Instagram post or a Facebook Page post, reply publicly under their comment and send them one DM. <b>End the DM with the branch question</b> — a tappable button per branch is added automatically, and their answer routes the lead and lifts the platform's send limit so staff can reply freely. <b>The same rules apply to both platforms.</b> Name the branches in the text too: buttons don't show on desktop. First matching keyword wins; use <b>*</b> to catch every comment.</p>
-            <div id="comment-rules-list"></div>
-            <div style="display:grid;gap:8px;margin-top:12px">
-              <input type="text" id="new-rule-keyword" class="text-input" placeholder="Keywords in the comment, comma-separated (e.g. price, cost, kitna) — or * for any" style="margin:0">
-              <input type="text" id="new-rule-public" class="text-input" placeholder="Public reply under the comment (e.g. Check your DM)" style="margin:0">
-              <textarea id="new-rule-dm" class="text-input" rows="3" placeholder="DM to send — answer briefly, then ask: which branch — Janakpuri, Kirti Nagar or Dwarka?" style="margin:0;resize:vertical"></textarea>
-              <button class="primary-btn" id="btn-add-comment-rule" style="justify-self:start">+ Add rule</button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Chatbot (Instagram DM assistant) -->
-        <div class="section-card settings-card collapsed">
-          <div class="section-header settings-head">
-            <span class="section-icon"><svg class="icon"><use href="#i-bolt"/></svg></span>
-            <span class="section-title">Chatbot (Instagram DMs)</span>
-            <span class="settings-chevron">▾</span>
-          </div>
-          <div class="settings-body" style="padding:8px 18px 18px">
-            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">The Instagram DM assistant answers price and FAQ questions, qualifies leads and hands the conversation to staff. <b>Mode is the master switch</b> — Off does nothing, Shadow drafts replies but sends nothing (logged for review), Live replies to customers. Saved replies below are what the bot actually says.</p>
-            <div style="margin-bottom:12px">
-              <div style="font-weight:600;font-size:13px;margin-bottom:6px">Mode</div>
-              <div id="chatbot-mode-btns" style="display:flex;gap:8px;flex-wrap:wrap"></div>
-            </div>
-            <div style="display:grid;gap:8px">
-              <div style="font-weight:600;font-size:13px">Model</div>
-              <input type="text" id="chatbot-model" class="text-input" placeholder="gemini-3.5-flash-lite" style="margin:0">
-              <div style="font-weight:600;font-size:13px;margin-top:6px">Canned replies</div>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Collaboration enquiries<textarea id="chatbot-canned-collaboration" class="text-input" rows="2" placeholder="Reply to collaboration enquiries" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Sales pitches<textarea id="chatbot-canned-sales_pitch" class="text-input" rows="2" placeholder="Reply to sales pitches" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Other non-lead messages<textarea id="chatbot-canned-misc" class="text-input" rows="2" placeholder="Reply to other non-lead messages" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Price check / held reply (team gets back)<textarea id="chatbot-canned-kb_miss" class="text-input" rows="2" placeholder="Sent while the team checks a price the bot doesn't have, or when a reply is held back" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Bot doesn't know (not a price)<textarea id="chatbot-canned-kb_miss_other" class="text-input" rows="2" placeholder="Sent when the bot can't answer a non-price question; the bot carries on" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Bot error (sent once per chat, bot stays on)<textarea id="chatbot-canned-llm_error" class="text-input" rows="2" placeholder="Sent when the bot errors out; the customer's next message tries again" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">First-message disclosure (added before the bot's first reply)<textarea id="chatbot-canned-disclosure" class="text-input" rows="2" placeholder="Prepended to the bot's first message — discloses it's an assistant" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Customer won't share a number<textarea id="chatbot-canned-refusal_ok" class="text-input" rows="2" placeholder="Reply when the customer declines to share their WhatsApp number" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Owner didn't answer in time<textarea id="chatbot-canned-owner_no_reply" class="text-input" rows="2" placeholder="Sent when the owner hasn't answered a price question by the fallback time" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Customer shared their number (closing message)<textarea id="chatbot-canned-qualified" class="text-input" rows="2" placeholder="Sent right away when the customer shares their WhatsApp number" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Off-topic or trick message (bot stays on)<textarea id="chatbot-canned-redirect" class="text-input" rows="2" placeholder="Sent when someone tries to change the bot's instructions, or sends a very long message" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Abusive message (bot turns off, filed under Misc)<textarea id="chatbot-canned-abuse" class="text-input" rows="2" placeholder="Sent once to an abusive message, then the bot stops" style="margin:0;resize:vertical"></textarea></label>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Distress message (bot turns off)<textarea id="chatbot-canned-crisis" class="text-input" rows="2" placeholder="The one line sent to a distress or self-harm message" style="margin:0;resize:vertical"></textarea></label>
-              <div style="font-weight:600;font-size:13px;margin-top:6px">Limits</div>
-              <div style="display:flex;gap:8px;flex-wrap:wrap">
-                <input type="number" id="chatbot-offer-stale-days" class="text-input" placeholder="30" min="0" style="margin:0;width:130px" title="Days a shared-post offer price stays quotable before falling back to the KB range">
-                <input type="number" id="chatbot-daily-reply-cap" class="text-input" placeholder="30" min="1" style="margin:0;width:130px" title="Max bot replies per chat per day (IST). Reaching it: hold line, owner alerted, bot pauses">
-                <input type="number" id="chatbot-age-cap-days" class="text-input" placeholder="7" min="1" style="margin:0;width:130px" title="Days of silence after which a returning customer starts a new conversation (fresh details, new lead)">
-                <input type="number" id="chatbot-resume-after-hours" class="text-input" placeholder="48" min="0" step="any" style="margin:0;width:130px" title="Hours with no message in a chat staff took over before the bot answers it again (0 = never)">
-                <input type="number" id="chatbot-lead-quiet-hours" class="text-input" placeholder="2" min="0.05" step="any" style="margin:0;width:130px" title="Hours without a new message before the chat is sent to the lead webhook">
-                <input type="number" id="chatbot-owner-remind-hours" class="text-input" placeholder="2" min="0.01" step="any" style="margin:0;width:130px" title="Hours without an owner answer to a price question before one Telegram reminder">
-                <input type="number" id="chatbot-owner-fallback-hours" class="text-input" placeholder="20" min="0.01" max="23" step="any" style="margin:0;width:130px" title="Hours without an owner answer before the customer is told the team will get in touch (max 23: Instagram's 24 h window)">              </div>
-              <div style="font-size:11px;color:#9ca3af">Offer stale days · daily reply limit · new conversation after (days) · bot back after quiet (hours) · lead push after quiet (hours) · owner reminder (hours) · owner fallback (hours)</div>
-              <label style="display:grid;gap:4px;font-size:12px;color:#6b7280">Staff sign-off (the bot takes the chat back at once)<input type="text" id="chatbot-handback-phrase" class="text-input" placeholder="e.g. Thanks for chatting with DSkin" style="margin:0" title="Staff end a chat with a message containing this (keep it as an Instagram Saved reply). The bot takes the chat back at once. Empty = off"></label>
-              <div style="font-weight:600;font-size:13px;margin-top:6px">Alerts &amp; report</div>
-              <div style="display:flex;gap:8px;flex-wrap:wrap">
-                <input type="email" id="chatbot-alert-email" class="text-input" placeholder="hospitalitybee@gmail.com" style="margin:0;flex:1;min-width:200px" title="Gets the owner alerts by email when Telegram fails">
-                <select id="chatbot-report-frequency" class="text-input" style="margin:0;width:150px" title="Bot metrics report to the owner's Telegram (sent 9 am IST; weekly = Mondays)">
-                  <option value="off">Report: off</option>
-                  <option value="daily">Report: daily</option>
-                  <option value="weekly">Report: weekly</option>
-                </select>
-              </div>
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-                <span id="chatbot-kb-status" style="font-size:12px;color:#9ca3af"></span>
-                <button class="primary-btn" id="btn-save-chatbot-config">Save</button>
+          <!-- Connected Accounts -->
+          <details class="settings-card">
+            <summary class="settings-head">
+              <h2 class="settings-title">Connected Accounts</h2>
+              <span class="settings-chevron"><svg class="icon" aria-hidden="true"><use href="#i-caret-down"/></svg></span>
+            </summary>
+            <div class="settings-body">
+              <p class="settings-intro">Instagram, Facebook and WhatsApp accounts feeding the Leads inbox. Turn one off to pause ingesting new messages from that platform. Existing leads and history stay untouched.</p>
+              <div id="integrations-list" class="item-list">
+                <div class="loading-wrap"><div class="spinner"></div></div>
               </div>
             </div>
-          </div>
-        </div>
+          </details>
 
-        <!-- Unanswered questions (kb_candidates — review R6) -->
-        <div class="section-card settings-card collapsed">
-          <div class="section-header settings-head">
-            <span class="section-icon"><svg class="icon"><use href="#i-bolt"/></svg></span>
-            <span class="section-title">Unanswered questions<span id="kb-candidates-count"></span></span>
-            <span class="settings-chevron">▾</span>
-          </div>
-          <div class="settings-body" style="padding:8px 18px 18px">
-            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">Questions the bot couldn't answer (not prices). Write the answer and approve: it joins the knowledge base as an FAQ.</p>
-            <div id="kb-candidates-list" style="display:grid;gap:10px"></div>
-          </div>
-        </div>
-
-        <!-- Payment Modes -->
-        <div class="section-card settings-card collapsed">
-          <div class="section-header settings-head">
-            <span class="section-icon"><svg class="icon"><use href="#i-card"/></svg></span>
-            <span class="section-title">Payment Modes</span>
-            <span class="settings-chevron">▾</span>
-          </div>
-          <div class="settings-body" style="padding:8px 18px 18px">
-            <p style="font-size:13px;color:#6b7280;margin:0 0 12px">Payment modes staff can choose for each sales entry. Add or remove modes — changes apply to all future entries across every branch.</p>
-            <div id="payment-modes-list"></div>
-            <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
-              <input type="text" id="new-payment-mode-input" class="text-input" placeholder="New mode (e.g. Razorpay)" style="margin:0;flex:1">
-              <button class="primary-btn" id="btn-add-payment-mode" style="white-space:nowrap">+ Add</button>
+          <!-- Automations -->
+          <details class="settings-card">
+            <summary class="settings-head">
+              <h2 class="settings-title">Automations</h2>
+              <span class="settings-chevron"><svg class="icon" aria-hidden="true"><use href="#i-caret-down"/></svg></span>
+            </summary>
+            <div class="settings-body">
+              <div class="settings-actions">
+                <button type="button" class="secondary-btn" id="btn-add-automation"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add</button>
+              </div>
+              <div id="automations-list" class="item-list">
+                <div class="loading-wrap"><div class="spinner"></div></div>
+              </div>
             </div>
-          </div>
+          </details>
+
+          <!-- Comment Automation (Instagram + Facebook) -->
+          <details class="settings-card">
+            <summary class="settings-head">
+              <h2 class="settings-title">Comment Automation</h2>
+              <span class="settings-chevron"><svg class="icon" aria-hidden="true"><use href="#i-caret-down"/></svg></span>
+            </summary>
+            <div class="settings-body">
+              <p class="settings-intro">When someone comments on an Instagram post or a Facebook Page post, reply publicly under their comment and send them one DM. <b>End the DM with the branch question</b>: a tappable button per branch is added automatically, and their answer routes the lead and lifts the platform’s send limit so staff can reply freely. <b>The same rules apply to both platforms.</b> Name the branches in the text too: buttons don’t show on desktop. First matching keyword wins; use <b>*</b> to catch every comment.</p>
+              <div id="comment-rules-list" class="item-list"></div>
+              <div class="form-block">
+                <label class="field"><span>Keywords in the comment</span><input type="text" id="new-rule-keyword" class="text-input" placeholder="price, cost, kitna (comma-separated), or * for any"></label>
+                <label class="field"><span>Public reply under the comment</span><input type="text" id="new-rule-public" class="text-input" placeholder="Check your DM"></label>
+                <label class="field"><span>DM to send</span><textarea id="new-rule-dm" class="text-input" rows="3" placeholder="Answer briefly, then ask which branch: Janakpuri, Kirti Nagar or Dwarka?"></textarea></label>
+                <div><button type="button" class="secondary-btn" id="btn-add-comment-rule"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add rule</button></div>
+              </div>
+            </div>
+          </details>
+
+          <!-- Chatbot (Instagram DM assistant) -->
+          <details class="settings-card">
+            <summary class="settings-head">
+              <h2 class="settings-title">Chatbot (Instagram DMs)</h2>
+              <span class="settings-chevron"><svg class="icon" aria-hidden="true"><use href="#i-caret-down"/></svg></span>
+            </summary>
+            <div class="settings-body">
+              <p class="settings-intro">The Instagram DM assistant answers price and FAQ questions, qualifies leads and hands the conversation to staff. <b>Mode is the master switch</b>: Off does nothing, Shadow drafts replies but sends nothing (logged for review), Live replies to customers. Saved replies below are what the bot actually says.</p>
+
+              <div class="form-block" role="group" aria-labelledby="lbl-chatbot-mode">
+                <span class="form-block-title" id="lbl-chatbot-mode">Mode</span>
+                <div><div id="chatbot-mode-btns" class="seg"></div></div>
+              </div>
+
+              <div class="form-block">
+                <label class="field is-narrow"><span>Model</span><input type="text" id="chatbot-model" class="text-input" placeholder="gemini-3.5-flash-lite"></label>
+              </div>
+
+              <div class="form-block" role="group" aria-labelledby="lbl-canned">
+                <span class="form-block-title" id="lbl-canned">Canned replies</span>
+                <div class="field-grid">
+                  <label class="field"><span>Collaboration enquiries</span><textarea id="chatbot-canned-collaboration" class="text-input" rows="2" placeholder="Reply to collaboration enquiries"></textarea></label>
+                  <label class="field"><span>Sales pitches</span><textarea id="chatbot-canned-sales_pitch" class="text-input" rows="2" placeholder="Reply to sales pitches"></textarea></label>
+                  <label class="field"><span>Other non-lead messages</span><textarea id="chatbot-canned-misc" class="text-input" rows="2" placeholder="Reply to other non-lead messages"></textarea></label>
+                  <label class="field"><span>Price check / held reply (team gets back)</span><textarea id="chatbot-canned-kb_miss" class="text-input" rows="2" placeholder="Sent while the team checks a price the bot doesn’t have, or when a reply is held back"></textarea></label>
+                  <label class="field"><span>Bot doesn’t know (not a price)</span><textarea id="chatbot-canned-kb_miss_other" class="text-input" rows="2" placeholder="Sent when the bot can’t answer a non-price question; the bot carries on"></textarea></label>
+                  <label class="field"><span>Bot error (sent once per chat, bot stays on)</span><textarea id="chatbot-canned-llm_error" class="text-input" rows="2" placeholder="Sent when the bot errors out; the customer’s next message tries again"></textarea></label>
+                  <label class="field"><span>First-message disclosure (added before the bot’s first reply)</span><textarea id="chatbot-canned-disclosure" class="text-input" rows="2" placeholder="Prepended to the bot’s first message, disclosing it’s an assistant"></textarea></label>
+                  <label class="field"><span>Customer won’t share a number</span><textarea id="chatbot-canned-refusal_ok" class="text-input" rows="2" placeholder="Reply when the customer declines to share their WhatsApp number"></textarea></label>
+                  <label class="field"><span>Owner didn’t answer in time</span><textarea id="chatbot-canned-owner_no_reply" class="text-input" rows="2" placeholder="Sent when the owner hasn’t answered a price question by the fallback time"></textarea></label>
+                  <label class="field"><span>Customer shared their number (closing message)</span><textarea id="chatbot-canned-qualified" class="text-input" rows="2" placeholder="Sent right away when the customer shares their WhatsApp number"></textarea></label>
+                  <label class="field"><span>Off-topic or trick message (bot stays on)</span><textarea id="chatbot-canned-redirect" class="text-input" rows="2" placeholder="Sent when someone tries to change the bot’s instructions, or sends a very long message"></textarea></label>
+                  <label class="field"><span>Abusive message (bot turns off, filed under Misc)</span><textarea id="chatbot-canned-abuse" class="text-input" rows="2" placeholder="Sent once to an abusive message, then the bot stops"></textarea></label>
+                  <label class="field"><span>Distress message (bot turns off)</span><textarea id="chatbot-canned-crisis" class="text-input" rows="2" placeholder="The one line sent to a distress or self-harm message"></textarea></label>
+                </div>
+              </div>
+
+              <div class="form-block" role="group" aria-labelledby="lbl-limits">
+                <span class="form-block-title" id="lbl-limits">Limits</span>
+                <div class="field-grid is-limits">
+                  <label class="field"><span>Offer stale days</span><input type="number" id="chatbot-offer-stale-days" class="text-input" placeholder="30" min="0" title="Days a shared-post offer price stays quotable before falling back to the KB range"></label>
+                  <label class="field"><span>Daily reply limit</span><input type="number" id="chatbot-daily-reply-cap" class="text-input" placeholder="30" min="1" title="Max bot replies per chat per day (IST). Reaching it: hold line, owner alerted, bot pauses"></label>
+                  <label class="field"><span>New conversation after (days)</span><input type="number" id="chatbot-age-cap-days" class="text-input" placeholder="7" min="1" title="Days of silence after which a returning customer starts a new conversation (fresh details, new lead)"></label>
+                  <label class="field"><span>Bot back after quiet (hours)</span><input type="number" id="chatbot-resume-after-hours" class="text-input" placeholder="48" min="0" step="any" title="Hours with no message in a chat staff took over before the bot answers it again (0 = never)"></label>
+                  <label class="field"><span>Lead push after quiet (hours)</span><input type="number" id="chatbot-lead-quiet-hours" class="text-input" placeholder="2" min="0.05" step="any" title="Hours without a new message before the chat is sent to the lead webhook"></label>
+                  <label class="field"><span>Owner reminder (hours)</span><input type="number" id="chatbot-owner-remind-hours" class="text-input" placeholder="2" min="0.01" step="any" title="Hours without an owner answer to a price question before one Telegram reminder"></label>
+                  <label class="field"><span>Owner fallback (hours)</span><input type="number" id="chatbot-owner-fallback-hours" class="text-input" placeholder="20" min="0.01" max="23" step="any" title="Hours without an owner answer before the customer is told the team will get in touch (max 23: Instagram's 24 h window)"></label>
+                </div>
+                <label class="field"><span>Staff sign-off (the bot takes the chat back at once)</span><input type="text" id="chatbot-handback-phrase" class="text-input" placeholder="Thanks for chatting with DSkin" title="Staff end a chat with a message containing this (keep it as an Instagram Saved reply). The bot takes the chat back at once. Empty = off"></label>
+              </div>
+
+              <div class="form-block" role="group" aria-labelledby="lbl-alerts">
+                <span class="form-block-title" id="lbl-alerts">Alerts &amp; report</span>
+                <div class="field-row">
+                  <label class="field"><span>Alert email</span><input type="email" id="chatbot-alert-email" class="text-input" placeholder="hospitalitybee@gmail.com" title="Gets the owner alerts by email when Telegram fails"></label>
+                  <label class="field is-narrow"><span>Report</span>
+                    <select id="chatbot-report-frequency" class="text-input" title="Bot metrics report to the owner's Telegram (sent 9 am IST; weekly = Mondays)">
+                      <option value="off">Report: off</option>
+                      <option value="daily">Report: daily</option>
+                      <option value="weekly">Report: weekly</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              <div class="form-foot">
+                <span id="chatbot-kb-status" class="kb-status"></span>
+                <button type="button" class="primary-btn" id="btn-save-chatbot-config">Save</button>
+              </div>
+            </div>
+          </details>
+
+          <!-- Unanswered questions (kb_candidates, review R6) -->
+          <details class="settings-card">
+            <summary class="settings-head">
+              <h2 class="settings-title">Unanswered questions<span id="kb-candidates-count" class="settings-count"></span></h2>
+              <span class="settings-chevron"><svg class="icon" aria-hidden="true"><use href="#i-caret-down"/></svg></span>
+            </summary>
+            <div class="settings-body">
+              <p class="settings-intro">Questions the bot couldn’t answer (not prices). Write the answer and approve: it joins the knowledge base as an FAQ.</p>
+              <div id="kb-candidates-list"></div>
+            </div>
+          </details>
+
+          <!-- Payment Modes -->
+          <details class="settings-card">
+            <summary class="settings-head">
+              <h2 class="settings-title">Payment Modes</h2>
+              <span class="settings-chevron"><svg class="icon" aria-hidden="true"><use href="#i-caret-down"/></svg></span>
+            </summary>
+            <div class="settings-body">
+              <p class="settings-intro">Payment modes staff can choose for each sales entry. Add or remove modes: changes apply to all future entries across every branch.</p>
+              <div id="payment-modes-list" class="item-list"></div>
+              <div class="field-row">
+                <label class="field"><span>New mode</span><input type="text" id="new-payment-mode-input" class="text-input" placeholder="Razorpay"></label>
+                <button type="button" class="secondary-btn" id="btn-add-payment-mode"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>Add</button>
+              </div>
+            </div>
+          </details>
+
         </div>
-      </div>
+      </section>
 
     </main>
 
     <!-- ── Mobile bottom nav ── -->
-    <nav class="admin-bottom-nav">
-      <button class="bottom-nav-item active" data-tab="overview">
-        <span><svg class="icon"><use href="#i-overview"/></svg></span><span>Overview</span>
+    <nav class="admin-bottom-nav" aria-label="Admin">
+      <button type="button" class="bottom-nav-item active" data-tab="overview">
+        <svg class="icon" aria-hidden="true"><use href="#i-overview"/></svg><span>Overview</span>
       </button>
-      <button class="bottom-nav-item" data-tab="leads">
-        <span><svg class="icon"><use href="#i-leads"/></svg></span><span>Leads</span>
+      <button type="button" class="bottom-nav-item" data-tab="leads">
+        <svg class="icon" aria-hidden="true"><use href="#i-leads"/></svg><span>Leads</span>
       </button>
-      <button class="bottom-nav-item" data-tab="reports">
-        <span><svg class="icon"><use href="#i-reports"/></svg></span><span>Reports</span>
+      <button type="button" class="bottom-nav-item" data-tab="reports">
+        <svg class="icon" aria-hidden="true"><use href="#i-reports"/></svg><span>Reports</span>
       </button>
-      <button class="bottom-nav-item" data-tab="notifications">
-        <span><svg class="icon"><use href="#i-bell"/></svg></span><span>Notifs</span>
+      <button type="button" class="bottom-nav-item" data-tab="notifications">
+        <svg class="icon" aria-hidden="true"><use href="#i-bell"/></svg><span>Notifs</span>
         <span class="sidebar-badge" id="bottom-notif-badge" style="display:none">0</span>
       </button>
-      <button class="bottom-nav-item" data-tab="activity">
-        <span><svg class="icon"><use href="#i-pulse"/></svg></span><span>Activity</span>
+      <button type="button" class="bottom-nav-item" data-tab="activity">
+        <svg class="icon" aria-hidden="true"><use href="#i-pulse"/></svg><span>Activity</span>
         <span class="sidebar-badge" id="bottom-activity-badge" style="display:none">0</span>
       </button>
-      <button class="bottom-nav-item" data-tab="review">
-        <span><svg class="icon"><use href="#i-chat"/></svg></span><span>Review</span>
+      <button type="button" class="bottom-nav-item" data-tab="review">
+        <svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg><span>Review</span>
       </button>
-      <button class="bottom-nav-item" data-tab="settings">
-        <span><svg class="icon"><use href="#i-settings"/></svg></span><span>Settings</span>
+      <button type="button" class="bottom-nav-item" data-tab="settings">
+        <svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span>Settings</span>
       </button>
-      <button class="bottom-nav-item" id="btn-admin-panel-back-mobile">
-        <span><svg class="icon"><use href="#i-logout"/></svg></span><span>Exit</span>
+      <button type="button" class="bottom-nav-item" id="btn-admin-panel-back-mobile">
+        <svg class="icon" aria-hidden="true"><use href="#i-logout"/></svg><span>Exit</span>
       </button>
     </nav>
 
@@ -910,17 +927,17 @@
         <div class="conv-header-name" id="admin-chat-name"></div>
         <div class="conv-header-platform" id="admin-chat-platform"></div>
       </div>
-      <button class="takeover-btn" id="btn-admin-takeover" style="display:none"
-        title="Pause the bot on this conversation and reply as staff">🤖⏯ Take over</button>
-      <button class="lead-chat-close" id="btn-admin-chat-close" aria-label="Close">&times;</button>
+      <button type="button" class="takeover-btn" id="btn-admin-takeover" style="display:none"
+        title="Pause the bot on this conversation and reply as staff">Take over</button>
+      <button type="button" class="lead-chat-close" id="btn-admin-chat-close" aria-label="Close">&times;</button>
     </div>
     <div class="leads-convo-log" id="admin-convo-log">
       <div class="leads-convo-empty">No messages yet</div>
     </div>
     <div class="leads-convo-compose">
       <input type="text" id="admin-convo-input" class="convo-input" placeholder="Type a message…">
-      <button class="convo-send-btn" id="btn-admin-convo-send" aria-label="Send">
-        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+      <button type="button" class="convo-send-btn" id="btn-admin-convo-send" aria-label="Send">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
         </svg>
       </button>
@@ -935,13 +952,13 @@
   <div class="modal-card">
     <h3 id="modal-branch-title">Add Branch</h3>
     <div class="form-group">
-      <label>Branch Name</label>
+      <label for="modal-branch-name">Branch Name</label>
       <input type="text" id="modal-branch-name" class="text-input" placeholder="e.g. South Delhi">
     </div>
     <div class="form-group">
-      <label>State</label>
+      <label for="modal-branch-state">State</label>
       <select id="modal-branch-state" class="text-input">
-        <option value="">— Select state —</option>
+        <option value="">Select a state</option>
         <optgroup label="States">
           <option>Andhra Pradesh</option><option>Arunachal Pradesh</option>
           <option>Assam</option><option>Bihar</option><option>Chhattisgarh</option>
@@ -965,13 +982,13 @@
       </select>
     </div>
     <div class="form-group">
-      <label>4-digit PIN</label>
+      <label for="modal-branch-pin">4-digit PIN</label>
       <input type="text" id="modal-branch-pin" class="text-input" placeholder="0000" maxlength="4" pattern="[0-9]{4}" inputmode="numeric">
     </div>
     <input type="hidden" id="modal-branch-id">
     <div class="modal-btns">
-      <button class="secondary-btn" id="btn-modal-cancel">Cancel</button>
-      <button class="primary-btn" id="btn-modal-save">Save</button>
+      <button type="button" class="secondary-btn" id="btn-modal-cancel">Cancel</button>
+      <button type="button" class="primary-btn" id="btn-modal-save">Save</button>
     </div>
   </div>
 </div>
@@ -982,10 +999,10 @@
 <div id="modal-delete-branch" class="modal-overlay" style="display:none">
   <div class="modal-card">
     <h3>Delete Branch</h3>
-    <p id="modal-delete-branch-msg" style="color:#6b7280;margin:8px 0 24px;font-size:14px;line-height:1.5"></p>
+    <p id="modal-delete-branch-msg" class="modal-text"></p>
     <div class="modal-btns">
-      <button class="secondary-btn" id="btn-delete-cancel">Cancel</button>
-      <button class="danger-btn" id="btn-delete-confirm" style="padding:10px 20px;border-radius:8px;font-weight:600">Delete</button>
+      <button type="button" class="secondary-btn" id="btn-delete-cancel">Cancel</button>
+      <button type="button" class="danger-btn is-solid" id="btn-delete-confirm">Delete</button>
     </div>
   </div>
 </div>
@@ -996,93 +1013,93 @@
 <div id="modal-feedback" class="modal-overlay" style="display:none">
   <div class="modal-card">
     <h3>Leave Feedback</h3>
-    <p style="font-size:13px;color:#6b7280;margin:4px 0 16px">Branch and date are captured automatically.</p>
+    <p class="modal-text">Branch and date are captured automatically.</p>
     <div class="form-group">
-      <label>Your Name</label>
+      <label for="feedback-name">Your Name</label>
       <input type="text" id="feedback-name" class="text-input" placeholder="Staff name">
     </div>
     <div class="form-group">
-      <label>Feedback</label>
+      <label for="feedback-text">Feedback</label>
       <textarea id="feedback-text" class="text-input" placeholder="Write your feedback here…"
-        rows="4" style="resize:vertical;min-height:90px"></textarea>
+        rows="4"></textarea>
     </div>
     <div class="modal-btns">
-      <button class="secondary-btn" id="btn-feedback-cancel">Cancel</button>
-      <button class="primary-btn" id="btn-feedback-submit">Submit</button>
+      <button type="button" class="secondary-btn" id="btn-feedback-cancel">Cancel</button>
+      <button type="button" class="primary-btn" id="btn-feedback-submit">Submit</button>
     </div>
   </div>
 </div>
 
 <!-- Automation Modal -->
 <div id="modal-automation" class="modal-overlay" style="display:none">
-  <div class="modal-box" style="max-width:480px;width:94%">
-    <h3 id="modal-automation-title" style="margin:0 0 20px;font-size:16px;font-weight:700">Add Automation</h3>
+  <div class="modal-box" role="dialog" aria-labelledby="modal-automation-title">
+    <h3 id="modal-automation-title">Add Automation</h3>
 
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Name</label>
-      <input type="text" id="auto-name" class="text-input" placeholder="e.g. Weekly Sunday Report" style="margin:0">
+    <div class="modal-field">
+      <label class="field-label" for="auto-name">Name</label>
+      <input type="text" id="auto-name" class="text-input" placeholder="Weekly Sunday Report">
     </div>
 
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Action</label>
-      <div id="auto-action-display" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px 14px;font-size:14px;color:#374151">
+    <div class="modal-field">
+      <span class="field-label">Action</span>
+      <div id="auto-action-display" class="modal-static">
         Send Email Report
       </div>
     </div>
 
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Trigger</label>
-      <select id="auto-trigger-type" class="text-input" style="margin:0 0 10px">
+    <div class="modal-field">
+      <label class="field-label" for="auto-trigger-type">Trigger</label>
+      <select id="auto-trigger-type" class="text-input">
         <option value="weekly">Every Week (Sunday)</option>
         <option value="monthly">Every Month (Last Day)</option>
         <option value="single_date">Single Date (One-time)</option>
       </select>
 
       <!-- Weekly options -->
-      <div id="auto-weekly-opts" style="display:flex;flex-direction:column;gap:8px">
+      <div id="auto-weekly-opts" class="check-stack" style="display:flex">
         <label class="auto-radio-label">
           <input type="radio" name="auto-trigger-mode" value="scheduled" checked>
           <div>
-            <div style="font-weight:600;font-size:13px">Sunday night</div>
-            <div style="font-size:12px;color:#6b7280">Auto-sends every Sunday at 11 pm</div>
+            <div class="radio-title">Sunday night</div>
+            <div class="radio-sub">Auto-sends every Sunday at 11 pm</div>
           </div>
         </label>
         <label class="auto-radio-label">
           <input type="radio" name="auto-trigger-mode" value="on_submit">
           <div>
-            <div style="font-weight:600;font-size:13px">When Sunday cashup is submitted</div>
-            <div style="font-size:12px;color:#6b7280">Fires as soon as any branch submits Sunday's cashup</div>
+            <div class="radio-title">When Sunday cashup is submitted</div>
+            <div class="radio-sub">Fires as soon as any branch submits Sunday’s cashup</div>
           </div>
         </label>
       </div>
 
       <!-- Monthly options -->
-      <div id="auto-monthly-opts" style="display:none;flex-direction:column;gap:8px">
+      <div id="auto-monthly-opts" class="check-stack" style="display:none">
         <label class="auto-radio-label">
           <input type="radio" name="auto-trigger-mode" value="scheduled">
           <div>
-            <div style="font-weight:600;font-size:13px">Last day of month, night</div>
-            <div style="font-size:12px;color:#6b7280">Auto-sends on the last day of every month at 11 pm</div>
+            <div class="radio-title">Last day of month, night</div>
+            <div class="radio-sub">Auto-sends on the last day of every month at 11 pm</div>
           </div>
         </label>
         <label class="auto-radio-label">
           <input type="radio" name="auto-trigger-mode" value="on_submit">
           <div>
-            <div style="font-weight:600;font-size:13px">When last day's cashup is submitted</div>
-            <div style="font-size:12px;color:#6b7280">Fires as soon as any branch submits the last day of the month</div>
+            <div class="radio-title">When last day’s cashup is submitted</div>
+            <div class="radio-sub">Fires as soon as any branch submits the last day of the month</div>
           </div>
         </label>
       </div>
 
       <!-- Single date -->
       <div id="auto-single-opts" style="display:none">
-        <input type="date" id="auto-trigger-date" class="text-input" style="margin:0">
+        <input type="date" id="auto-trigger-date" class="text-input" aria-label="Date">
       </div>
     </div>
 
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:8px">Branches</label>
-      <div id="auto-branch-list" style="display:flex;flex-direction:column;gap:8px">
+    <div class="modal-field" role="group" aria-labelledby="lbl-auto-branches">
+      <span class="field-label" id="lbl-auto-branches">Branches</span>
+      <div id="auto-branch-list" class="check-stack">
         <label class="auto-check-label auto-branch-all">
           <input type="checkbox" value="all" checked onchange="handleAutoBranchAll(this)"> <strong>All Branches</strong>
         </label>
@@ -1090,9 +1107,9 @@
       </div>
     </div>
 
-    <div style="margin-bottom:14px">
-      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:8px">Report includes</label>
-      <div style="display:flex;flex-direction:column;gap:8px">
+    <div class="modal-field" role="group" aria-labelledby="lbl-auto-sections">
+      <span class="field-label" id="lbl-auto-sections">Report includes</span>
+      <div class="check-stack">
         <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="daily_summary" checked> Daily Summary (opening / closing per branch)</label>
         <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="total_sale" checked> Total Sales</label>
         <label class="auto-check-label"><input type="checkbox" class="auto-section-chk" value="all_transactions"> All Transactions (full entry list)</label>
@@ -1102,14 +1119,14 @@
       </div>
     </div>
 
-    <div style="margin-bottom:20px">
-      <label style="font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px">Send to</label>
-      <input type="email" id="auto-email-to" class="text-input" value="hospitalitybee@gmail.com" style="margin:0">
+    <div class="modal-field">
+      <label class="field-label" for="auto-email-to">Send to</label>
+      <input type="email" id="auto-email-to" class="text-input" value="hospitalitybee@gmail.com">
     </div>
 
-    <div style="display:flex;gap:10px;justify-content:flex-end">
-      <button class="secondary-btn" id="btn-automation-cancel">Cancel</button>
-      <button class="primary-btn" id="btn-automation-save">Save Automation</button>
+    <div class="modal-btns">
+      <button type="button" class="secondary-btn" id="btn-automation-cancel">Cancel</button>
+      <button type="button" class="primary-btn" id="btn-automation-save">Save Automation</button>
     </div>
     <input type="hidden" id="auto-edit-id">
   </div>

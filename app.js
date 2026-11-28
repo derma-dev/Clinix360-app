@@ -271,7 +271,7 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
   if (!leads.length) {
     list.innerHTML = `
       <div class="leads-empty-state">
-        <div class="leads-empty-icon"><svg class="icon"><use href="#i-inbox"/></svg></div>
+        <div class="leads-empty-icon"><svg class="icon" aria-hidden="true"><use href="#i-inbox"/></svg></div>
         <div class="leads-empty-title">No leads yet</div>
         <div class="leads-empty-sub">Messages from Instagram, Facebook and WhatsApp will appear here</div>
       </div>`;
@@ -293,10 +293,10 @@ function renderConversationList(leads, lastMsg, unreadCount = {}) {
     // Handoff alert badge (D18, Step 13 — the dashboard half; email is Step 18):
     // emergency and kb_miss handoffs are the two reasons staff must look now.
     const hr   = lead.bot_state?.handoff_reason;
-    const alertTag = hr === 'emergency' ? '<span class="lead-cat-tag cat-emergency">🔴 Emergency</span>'
-                   : hr === 'kb_miss'    ? '<span class="lead-cat-tag cat-kb_miss">❓ Bot didn’t know</span>'
+    const alertTag = hr === 'emergency' ? '<span class="lead-cat-tag cat-emergency">Emergency</span>'
+                   : hr === 'kb_miss'    ? '<span class="lead-cat-tag cat-kb_miss">Bot didn’t know</span>'
                    // S12b G1: the customer got the hold line; staff answer instead.
-                   : hr === 'guard'      ? '<span class="lead-cat-tag cat-kb_miss">🛡️ Reply held back</span>'
+                   : hr === 'guard'      ? '<span class="lead-cat-tag cat-kb_miss">Reply held back</span>'
                    : '';
 
     return `
@@ -573,7 +573,7 @@ function renderThreadHtml(data, lead) {
   const urgent = ['medical', 'emergency'].includes(bs.handoff_reason);
   return `
     <div class="bot-handoff-card${urgent ? ' is-urgent' : ''}">
-      <div class="bot-handoff-head">🤖➜👩‍⚕️ Bot handed off to staff${bs.handoff_reason ? ` · <span class="bot-handoff-reason">${esc(bs.handoff_reason)}</span>` : ''}</div>
+      <div class="bot-handoff-head">Bot handed off to staff${bs.handoff_reason ? ` <span class="tag bot-handoff-reason">${esc(bs.handoff_reason)}</span>` : ''}</div>
       <div class="bot-handoff-body">${esc(bs.handoff_summary)}</div>
     </div>
     <details class="bot-raw-thread"${urgent ? ' open' : ''}>
@@ -595,7 +595,7 @@ function _messageBubbleHtml(m, lead) {
       ${isIncoming ? `<div class="convo-msg-avatar ${esc(src)}">${sourceBadgeInner(src)}</div>` : ''}
       <div class="convo-msg-body">
         <div class="leads-convo-msg-text">${esc(m.message)}</div>
-        <div class="leads-convo-msg-meta">${m.is_bot ? '<span class="bot-tag" title="Sent by the assistant">🤖</span>' : ''}${timeStr}</div>
+        <div class="leads-convo-msg-meta">${m.is_bot ? '<span class="bot-tag" title="Sent by the assistant">Bot</span>' : ''}${timeStr}</div>
       </div>
     </div>`;
 }
@@ -725,7 +725,7 @@ function renderLeadsKpis(leads) {
     ${leadKpiTile('Conversion', conv + '%')}
     <div class="leads-kpi-tile leads-kpi-sources">
       <div class="leads-kpi-label">By source</div>
-      <div class="leads-src-chips">${chips || '<span style="color:#9ca3af">—</span>'}</div>
+      <div class="leads-src-chips">${chips || '<span class="item-note">None</span>'}</div>
     </div>`;
 }
 
@@ -736,9 +736,9 @@ function renderLeadsTable(leads) {
   if (!leads.length) {
     wrap.innerHTML = `
       <div class="leads-empty-state">
-        <div class="leads-empty-icon"><svg class="icon"><use href="#i-inbox"/></svg></div>
+        <div class="leads-empty-icon"><svg class="icon" aria-hidden="true"><use href="#i-inbox"/></svg></div>
         <div class="leads-empty-title">No leads found</div>
-        <div class="leads-empty-sub">Try clearing the filters — new messages from Instagram, Facebook and WhatsApp land here automatically.</div>
+        <div class="leads-empty-sub">Try clearing the filters. New messages from Instagram, Facebook and WhatsApp land here automatically.</div>
       </div>`;
     return;
   }
@@ -761,7 +761,7 @@ function renderLeadsTable(leads) {
         <td class="lt-branch">${esc(branchName(l.branch_id))}</td>
         <td><select class="lead-status-select st-${esc(st)}" onchange="updateLeadStatus('${esc(l.id)}', this.value)">${opts}</select></td>
         <td class="lt-time">${esc(formatConvoTime(l.created_at))}</td>
-        <td><button class="lead-chat-btn" onclick="openAdminChat('${esc(l.id)}')" aria-label="Open chat"><svg class="icon"><use href="#i-inbox"/></svg></button></td>
+        <td><button class="lead-chat-btn" onclick="openAdminChat('${esc(l.id)}')" aria-label="Open chat"><svg class="icon" aria-hidden="true"><use href="#i-inbox"/></svg></button></td>
       </tr>`;
     }).join('')}
     </tbody>
@@ -1055,20 +1055,19 @@ async function loadIntegrations() {
     const connected     = liveConnected && enabled;    // effective state the button mirrors
 
     let statusText, statusClass;
-    if (!enabled)           { statusText = 'Disconnected';         statusClass = 'disconnected'; }
-    else if (liveConnected) { statusText = st.name || 'Connected'; statusClass = 'connected'; }
-    else                    { statusText = 'Not connected';        statusClass = 'disconnected'; }
+    if (!enabled)           { statusText = 'Disconnected';  statusClass = ''; }
+    else if (liveConnected) { statusText = 'Connected';     statusClass = 'is-success'; }
+    else                    { statusText = 'Not connected'; statusClass = ''; }
+    const account = enabled && liveConnected && st.name ? st.name : '';
 
     return `
-    <div class="integ-row">
+    <div class="item-row integ-row">
       <div class="conv-platform-icon ${p.key}">${sourceBadgeInner(p.key)}</div>
-      <div class="integ-info">
-        <div class="integ-name">${p.label}</div>
-        <div class="integ-status ${statusClass}">
-          <span class="integ-dot"></span>${esc(statusText)}
-        </div>
+      <div class="item-main">
+        <div class="item-name">${p.label} <span class="tag ${statusClass}">${esc(statusText)}</span></div>
+        ${account ? `<div class="item-meta">${esc(account)}</div>` : ''}
       </div>
-      <button class="integ-btn ${connected ? 'disconnect' : 'connect'}" onclick="toggleIntegration('${p.key}', ${!connected})">
+      <button type="button" class="integ-btn ${connected ? 'disconnect' : 'connect'}" onclick="toggleIntegration('${p.key}', ${!connected})">
         ${connected ? 'Disconnect' : 'Connect'}
       </button>
     </div>`;
@@ -1185,11 +1184,11 @@ function renderPaymentModesList() {
   const el = document.getElementById('payment-modes-list');
   if (!el) return;
   el.innerHTML = state.paymentModes.map(m => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px">
-      <span style="font-weight:600">${esc(m.label)}</span>
+    <div class="item-row">
+      <div class="item-main"><div class="item-name">${esc(m.label)}</div></div>
       ${m.code === 'cash'
-        ? '<span style="font-size:12px;color:#9ca3af">Required</span>'
-        : `<button class="del-row-btn" onclick="removePaymentMode('${esc(m.code)}')" title="Remove">×</button>`}
+        ? '<span class="item-note">Required</span>'
+        : `<button type="button" class="icon-btn is-danger" onclick="removePaymentMode('${esc(m.code)}')" title="Remove" aria-label="Remove ${esc(m.label)}"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>`}
     </div>`).join('');
 }
 
@@ -1234,17 +1233,17 @@ function renderCommentRules() {
   if (!el) return;
   const rules = state.commentRules || [];
   if (!rules.length) {
-    el.innerHTML = '<p style="font-size:13px;color:#9ca3af;margin:0">No rules yet — comments are left alone.</p>';
+    el.innerHTML = '<p class="item-empty">No rules yet. Comments are left alone.</p>';
     return;
   }
   el.innerHTML = rules.map((r, i) => `
-    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:6px">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px">
-        <span style="font-weight:600">${r.keyword === '*' ? 'Any comment' : esc(r.keyword)}</span>
-        <button class="del-row-btn" onclick="removeCommentRule(${i})" title="Remove">×</button>
+    <div class="item-row">
+      <div class="item-main">
+        <div class="item-name">${r.keyword === '*' ? 'Any comment' : esc(r.keyword)}</div>
+        <div class="item-meta"><b>Reply:</b> ${esc(r.public || 'none')}</div>
+        <div class="item-meta"><b>DM:</b> ${esc(r.dm || 'none')}</div>
       </div>
-      <div style="font-size:12px;color:#6b7280;margin-top:6px">Reply: ${esc(r.public || '—')}</div>
-      <div style="font-size:12px;color:#6b7280;margin-top:2px">DM: ${esc(r.dm || '—')}</div>
+      <button type="button" class="icon-btn is-danger" onclick="removeCommentRule(${i})" title="Remove" aria-label="Remove this rule"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>`).join('');
 }
 
@@ -1369,7 +1368,7 @@ function renderChatbotConfig() {
   const verified = cfg.kb?.prices_verified_at
     ? new Date(cfg.kb.prices_verified_at).toLocaleDateString() : 'never';
   const status = document.getElementById('chatbot-kb-status');
-  if (status) status.textContent = `KB: ${kbN} entries · prices verified: ${verified} · locality map: ${locN}`;
+  if (status) status.innerHTML = `<span>KB: ${kbN} entries</span><span>Prices verified: ${esc(verified)}</span><span>Locality map: ${locN}</span>`;
 }
 
 // Mode control only — a mode click re-renders just this, never the form fields
@@ -1380,10 +1379,7 @@ function renderChatbotMode() {
   const mode = state.chatbotConfig?.mode || 'off';
   btns.innerHTML = CHATBOT_MODES.map(m => {
     const active = mode === m.key;
-    return `<button onclick="setChatbotMode('${m.key}')" title="${esc(m.hint)}"
-      style="padding:7px 16px;border-radius:8px;font-size:13px;font-weight:600;cursor:${active ? 'default' : 'pointer'};
-      border:1px solid ${active ? 'transparent' : 'var(--border)'};color:${active ? '#fff' : 'inherit'};
-      background:${active ? 'var(--accent, #e53935)' : 'transparent'}">${m.label}</button>`;
+    return `<button type="button" class="seg-btn" aria-pressed="${active}" onclick="setChatbotMode('${m.key}')" title="${esc(m.hint)}">${m.label}</button>`;
   }).join('');
 }
 
@@ -1481,20 +1477,20 @@ function renderKbCandidates() {
   const wrap = document.getElementById('kb-candidates-list');
   if (!wrap) return;
   if (!_kbCandidates.length) {
-    wrap.innerHTML = '<div style="font-size:13px;color:#9ca3af">Nothing pending. When the bot can’t answer a question (not a price), it lands here.</div>';
+    wrap.innerHTML = '<p class="item-empty">Nothing pending. When the bot can’t answer a question (not a price), it lands here.</p>';
     return;
   }
   wrap.innerHTML = _kbCandidates.map(c => `
-    <div class="kb-cand" data-id="${c.id}" style="border:1px solid var(--border,#e5e7eb);border-radius:10px;padding:10px 12px">
-      <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:6px">
-        <span style="font-size:13px;font-weight:600">❓ ${esc(c.question || '')}</span>
-        <span style="font-size:12px;color:#9ca3af;white-space:nowrap">${esc(formatConvoTime(c.created_at))}${c.lead_id
-          ? ` · <button class="link-btn" style="font-size:12px;padding:0" onclick="openReviewThread('${c.lead_id}')">Open chat</button>` : ''}</span>
+    <div class="kb-cand" data-id="${c.id}">
+      <div class="kb-cand-head">
+        <span class="kb-cand-q">${esc(c.question || '')}</span>
+        <span class="kb-cand-when"><span>${esc(formatConvoTime(c.created_at))}</span>${c.lead_id
+          ? `<button type="button" class="link-btn" onclick="openReviewThread('${c.lead_id}')">Open chat</button>` : ''}</span>
       </div>
-      <textarea class="text-input kb-cand-answer" rows="2" placeholder="Write the answer…" style="margin:0;resize:vertical">${esc(c.answer || '')}</textarea>
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="primary-btn" onclick="approveKbCandidate(${c.id})">✓ Approve</button>
-        <button class="ghost-btn" onclick="discardKbCandidate(${c.id})" style="padding:8px 16px;border-radius:8px;border:1px solid var(--border,#e5e7eb);background:transparent;cursor:pointer;font-size:13px">Discard</button>
+      <textarea class="text-input kb-cand-answer" rows="2" placeholder="Write the answer…" aria-label="Answer to: ${esc(c.question || '')}">${esc(c.answer || '')}</textarea>
+      <div class="kb-cand-actions">
+        <button type="button" class="primary-btn" onclick="approveKbCandidate(${c.id})">Approve</button>
+        <button type="button" class="ghost-btn" onclick="discardKbCandidate(${c.id})">Discard</button>
       </div>
     </div>`).join('');
 }
@@ -1572,7 +1568,7 @@ async function discardKbCandidate(id) {
 // browser last opened the tab.
 // ============================================================
 const ACTIVITY_SEEN_KEY = 'activity_seen_at';
-const ACTIVITY_ICON = { error: '⛔', warn: '⚠️', info: 'ℹ️' };
+const ACTIVITY_LEVEL = { error: ['Error', 'is-error'], warn: ['Warning', 'is-warning'], info: ['Info', ''] };
 const DAY_MS = 864e5;
 
 function setActivityBadge(n) {
@@ -1606,24 +1602,29 @@ async function loadActivity() {
   const { data, error } = await q;
   if (error) {
     console.error('[bot_events]', error.message);
-    list.innerHTML = '<div style="padding:24px;font-size:13px;color:#e53935">Could not load the activity. Try again.</div>';
+    list.innerHTML = '<p class="empty-line is-error">Could not load the activity. Try again.</p>';
     return;
   }
   // Seen = the newest row shown (server time, so a fast or slow laptop clock can't hide a row).
   if (data.length) try { localStorage.setItem(ACTIVITY_SEEN_KEY, data[0].created_at); } catch {}
   setActivityBadge(0);
   if (!data.length) {
-    list.innerHTML = '<div style="padding:24px;font-size:13px;color:#9ca3af;text-align:center">Nothing in the last 90 days.</div>';
+    list.innerHTML = '<p class="empty-line">Nothing in the last 90 days.</p>';
     return;
   }
-  list.innerHTML = data.map(e => `
-    <div class="notif-row">
-      <div class="notif-tag" style="background:#f3f4f6;color:#374151">${ACTIVITY_ICON[e.level] || 'ℹ️'} ${esc(e.kind)}</div>
-      <div class="notif-body"><div class="notif-detail" style="font-weight:400;color:#374151">${esc(e.message || '')}</div></div>
-      <div class="notif-right"><div class="notif-time">${new Date(e.created_at).toLocaleString('en-IN',
-        { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</div>
-        ${e.lead_id ? `<button class="link-btn" style="font-size:12px" onclick="openReviewThread('${e.lead_id}')">Open chat</button>` : ''}</div>
-    </div>`).join('');
+  list.innerHTML = `<table class="data-table activity-table">
+    <thead><tr><th scope="col">When</th><th scope="col">Level</th><th scope="col">Event</th><th scope="col">Message</th><th scope="col"><span class="visually-hidden">Chat</span></th></tr></thead>
+    <tbody>${data.map(e => {
+      const [lvl, cls] = ACTIVITY_LEVEL[e.level] || ACTIVITY_LEVEL.info;
+      return `<tr>
+        <td class="when">${new Date(e.created_at).toLocaleString('en-IN',
+          { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })}</td>
+        <td class="level"><span class="tag ${cls}">${lvl}</span></td>
+        <td class="kind">${esc(e.kind)}</td>
+        <td class="msg">${esc(e.message || '')}</td>
+        <td class="act">${e.lead_id ? `<button type="button" class="link-btn" onclick="openReviewThread('${e.lead_id}')">Open chat</button>` : ''}</td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
 }
 
 // ≤ 7 days left on the connected Instagram token → a red strip on every admin tab.
@@ -1691,7 +1692,7 @@ async function loadReview() {
   const error = sh.error || live.error || lq.error;
   if (error) {
     console.error('[bot review]', error.message);
-    list.innerHTML = '<div style="padding:24px;font-size:13px;color:#e53935">Could not load the bot review. Try again.</div>';
+    list.innerHTML = '<p class="empty-line is-error">Could not load the bot review. Try again.</p>';
     return;
   }
 
@@ -1718,30 +1719,31 @@ async function loadReview() {
 
   const drafts = sh.data.filter(r => r.lead_id);
   const n = (v) => drafts.filter(r => v ? r.owner_verdict === v : r.owner_verdict).length;
-  document.getElementById('review-counter').textContent =
-    `${drafts.length} drafts · ${n()} reviewed · ${n('good')} good · ${n('fix')} fixed`;
+  const fig = (v, label) => `<div class="figure"><div class="figure-value">${v}</div><div class="figure-label">${label}</div></div>`;
+  document.getElementById('review-counter').innerHTML =
+    fig(drafts.length, 'Drafts') + fig(n(), 'Reviewed') + fig(n('good'), 'Good') + fig(n('fix'), 'Fixed');
 
   const tag = (t, cls = '') => `<span class="review-tag ${cls}">${esc(t)}</span>`;
   const rows = Object.values(convs).sort((a, b) => b.last - a.last).map(c => `
-    <div class="notif-row review-pick${c.id === _reviewLeadId ? ' active' : ''}" data-id="${c.id}" onclick="openReviewThread('${c.id}')">
-      <div class="notif-body">
-        <div class="notif-title">${esc(leadDisplayName(leads[c.id]?.customer_name) || 'A customer')}</div>
-        <div>${c.shadow ? tag('Shadow') : ''}${c.live ? tag('Live', 'live') : ''}${[...c.flags].map(f => tag(f, REVIEW_ALERTS.includes(f) ? 'alert' : '')).join('')}</div>
-      </div>
-      <div class="notif-right"><div class="notif-time">${esc(formatConvoTime(new Date(c.last).toISOString()))}</div></div>
-    </div>`);
+    <button type="button" class="review-pick${c.id === _reviewLeadId ? ' active' : ''}" data-id="${c.id}" onclick="openReviewThread('${c.id}')">
+      <span class="notif-body">
+        <span class="notif-title">${esc(leadDisplayName(leads[c.id]?.customer_name) || 'A customer')}</span>
+        <span class="tag-row">${c.shadow ? tag('Shadow') : ''}${c.live ? tag('Live', 'live') : ''}${[...c.flags].map(f => tag(f, REVIEW_ALERTS.includes(f) ? 'alert' : '')).join('')}</span>
+      </span>
+      <span class="notif-time">${esc(formatConvoTime(new Date(c.last).toISOString()))}</span>
+    </button>`);
   // Comment drafts have no lead (no DM went out to file one under): a card each.
   const comments = sh.data.filter(r => !r.lead_id).map(r => `
     <div class="notif-row">
       <div class="notif-body">
-        <div class="notif-title">💬 ${esc(r.decision?.comment || '')}</div>
-        <div class="notif-meta">Public reply: ${esc(r.decision?.public || '—')}<br>DM: ${esc(r.decision?.dm || '—')}</div>
+        <div class="notif-title">${esc(r.decision?.comment || '')}</div>
+        <div class="notif-meta">Public reply: ${esc(r.decision?.public || 'none')}<br>DM: ${esc(r.decision?.dm || 'none')}</div>
       </div>
       <div class="notif-right"><div class="notif-time">${esc(formatConvoTime(r.created_at))}</div></div>
     </div>`);
   list.innerHTML = rows.join('') + (comments.length
-    ? `<div class="notif-meta" style="padding:12px 18px 0;font-weight:700">Comment drafts</div>${comments.join('')}` : '')
-    || '<div style="padding:24px;font-size:13px;color:#9ca3af;text-align:center">No bot activity in this period.</div>';
+    ? `<div class="list-caption">Comment drafts</div>${comments.join('')}` : '')
+    || '<p class="empty-line">No bot activity in this period.</p>';
 }
 
 // One conversation's thread. Also the "Open chat" of Activity and Unanswered questions.
@@ -1777,15 +1779,15 @@ function _draftBubbleHtml(r) {
   const reply = String(d.reply || '').trim();
   const what = d.handoff ? `Bot would hand off (${d.reason || 'no reason'})`
              : reply ? 'Bot would say…' : `Bot would send nothing${d.reason ? ` (${d.reason})` : ''}`;
-  const verdict = r.owner_verdict === 'good' ? '✅ Marked good · '
-                : r.owner_verdict === 'fix' ? `✏️ Should say: “${esc(r.owner_fix || '')}” · ` : '';
+  const verdict = r.owner_verdict === 'good' ? '<span class="verdict-note"><span class="tag is-success">Marked good</span></span>'
+                : r.owner_verdict === 'fix' ? `<span class="verdict-note">Should say: “${esc(r.owner_fix || '')}”</span>` : '';
   return `
     <div class="leads-convo-msg outgoing bot-draft" data-draft-id="${r.id}">
       <div class="convo-msg-body">
-        <div class="leads-convo-msg-meta">🤖 ${esc(what)}${r.error ? ` · error: ${esc(r.error)}` : ''}</div>
+        <div class="leads-convo-msg-meta">${esc(what)}${r.error ? ` (error: ${esc(r.error)})` : ''}</div>
         ${reply ? `<div class="leads-convo-msg-text">${esc(reply)}</div>` : ''}
-        <div class="leads-convo-msg-meta review-verdict">${verdict}<button class="link-btn" onclick="reviewVerdict(${r.id}, 'good')">✅ Good</button>
-          <button class="link-btn" onclick="reviewFixBox(${r.id})">✏️ Fix</button></div>
+        <div class="review-verdict">${verdict}<button type="button" class="seg-btn" aria-pressed="${r.owner_verdict === 'good'}" onclick="reviewVerdict(${r.id}, 'good')"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Good</button>
+          <button type="button" class="seg-btn" aria-pressed="${r.owner_verdict === 'fix'}" onclick="reviewFixBox(${r.id})"><svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg>Fix</button></div>
       </div>
     </div>`;
 }
@@ -1799,10 +1801,12 @@ function reviewFixBox(id) {
   const box = document.querySelector(`#review-thread [data-draft-id="${id}"] .review-verdict`);
   if (!box) return;
   box.innerHTML = `
-    <textarea class="text-input" rows="3" placeholder="What the bot should have said…" style="margin:0;resize:vertical;width:100%;min-width:240px"></textarea>
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
-      <button class="link-btn" onclick="rerenderDraft(${id})">Cancel</button>
-      <button class="primary-btn" onclick="reviewVerdict(${id}, 'fix')">Save</button>
+    <div class="review-fix">
+      <textarea class="text-input" rows="3" placeholder="What the bot should have said…" aria-label="What the bot should have said"></textarea>
+      <div class="review-fix-actions">
+        <button type="button" class="secondary-btn" onclick="rerenderDraft(${id})">Cancel</button>
+        <button type="button" class="primary-btn" onclick="reviewVerdict(${id}, 'fix')">Save</button>
+      </div>
     </div>`;
   const ta = box.querySelector('textarea');
   ta.value = _reviewDrafts[id]?.owner_fix || '';
@@ -1920,11 +1924,7 @@ async function loadAdminAlerts() {
   if (totalCount === 0) {
     updateBadges(0);
     list.innerHTML = `
-      <div style="text-align:center;padding:40px 20px;color:#9ca3af">
-        <div style="margin-bottom:10px;color:var(--primary)"><svg class="icon" style="width:34px;height:34px"><use href="#i-bell"/></svg></div>
-        <div style="font-weight:600;color:#374151;margin-bottom:4px">No notifications</div>
-        <div style="font-size:13px">You're all caught up</div>
-      </div>`;
+      <p class="empty-line"><strong>No notifications</strong>You’re all caught up.</p>`;
     return;
   }
 
@@ -1948,29 +1948,29 @@ async function loadAdminAlerts() {
       <div class="notif-row">
         <div class="notif-tag notif-tag-variance">Variance</div>
         <div class="notif-body">
-          <div class="notif-title">${esc(a.branch_name)} &mdash; ${formatDisplayDate(a.entry_date)}</div>
+          <div class="notif-title">${esc(a.branch_name)}, ${formatDisplayDate(a.entry_date)}</div>
           <div class="notif-detail ${varClass}">${varLabel}</div>
-          <div class="notif-meta">Calculated ${formatCurrency(a.calculated_closing)} &nbsp;·&nbsp; Actual ${formatCurrency(a.actual_closing)}</div>
+          <div class="notif-meta"><span>Calculated ${formatCurrency(a.calculated_closing)}</span><span>Actual ${formatCurrency(a.actual_closing)}</span></div>
         </div>
         <div class="notif-right">
           <div class="notif-time">${timeAgo(a.created_at)}</div>
-          <button class="notif-dismiss" onclick="markAlertRead('${a.id}')" title="Dismiss">✕</button>
+          <button type="button" class="icon-btn" onclick="markAlertRead('${a.id}')" title="Dismiss" aria-label="Dismiss"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
         </div>
       </div>`;
   });
 
   const feedbackRows = (feedbacks || []).map(f => {
-    const byLine = f.submitted_by ? ` · ${esc(f.submitted_by)}` : '';
+    const byLine = f.submitted_by ? `, ${esc(f.submitted_by)}` : '';
     return `
       <div class="notif-row">
         <div class="notif-tag notif-tag-feedback">Feedback</div>
         <div class="notif-body">
-          <div class="notif-title">${esc(f.branch_name)} &mdash; ${formatDisplayDate(f.entry_date)}${byLine}</div>
-          <div class="notif-detail" style="color:#374151">${esc(f.feedback_text)}</div>
+          <div class="notif-title">${esc(f.branch_name)}, ${formatDisplayDate(f.entry_date)}${byLine}</div>
+          <div class="notif-detail">${esc(f.feedback_text)}</div>
         </div>
         <div class="notif-right">
           <div class="notif-time">${timeAgo(f.created_at)}</div>
-          <button class="notif-dismiss" onclick="markFeedbackRead('${f.id}')" title="Dismiss">✕</button>
+          <button type="button" class="icon-btn" onclick="markFeedbackRead('${f.id}')" title="Dismiss" aria-label="Dismiss"><svg class="icon" aria-hidden="true"><use href="#i-x"/></svg></button>
         </div>
       </div>`;
   });
@@ -2051,23 +2051,23 @@ async function loadAdminBranches() {
 
   const list = document.getElementById('admin-branches-list');
   if (!branches?.length) {
-    list.innerHTML = '<p style="padding:20px;color:#6b7280">No branches yet.</p>';
+    list.innerHTML = '<p class="empty-line">No branches yet.</p>';
     return;
   }
 
-  list.innerHTML = branches.map(b => `
-    <div class="admin-branch-row">
-      <div style="flex:1;min-width:0">
-        <div class="admin-branch-name">${esc(b.name)}</div>
-        <div class="admin-branch-pin">${b.state ? esc(b.state) + ' · ' : ''}PIN: ${esc(b.pin)}</div>
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;flex-shrink:0">
-        <button class="icon-text-btn branch-gear-btn" title="Edit branch" onclick="editBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}','${esc(b.pin)}','${esc((b.state||'').replace(/'/g, "\\'"))}')"><svg class="icon"><use href="#i-settings"/></svg></button>
-        <button class="link-btn" data-area="branch" onclick="viewBranchAsAdmin('${b.id}')" style="color:#C4922A">View →</button>
-        <button class="danger-btn" onclick="deleteBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}')"><svg class="icon"><use href="#i-trash"/></svg></button>
-      </div>
-    </div>
-  `).join('');
+  list.innerHTML = `<table class="data-table is-stack">
+    <thead><tr><th scope="col">Branch</th><th scope="col">State</th><th scope="col">PIN</th><th scope="col"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>${branches.map(b => `
+    <tr>
+      <td class="is-strong">${esc(b.name)}</td>
+      <td class="is-quiet">${b.state ? esc(b.state) : 'Not set'}</td>
+      <td class="branch-pin">${esc(b.pin)}</td>
+      <td><div class="row-actions">
+        <button type="button" class="link-btn" data-area="branch" onclick="viewBranchAsAdmin('${b.id}')">View</button>
+        <button type="button" class="icon-btn" title="Edit branch" aria-label="Edit ${esc(b.name)}" onclick="editBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}','${esc(b.pin)}','${esc((b.state||'').replace(/'/g, "\\'"))}')"><svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg></button>
+        <button type="button" class="icon-btn is-danger" title="Delete branch" aria-label="Delete ${esc(b.name)}" onclick="deleteBranch('${b.id}','${esc((b.name||'').replace(/'/g, "\\'"))}')"><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg></button>
+      </div></td>
+    </tr>`).join('')}</tbody></table>`;
   markOffAreas(list);
 }
 
@@ -2204,7 +2204,7 @@ async function refreshAdminKPIs() {
     case 'custom':
       from = ovState.from; to = ovState.to;
       if (!from || !to || from > to) {
-        grid.innerHTML = `<p style="grid-column:1/-1;padding:16px;color:#9ca3af;font-size:13px">Set a valid date range above</p>`;
+        grid.innerHTML = `<p class="empty-line" style="grid-column:1/-1">Set a valid date range above</p>`;
         return;
       }
       label = 'Custom Range';
@@ -2213,7 +2213,7 @@ async function refreshAdminKPIs() {
 
   // Update range display
   const fmt = d => { const [y,m,day] = d.split('-').map(Number); return new Date(y,m-1,day).toLocaleDateString('en-IN',{day:'numeric',month:'short'}); };
-  document.getElementById('ov-range-display').textContent = from === to ? fmt(from) : fmt(from) + ' → ' + fmt(to);
+  document.getElementById('ov-range-display').textContent = from === to ? fmt(from) : fmt(from) + ' to ' + fmt(to);
 
   // Build query
   const isAll = ovState.selectedBranches.includes('all') || !ovState.selectedBranches.length;
@@ -2244,7 +2244,7 @@ async function refreshAdminKPIs() {
     </div>
     <div class="admin-kpi-card">
       <div class="admin-kpi-label">Cash</div>
-      <div class="admin-kpi-value" style="color:#43a047">${formatCurrency(cash)}</div>
+      <div class="admin-kpi-value">${formatCurrency(cash)}</div>
       <div class="admin-kpi-sub">${((total > 0 ? cash/total : 0)*100).toFixed(0)}% of total</div>
     </div>
     <div class="admin-kpi-card">
@@ -2270,12 +2270,12 @@ async function loadAutomations() {
   const { data, error } = await db.from('cashup_automations').select('*').order('created_at');
   if (error) { list.innerHTML = '<div class="automations-empty">Error loading automations</div>'; return; }
   if (!data || !data.length) {
-    list.innerHTML = '<div class="automations-empty">No automations yet — click + Add to create one</div>';
+    list.innerHTML = '<div class="automations-empty">No automations yet. Click Add to create one.</div>';
     return;
   }
   list.innerHTML = data.map(a => {
-    const triggerLabel = a.trigger_type === 'weekly' ? `Every Sunday · ${a.trigger_mode === 'on_submit' ? 'on submit' : 'scheduled 11 pm'}`
-      : a.trigger_type === 'monthly' ? `Every last day · ${a.trigger_mode === 'on_submit' ? 'on submit' : 'scheduled 11 pm'}`
+    const triggerLabel = a.trigger_type === 'weekly' ? `Every Sunday, ${a.trigger_mode === 'on_submit' ? 'on submit' : 'scheduled 11 pm'}`
+      : a.trigger_type === 'monthly' ? `Every last day, ${a.trigger_mode === 'on_submit' ? 'on submit' : 'scheduled 11 pm'}`
       : `One-time: ${a.trigger_date || ''}`;
     const sections = (a.report_sections || []).map(s => ({
       daily_summary: 'Daily Summary', total_sale: 'Total Sales', all_transactions: 'All Transactions',
@@ -2287,19 +2287,18 @@ async function loadAutomations() {
       ? `Last sent ${new Date(a.last_sent_at).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}`
       : 'Never sent';
     const actionBadge = a.action_type === 'webhook'
-      ? `<span style="display:inline-block;background:#ede9fe;color:#6d28d9;font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;margin-left:4px">WEBHOOK</span>`
-      : `<span style="display:inline-block;background:#dbeafe;color:#1d4ed8;font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;margin-left:4px">EMAIL</span>`;
-    return `<div class="automation-row">
-      <button class="auto-toggle ${a.is_active ? 'on' : ''}" title="${a.is_active ? 'Active' : 'Paused'}" onclick="toggleAutomation('${a.id}', ${!a.is_active})"></button>
-      <div class="automation-info">
-        <div class="automation-name">${a.name}${actionBadge}</div>
-        <div class="automation-meta">${triggerLabel} · ${branchesLabel}</div>
-        <div class="automation-meta" style="color:#9ca3af">${sections}</div>
-        <div class="automation-meta" style="color:#9ca3af">${lastSent}</div>
+      ? ' <span class="tag is-violet">Webhook</span>'
+      : ' <span class="tag is-info">Email</span>';
+    return `<div class="item-row automation-row">
+      <button type="button" class="auto-toggle ${a.is_active ? 'on' : ''}" role="switch" aria-checked="${!!a.is_active}" aria-label="${esc(a.name)}: ${a.is_active ? 'Active' : 'Paused'}" title="${a.is_active ? 'Active' : 'Paused'}" onclick="toggleAutomation('${a.id}', ${!a.is_active})"></button>
+      <div class="item-main">
+        <div class="item-name">${esc(a.name)}${actionBadge}</div>
+        <div class="item-meta">${triggerLabel}<br>${esc(branchesLabel)}</div>
+        <div class="item-meta">${esc(sections)}<br>${lastSent}</div>
       </div>
       <div class="automation-actions">
-        <button class="auto-icon-btn" title="Edit" onclick="showAutomationModal('${a.id}')"><svg class="icon"><use href="#i-edit"/></svg></button>
-        <button class="auto-icon-btn delete" title="Delete" onclick="deleteAutomation('${a.id}', '${a.name.replace(/'/g, "\\'")}')"><svg class="icon"><use href="#i-trash"/></svg></button>
+        <button type="button" class="icon-btn" title="Edit" aria-label="Edit ${esc(a.name)}" onclick="showAutomationModal('${a.id}')"><svg class="icon" aria-hidden="true"><use href="#i-edit"/></svg></button>
+        <button type="button" class="icon-btn is-danger" title="Delete" aria-label="Delete ${esc(a.name)}" onclick="deleteAutomation('${a.id}', '${a.name.replace(/'/g, "\\'")}')"><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg></button>
       </div>
     </div>`;
   }).join('');
@@ -2633,7 +2632,7 @@ async function openDashboard() {
   // Show loading placeholder while status loads (prevents "Not Started" flash)
   const statusCard = document.getElementById('cashup-status-card');
   if (statusCard) {
-    statusCard.innerHTML = `<div class="status-info"><div class="status-dot" style="background:#d1d5db"></div><div><div class="status-label" style="color:#9ca3af">Loading…</div></div></div>`;
+    statusCard.innerHTML = `<div class="status-info"><div class="status-dot none"></div><div><div class="status-label is-quiet">Loading…</div></div></div>`;
   }
 
   await loadTodayStatus(branch.id, date);
@@ -2690,9 +2689,9 @@ async function loadTodayStatus(branchId, date) {
   if (isLocked) {
     statusCard.innerHTML = `
       <div class="status-info">
-        <div class="status-dot" style="background:#d1d5db"></div>
+        <div class="status-dot none"></div>
         <div>
-          <div class="status-label" style="color:#9ca3af">Restricted</div>
+          <div class="status-label is-quiet">Restricted</div>
           <div class="status-sub">Records older than 7 days are not accessible</div>
         </div>
       </div>
@@ -3099,7 +3098,7 @@ function pickStaff(name) {
 
 function showStaffInput(addTrigger) {
   const row = addTrigger.parentElement;
-  row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:8px;border-top:1px solid #f3f4f6';
+  row.style.cssText = 'display:flex;align-items:center;gap:var(--space-xs);padding:var(--space-xs);border-top:1px solid var(--color-rule)';
   row.innerHTML = `
     <input class="staff-add-input" type="text" placeholder="Name...">
     <button class="staff-add-confirm" onclick="confirmAddStaff(this)" title="Add staff">✓</button>`;
@@ -3634,6 +3633,15 @@ function ptBadge(type) {
   return `<span class="rpt-badge ${cls}">${esc(label)}</span>`;
 }
 
+function tokenColor(name) {
+  const ctx = (tokenColor.ctx ||= document.createElement('canvas').getContext('2d', { willReadFrequently: true }));
+  ctx.clearRect(0, 0, 1, 1);
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || 'gray';
+  ctx.fillRect(0, 0, 1, 1);
+  const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
 function queueChart(id, type, data, options) {
   _pendingCharts.push({ id, type, data, options });
 }
@@ -3654,7 +3662,7 @@ async function runReport() {
   const showStaff = true;
 
   const output = document.getElementById('reports-output');
-  output.innerHTML = '<div style="text-align:center;padding:48px 20px;color:#6b7280"><div style="font-size:28px;margin-bottom:12px">⏳</div>Loading report…</div>';
+  output.innerHTML = '<div class="loading-wrap"><div class="spinner"></div><span class="is-quiet">Loading report…</span></div>';
 
   try {
     let eQ = db.from('cashup_entries').select('*').gte('entry_date', from).lte('entry_date', to).order('entry_date').order('sort_order');
@@ -3714,15 +3722,15 @@ async function runReport() {
       queueChart(chartId, 'bar', {
         labels: dates.map(fmtDate),
         datasets: [
-          { label: 'Cash',     data: dailyCash,    backgroundColor: '#10b981', borderRadius: 4, stack: 'a' },
-          { label: 'Non-Cash', data: dailyNonCash, backgroundColor: '#C4922A', borderRadius: 4, stack: 'a' },
-          { type: 'line', label: 'Total', data: dailyTotal, borderColor: '#374151', backgroundColor: 'transparent',
+          { label: 'Cash',     data: dailyCash,    backgroundColor: tokenColor('--color-success'), borderRadius: 4, stack: 'a' },
+          { label: 'Non-Cash', data: dailyNonCash, backgroundColor: tokenColor('--color-gold'), borderRadius: 4, stack: 'a' },
+          { type: 'line', label: 'Total', data: dailyTotal, borderColor: tokenColor('--color-ink-2'), backgroundColor: 'transparent',
             tension: 0.3, pointRadius: 3, borderWidth: 2, order: 0 }
         ]
       }, {
         plugins: { legend: { position: 'bottom', labels: { font: { size: 11 }, boxWidth: 12 } } },
         scales: {
-          y: { stacked: true, ticks: { callback: v => '₹' + (v >= 1000 ? (v/1000).toFixed(0) + 'k' : v), font: { size: 11 } }, grid: { color: '#f3f4f6' } },
+          y: { stacked: true, ticks: { callback: v => '₹' + (v >= 1000 ? (v/1000).toFixed(0) + 'k' : v), font: { size: 11 } }, grid: { color: tokenColor('--color-rule') } },
           x: { ticks: { font: { size: 11 } }, grid: { display: false } }
         },
         responsive: true, maintainAspectRatio: true
@@ -3749,7 +3757,7 @@ async function runReport() {
     renderAllCharts();
 
   } catch (err) {
-    output.innerHTML = `<div class="reports-empty-state"><div style="color:#ef4444;font-size:14px">Error: ${esc(err.message)}</div></div>`;
+    output.innerHTML = `<p class="empty-line is-error">Error: ${esc(err.message)}</p>`;
   }
 }
 
@@ -3793,7 +3801,7 @@ function buildTransactionsSection(entries, showBranch, branchMap, showStaff, pay
         <div class="rpt-section-title">All Transactions</div>
         <div class="rpt-section-kpi">${formatCurrency(total)}</div>
       </div>
-      <button class="rpt-tx-export-btn" onclick="exportTransactionsToDoc()"><svg class="icon"><use href="#i-download"/></svg> Export .doc</button>
+      <button class="rpt-tx-export-btn" onclick="exportTransactionsToDoc()"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg> Export .doc</button>
     </div>
     ${tableContent}
   </div>`;
@@ -3882,19 +3890,19 @@ function buildTopBranchesSection(entries, branchMap) {
   const ranked = Object.entries(totals).sort((a, b) => b[1] - a[1]);
   if (ranked.length < 2) return ''; // only show if more than 1 branch
   const grandTotal = ranked.reduce((s, [, v]) => s + v, 0);
-  const medals = ['🥇', '🥈', '🥉'];
+  
   const rows = ranked.map(([name, total], i) => {
     const pct = grandTotal > 0 ? ((total / grandTotal) * 100).toFixed(1) : 0;
     return `<tr>
-      <td style="width:32px;font-size:18px;text-align:center">${medals[i] || (i + 1)}</td>
+      <td class="rpt-rank">${i + 1}</td>
       <td style="font-weight:600">${esc(name)}</td>
       <td class="amt">${formatCurrency(total)}</td>
       <td style="width:140px">
-        <div style="background:#f3f4f6;border-radius:99px;height:8px;overflow:hidden">
-          <div style="background:var(--primary);height:100%;width:${pct}%;border-radius:99px"></div>
+        <div class="rpt-bar">
+          <div class="rpt-bar-fill" style="width:${pct}%"></div>
         </div>
       </td>
-      <td style="width:48px;text-align:right;font-size:12px;color:#6b7280">${pct}%</td>
+      <td class="rpt-pct">${pct}%</td>
     </tr>`;
   }).join('');
   const table = `<div class="rpt-table-wrap"><table class="rpt-table">
@@ -3916,19 +3924,19 @@ function buildTopStaffSection(entries) {
   const ranked = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 5);
   if (!ranked.length) return '';
   const top = ranked[0][1];
-  const medals = ['🥇', '🥈', '🥉'];
+  
   const rows = ranked.map(([name, total], i) => {
     const pct = top > 0 ? ((total / top) * 100).toFixed(1) : 0;
     return `<tr>
-      <td style="width:32px;font-size:18px;text-align:center">${medals[i] || (i + 1)}</td>
+      <td class="rpt-rank">${i + 1}</td>
       <td style="font-weight:600">${esc(name)}</td>
       <td class="amt">${formatCurrency(total)}</td>
       <td style="width:140px">
-        <div style="background:#f3f4f6;border-radius:99px;height:8px;overflow:hidden">
-          <div style="background:#2563eb;height:100%;width:${pct}%;border-radius:99px"></div>
+        <div class="rpt-bar">
+          <div class="rpt-bar-fill is-info" style="width:${pct}%"></div>
         </div>
       </td>
-      <td style="width:48px;text-align:right;font-size:12px;color:#6b7280">${pct}%</td>
+      <td class="rpt-pct">${pct}%</td>
     </tr>`;
   }).join('');
   const table = `<div class="rpt-table-wrap"><table class="rpt-table">
@@ -3950,19 +3958,19 @@ function buildTopClientsSection(entries) {
   const ranked = Object.entries(totals).sort((a, b) => b[1] - a[1]).slice(0, 5);
   if (!ranked.length) return '';
   const top = ranked[0][1];
-  const medals = ['🥇', '🥈', '🥉'];
+  
   const rows = ranked.map(([name, total], i) => {
     const pct = top > 0 ? ((total / top) * 100).toFixed(1) : 0;
     return `<tr>
-      <td style="width:32px;font-size:18px;text-align:center">${medals[i] || (i + 1)}</td>
+      <td class="rpt-rank">${i + 1}</td>
       <td style="font-weight:600">${esc(name)}</td>
       <td class="amt">${formatCurrency(total)}</td>
       <td style="width:140px">
-        <div style="background:#f3f4f6;border-radius:99px;height:8px;overflow:hidden">
-          <div style="background:#059669;height:100%;width:${pct}%;border-radius:99px"></div>
+        <div class="rpt-bar">
+          <div class="rpt-bar-fill is-success" style="width:${pct}%"></div>
         </div>
       </td>
-      <td style="width:48px;text-align:right;font-size:12px;color:#6b7280">${pct}%</td>
+      <td class="rpt-pct">${pct}%</td>
     </tr>`;
   }).join('');
   const table = `<div class="rpt-table-wrap"><table class="rpt-table">
@@ -3994,7 +4002,7 @@ function buildExpensesSection(expenses, showBranch, branchMap) {
         <div class="rpt-section-title">Expenses</div>
         ${expenses.length ? `<div class="rpt-section-kpi">${formatCurrency(total)}</div>` : ''}
       </div>
-      ${expenses.length ? `<button class="rpt-tx-export-btn" onclick="exportExpensesToDoc()"><svg class="icon"><use href="#i-download"/></svg> Export .doc</button>` : ''}
+      ${expenses.length ? `<button class="rpt-tx-export-btn" onclick="exportExpensesToDoc()"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg> Export .doc</button>` : ''}
     </div>
     ${tableContent}
   </div>`;
@@ -4256,14 +4264,6 @@ function bindGlobalEvents() {
   // Clear the "Product/Service required" highlight as soon as staff start typing
   document.addEventListener('input', (e) => {
     if (e.target?.classList?.contains('e-product')) e.target.classList.remove('field-error');
-  });
-
-  // Collapsible Settings sections — toggle on header click (ignore clicks on controls)
-  document.querySelectorAll('#admin-tab-settings .settings-head').forEach(head => {
-    head.addEventListener('click', (e) => {
-      if (e.target.closest('button, input, select, a')) return;
-      head.closest('.settings-card')?.classList.toggle('collapsed');
-    });
   });
 
   // Payment Modes (admin settings)
